@@ -184,17 +184,95 @@ that is obviously correct, and they are required to agree.
 one, HP never goes below zero, a survival curve is monotone non-decreasing -
 and shrinks any failure to a minimal case.
 
+## Ingestion: the agent is a compiler, not a runtime
+
+Pasting in a stat block is the point where a human would otherwise spend twenty
+minutes typing, so that is the job the agent takes. It runs in two phases.
+
+**Resolve.** Every named ability on the block is matched against the registry
+of abilities that already exist. Most of a monster is already known - it has a
+multiattack, it has a claw, it makes a Dexterity save for half.
+
+**Synthesise.** Anything unmatched, the agent writes: a new definition in the
+ability DSL, from the stat block's own text.
+
+### Why this has to be a compile step
+
+Reproducibility. The entire project rests on a seeded simulation, and an
+ability re-derived by a language model on every run is not a fixed rule - two
+runs of the same encounter would silently be two different encounters, and a
+difficulty number that drifts because the rules drifted is worse than no number
+at all.
+
+So synthesis happens **once per unknown ability, ever**. The result is written
+to disk, content-hashed, and referenced by hash from the scenario. Re-running
+an encounter re-reads a file; it does not re-ask a model. The agent is part of
+the build, not part of the loop.
+
+That also preserves the property the rest of the design leans on: **the model
+never does arithmetic.** It emits a schema, the schema is validated, and the
+simulator does the maths. And because abilities are data in a constrained DSL
+rather than code, a synthesised ability cannot express anything the DSL cannot
+- the DSL *is* the sandbox. A wrong ability is then wrong in a bounded,
+inspectable way rather than an arbitrary one, which is the difference between a
+tool that can be trusted with generated content and one that cannot.
+
+### The gate
+
+Nothing enters the registry without passing:
+
+- schema validation, including that every referenced condition, damage type and
+  resource actually exists;
+- bounds - dice pools, resource costs and recharge rates inside ranges real 5e
+  content occupies, so a misread "7d6" as "7d60" is caught rather than
+  simulated;
+- a smoke rollout that terminates, which catches an ability whose effect can
+  retrigger itself;
+- the same property tests the hand-written abilities face.
+
+### Matching, and refusing to guess
+
+Names are normalised and matched exactly first. A near-match is reported rather
+than accepted, with the difference shown:
+
+```
+Fire Breath - registry has 7d6 fire, DC 15; this block says 4d6, DC 13.
+  [use registry] [treat as a variant] [overwrite]
+```
+
+Stat blocks reuse ability names across creatures with completely different
+numbers, so silently reusing a same-named entry is the single easiest way for
+this tool to produce a confident wrong answer.
+
+### Provenance is reported, not hidden
+
+Every ability carries where it came from - `srd`, `authored`, or `synthesised`
+- and synthesised ones stay `reviewed: false` until a human signs off. Every
+run reports its coverage:
+
+```
+11 abilities: 8 from the registry, 1 variant, 2 synthesised (unreviewed)
+```
+
+That figure qualifies the difficulty profile. A result resting on two guessed
+abilities deserves less confidence than one resting entirely on reviewed data,
+and burying that distinction would be the most dishonest thing this tool could
+do. The point of the whole project is a number a DM can trust; a number whose
+provenance is concealed is exactly the thing it is meant to replace.
+
 ## Build order
 
 1. **Dice and probability.** Exact PMF by convolution, sampling, and the d20
    outcome distribution under advantage and disadvantage. *(first slice)*
 2. **Attack resolution, and the exact/sampled agreement test.** *(first slice)*
-3. **Event pipeline and the ability DSL.** The spine everything hangs on.
+3. **Event pipeline, the ability DSL, and the registry.** The spine everything
+   hangs on. The registry ships first as hand-written SRD content, which is
+   also how the DSL earns confidence before anything generates into it.
 4. **Evaluator.** Fixed policies, many rollouts, report the table above.
    Useful and testable before any search exists.
 5. **Search.** MCTS as a drop-in replacement for one policy slot.
 6. **Ablation.** Re-run with each ability disabled, diff win probability.
-7. **Ingestion.** An LLM turns a pasted stat block into schema-valid JSON. It
-   never does arithmetic; it fills in a schema, which is validated before
-   anything is rolled. Last, because it is the least risky part and useless
-   without something to feed.
+7. **Ingestion.** Resolve a pasted stat block against the registry, synthesise
+   what is missing, gate it, and report coverage. Last, because it is the least
+   risky part, useless without something to feed, and because the gate can only
+   be written once the properties it enforces exist.

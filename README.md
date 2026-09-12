@@ -40,10 +40,19 @@ Early. What exists is the probability layer everything else sits on.
 | `combat` | attack resolution, both exact and sampled: crits, advantage, resistance |
 | `exact` | closed-form kill curves and expected attacks, by dynamic programming |
 | event pipeline | not started |
-| ability DSL | not started |
+| ability DSL + registry | not started |
 | policies | not started |
 | MCTS | not started |
 | stat block ingestion | not started |
+
+Ingestion is designed so the agent is a **compile step, not a runtime one**: it
+checks each ability against the registry, writes only what is genuinely
+missing, and the result is hashed and reused. A seeded simulation whose rules
+get re-derived on every run is not reproducible, and reproducibility is the
+whole premise. The model emits data in a constrained DSL and never does
+arithmetic — so the DSL is the sandbox, and a wrong ability is wrong in a
+bounded way. Anything synthesised stays marked unreviewed, and every run
+reports how much of it was guessed.
 
 There is no encounter simulator yet, and nothing here plays D&D. What there is
 is a probability engine that is checked rather than trusted.
