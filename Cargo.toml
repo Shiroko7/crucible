@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/crucible-core"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Shiroko7/crucible"
+
+[profile.release]
+# The workload is millions of rollouts in a tight loop, so trade compile time
+# for a single well-optimised codegen unit and cross-crate inlining.
+lto = "fat"
+codegen-units = 1
