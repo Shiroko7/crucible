@@ -1,0 +1,12 @@
+[package]
+name = "crucible-core"
+version = "0.1.0"
+description = "Exact and sampled probability for 5e combat resolution."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
