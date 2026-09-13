@@ -1,0 +1,26 @@
+# Monster configuration for Ogre (SRD 5.2, CR 2).
+
+[monster]
+name = "Ogre"
+cr = 2
+size = "Large"
+creature_type = "Giant"
+ac = 11
+hp = 68
+initiative = -1
+
+[monster.saves]
+str = 4
+dex = -1
+con = 3
+int = -3
+wis = -2
+cha = -2
+
+[[monster.actions]]
+name = "Greatclub"
+effect = "strikes 1 | hit +6 | 2d8+4 bludgeoning"
+
+[[monster.actions]]
+name = "Javelin"
+effect = "strikes 1 | hit +6 | 2d6+4 piercing"

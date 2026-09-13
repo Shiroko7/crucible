@@ -11,8 +11,8 @@
 //! resistance on the multiplier - none of which requires changing the
 //! resolution order.
 
-use crate::dice::Pmf;
-use crate::rng::Rng;
+use crate::prob::dice::Pmf;
+use crate::prob::rng::Rng;
 
 /// How the d20 is rolled. Advantage and disadvantage are distributions over
 /// the *final* value, so "natural 20" means the kept die showed 20.
@@ -54,13 +54,14 @@ impl RollMode {
     }
 }
 
-/// Resistance halves and rounds down; vulnerability doubles.
+/// Resistance halves and rounds down; vulnerability doubles; immunity zeroes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Reduction {
     #[default]
     Normal,
     Resistant,
     Vulnerable,
+    Immune,
 }
 
 impl Reduction {
@@ -72,6 +73,7 @@ impl Reduction {
             // down" means for the non-negative values this ever sees.
             Reduction::Resistant => damage / 2,
             Reduction::Vulnerable => damage * 2,
+            Reduction::Immune => 0,
         }
     }
 }
@@ -135,14 +137,26 @@ pub struct Outcomes {
     pub crit: f64,
 }
 
+/// How an attack roll landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Landed {
+    Miss,
+    Hit,
+    Crit,
+}
+
 /// Exact probabilities of miss, ordinary hit and critical hit.
-pub fn outcomes(attack: &Attack, defense: &Defense) -> Outcomes {
-    let dist = attack.mode.distribution();
+///
+/// Taken apart from [`Attack`] because a strike with several damage
+/// components - a dragon's claw dealing slashing *and* fire - resolves against
+/// exactly these rules and must not own a second copy of them.
+pub fn hit_outcomes(to_hit: i32, mode: RollMode, ac: i32) -> Outcomes {
+    let dist = mode.distribution();
     let mut hit = 0.0;
     for (i, &p) in dist.iter().enumerate() {
         let roll = i as i32 + 1;
         // 1 and 20 are handled outside the loop; they ignore the arithmetic.
-        if roll > 1 && roll < 20 && roll + attack.to_hit >= defense.ac {
+        if roll > 1 && roll < 20 && roll + to_hit >= ac {
             hit += p;
         }
     }
@@ -152,6 +166,23 @@ pub fn outcomes(attack: &Attack, defense: &Defense) -> Outcomes {
         hit,
         crit,
     }
+}
+
+/// The sampled counterpart of [`hit_outcomes`].
+pub fn sample_hit(rng: &mut Rng, to_hit: i32, mode: RollMode, ac: i32) -> Landed {
+    let roll = mode.roll(rng);
+    if roll == 20 {
+        Landed::Crit
+    } else if roll != 1 && roll + to_hit >= ac {
+        Landed::Hit
+    } else {
+        Landed::Miss
+    }
+}
+
+/// Exact probabilities of miss, ordinary hit and critical hit.
+pub fn outcomes(attack: &Attack, defense: &Defense) -> Outcomes {
+    hit_outcomes(attack.to_hit, attack.mode, defense.ac)
 }
 
 /// Exact distribution of damage dealt by a single attack, zero included.
@@ -179,18 +210,10 @@ pub fn damage_pmf(attack: &Attack, defense: &Defense) -> Pmf {
 
 /// One sampled attack. Must be distributed according to [`damage_pmf`].
 pub fn sample_damage(rng: &mut Rng, attack: &Attack, defense: &Defense) -> i32 {
-    let roll = attack.mode.roll(rng);
-
-    let crit = roll == 20;
-    let hit = crit || (roll != 1 && roll + attack.to_hit >= defense.ac);
-    if !hit {
-        return 0;
-    }
-
-    let dice = if crit {
-        attack.dice_count * 2
-    } else {
-        attack.dice_count
+    let dice = match sample_hit(rng, attack.to_hit, attack.mode, defense.ac) {
+        Landed::Miss => return 0,
+        Landed::Hit => attack.dice_count,
+        Landed::Crit => attack.dice_count * 2,
     };
     let raw: i32 = (0..dice).map(|_| rng.die(attack.dice_sides)).sum();
     defense.reduction.apply((raw + attack.damage_bonus).max(0))
@@ -296,6 +319,7 @@ mod tests {
         assert_eq!(Reduction::Resistant.apply(8), 4);
         assert_eq!(Reduction::Resistant.apply(1), 0);
         assert_eq!(Reduction::Vulnerable.apply(7), 14);
+        assert_eq!(Reduction::Immune.apply(7), 0);
     }
 
     /// A crit doubles the dice, not the modifier: 2d6+3 crits to 4d6+3, so the

@@ -1,0 +1,54 @@
+# Monster configuration for Adult Red Dragon (SRD 5.2, CR 17).
+#
+# Formatted data configuration defining the monster rather than hardcoding it in engine code.
+# The ingestion pipeline matches known actions, saves, recharge mechanics, and legendary actions.
+
+[monster]
+name = "Adult Red Dragon"
+cr = 17
+size = "Huge"
+creature_type = "Dragon"
+ac = 19
+hp = 256
+initiative = 12
+immune = ["fire"]
+legendary_uses = 3
+traits = [
+    "legendary resistance 3",
+]
+
+[monster.saves]
+str = 8
+dex = 6
+con = 7
+int = 3
+wis = 7
+cha = 6
+
+[[monster.actions]]
+name = "Fire Breath"
+effect = "recharge 5 | save dex dc 21 | 17d6 fire | half on success"
+
+[[monster.actions]]
+name = "Multiattack (3 Rends)"
+effect = "strikes 3 | hit +14 | 1d10+8 slashing, 2d4 fire"
+
+[[monster.actions]]
+name = "Fireball"
+effect = "uses 1 | save dex dc 20 | 8d6 fire | half on success"
+
+[[monster.actions]]
+name = "Scorching Ray"
+effect = "strikes 3 | hit +12 | 2d6 fire"
+
+[[monster.legendary]]
+name = "Commanding Presence"
+effect = "recharge 1 | save wis dc 20 | 0 force | on fail prone until victim"
+
+[[monster.legendary]]
+name = "Fiery Rays"
+effect = "recharge 1 | strikes 3 | hit +12 | 2d6 fire"
+
+[[monster.legendary]]
+name = "Pounce (1 Rend)"
+effect = "recharge 1 | strikes 1 | hit +14 | 1d10+8 slashing, 2d4 fire"

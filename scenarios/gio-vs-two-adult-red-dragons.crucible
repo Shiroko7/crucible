@@ -1,0 +1,8 @@
+# Gio against two Adult Red Dragons
+
+team: a
+source: content/characters/gio.toml
+
+team: b
+source: content/monsters/adult-red-dragon.toml
+count: 2

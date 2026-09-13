@@ -1,1 +1,4 @@
 /target
+
+# Non-SRD stat blocks: loaded from disk, never committed.
+/scenarios/local/

@@ -1,0 +1,10 @@
+# Gio, a level 8 tortle monk, alone against an adult red dragon.
+#
+# Combatants are loaded from structured configurations in content/
+# rather than hardcoding stat blocks in the scenario file.
+
+team: a
+source: content/characters/gio.toml
+
+team: b
+source: content/monsters/adult-red-dragon.toml

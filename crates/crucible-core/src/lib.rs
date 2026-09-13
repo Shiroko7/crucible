@@ -6,30 +6,44 @@
 //! to check against itself: a rollout engine with a biased d20 or a mishandled
 //! critical hit produces perfectly plausible numbers.
 //!
-//! So every rule is implemented twice.
-//!
-//! - [`dice`] and [`exact`] compute distributions in closed form, by
-//!   convolution and dynamic programming. Correct by construction, and far too
-//!   slow to scale past a couple of combatants.
-//! - [`rng`] and [`combat`] sample. Fast enough for millions of rollouts, and
-//!   the path everything downstream will actually use.
-//!
-//! `tests/exact_vs_sampled.rs` requires them to agree, to a tolerance derived
-//! from the standard error rather than from whatever number happened to pass.
-//! It is the same idea as a chess engine's perft suite: the cheap path proves
-//! the fast path before any of the interesting machinery is built on top.
-//!
-//! See `DESIGN.md` for where this is going.
+//! Subsystems:
+//! - [`prob`]: Probability mass functions, dice convolution, exact curves, and deterministic PRNG.
+//! - [`rules`]: 5e combat rules, damage reduction, attack resolution, and combatant models.
+//! - [`sim`]: Simulation loop, AI policies, MCTS solver, and statistical CVaR analysis.
+//! - [`dsl`]: Data-driven configurations, Monad Plugin Architecture, PC/Monster abstractions, and scenario parsing.
 
-pub mod combat;
-pub mod dice;
-pub mod exact;
-pub mod rng;
+pub mod dsl;
+pub mod prob;
+pub mod rules;
+pub mod sim;
 
+// Subsystem aliases for backward-compatibility
+pub use dsl::scenario;
+pub use prob::dice;
+pub use prob::exact;
+pub use prob::rng;
+pub use rules::combat;
+pub use rules::creature;
+pub use sim::analysis;
+pub use sim::duel;
+
+// Top-level re-exports (backward compatibility)
+pub use analysis::{evaluate, sustained_rounds_to_kill, Summary};
 pub use combat::{
-    damage_pmf, outcomes, sample_attacks_to_kill, sample_damage, Attack, Defense, Outcomes,
-    Reduction, RollMode,
+    damage_pmf, hit_outcomes, outcomes, sample_attacks_to_kill, sample_damage, sample_hit, Attack,
+    Defense, Landed, Outcomes, Reduction, RollMode,
+};
+pub use creature::{
+    Ability, Condition, Cost, Creature, DamageKind, DamageRoll, Duration, Effect, Move, Resource,
+    Rider, SaveEffect, Strike, Uses,
 };
 pub use dice::Pmf;
+pub use duel::{run, Outcome, Policy, Side};
 pub use exact::{expected_attacks_to_kill, kill_curve};
 pub use rng::Rng;
+
+// Monad Plugin and PC / Monster abstractions
+pub use dsl::{
+    load_creature_from_file, load_creature_from_str, CreatureBuilder, FeatureError, FeaturePlugin,
+    FeatureRegistry, FeatureResult, MonsterDefinition, PlayerCharacter,
+};

@@ -1,0 +1,55 @@
+# Character configuration for Gio, level 8 Tortle Monk (Way of the Ascendant Dragon).
+#
+# Formatted configuration defining the PC as data rather than hardcoded simulation logic.
+# All class features, traits, and actions map onto established domain features/plugins.
+
+[pc]
+name = "Gio"
+class = "Monk"
+subclass = "Way of the Ascendant Dragon"
+species = "Tortle"
+level = 8
+ac = 20
+hp = 69
+initiative = -1
+resist = ["fire"]
+equipment = [
+    "+2 Quarterstaff",
+    "+2 Dragonhide Belt",
+    "Cloak of Fire Resistance",
+]
+traits = [
+    "evasion dex",
+    "deflect 1d10+7 bludgeoning, piercing, slashing",
+]
+
+[pc.saves]
+str = 7
+dex = 2
+con = 3
+int = -1
+wis = 3
+cha = 1
+
+[pc.resources]
+focus = 8
+
+[[pc.actions]]
+name = "Staff x2"
+effect = "strikes 2 | hit +9 | 1d8+6 bludgeoning | on hit save con dc 16 stunned once per turn cost focus 1"
+
+[[pc.actions]]
+name = "Breath of the Dragon"
+effect = "uses 3 | save dex dc 16 | 2d8 cold | half on success && strikes 1 | hit +9 | 1d8+6 bludgeoning | on hit save con dc 16 stunned once per turn cost focus 1"
+
+[[pc.bonus]]
+name = "Flurry of Blows"
+effect = "cost focus 1 | strikes 2 | hit +7 | 1d8+4 force | on hit save con dc 16 stunned once per turn cost focus 1"
+
+[[pc.bonus]]
+name = "Patient Defense"
+effect = "cost focus 1 | stance dodging"
+
+[[pc.bonus]]
+name = "Bonus Unarmed Strike"
+effect = "strikes 1 | hit +7 | 1d8+4 force"

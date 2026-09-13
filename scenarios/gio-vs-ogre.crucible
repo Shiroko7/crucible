@@ -1,0 +1,9 @@
+# Gio against an ordinary ogre, as a control.
+#
+# Combatants are loaded from structured configurations in content/.
+
+team: a
+source: content/characters/gio.toml
+
+team: b
+source: content/monsters/ogre.toml

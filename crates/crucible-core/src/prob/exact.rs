@@ -9,7 +9,7 @@
 //!
 //! See `tests/exact_vs_sampled.rs` for the agreement test itself.
 
-use crate::dice::Pmf;
+use crate::prob::dice::Pmf;
 
 /// `out[k]` is the probability the target is down within `k` attacks.
 ///

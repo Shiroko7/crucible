@@ -1,0 +1,14 @@
+[package]
+name = "crucible-cli"
+version = "0.1.0"
+description = "Run a scenario, many times, and report what happened."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "crucible"
+path = "src/main.rs"
+
+[dependencies]
+crucible-core = { path = "../crucible-core" }
