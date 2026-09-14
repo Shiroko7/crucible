@@ -29,7 +29,9 @@ pub struct PlayerCharacter {
     #[serde(default)]
     pub saves: HashMap<String, i32>,
     #[serde(default)]
-    pub resources: HashMap<String, u32>,
+    pub resources: super::config::ResourcesConfig,
+    #[serde(default)]
+    pub spellcasting: Option<super::config::SpellcastingConfig>,
     #[serde(default)]
     pub resist: Vec<String>,
     #[serde(default)]
@@ -61,9 +63,12 @@ impl PlayerCharacter {
             builder.set_save(ability, bonus);
         }
 
-        // Apply resources
-        for (res_name, &max) in &self.resources {
-            builder.ensure_resource(res_name, max);
+        // Apply resources, including any spell slot pools
+        super::config::apply_resources(&mut builder, &self.resources)?;
+
+        // Apply the spellcasting profile (spell attack bonus / save DC)
+        if let Some(spellcasting) = &self.spellcasting {
+            builder.set_spellcasting(spellcasting.to_profile()?);
         }
 
         // Apply damage reductions

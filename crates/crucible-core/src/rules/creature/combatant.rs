@@ -5,7 +5,7 @@ use crate::rules::combat::Reduction;
 use super::action::Move;
 use super::damage::DamageKind;
 use super::rider::Rider;
-use super::types::{Ability, Resource};
+use super::types::{Ability, Resource, SpellCastingProfile, SpellSlots};
 
 /// One side of a fight.
 ///
@@ -27,6 +27,13 @@ pub struct Creature {
     pub saves: [i32; 6],
     pub reductions: Vec<(DamageKind, Reduction)>,
     pub resources: Vec<Resource>,
+    /// This creature's spell slot pools, 1st through 9th level. Zeroed out -
+    /// and therefore free to ignore - for anything that does not cast spells.
+    pub spell_slots: SpellSlots,
+    /// How this creature's spell attacks and save DCs are computed. `None`
+    /// for a non-caster; distinct from `resources` and from the physical
+    /// attack bonuses baked into its `actions`.
+    pub spellcasting: Option<SpellCastingProfile>,
     /// Always-on and reactive modifiers: Evasion, Legendary Resistance,
     /// Deflect Attacks.
     pub riders: Vec<Rider>,
@@ -50,6 +57,8 @@ impl Creature {
             saves: [0; 6],
             reductions: Vec::new(),
             resources: Vec::new(),
+            spell_slots: SpellSlots::default(),
+            spellcasting: None,
             riders: Vec::new(),
             actions: Vec::new(),
             bonus_actions: Vec::new(),
@@ -82,6 +91,26 @@ impl Creature {
         self.resources
             .iter()
             .position(|r| r.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Spend one spell slot of `level`. `false` and no change if none are left.
+    pub fn cast_spell(&mut self, level: u32) -> bool {
+        self.spell_slots.cast(level)
+    }
+
+    /// A long rest: every spell slot returns.
+    pub fn recover_spell_slots(&mut self) {
+        self.spell_slots.recover_all();
+    }
+
+    /// Spell attack modifier, for a creature that casts spells at all.
+    pub fn spell_attack_bonus(&self) -> Option<i32> {
+        self.spellcasting.map(|p| p.attack_bonus())
+    }
+
+    /// Spell save DC, for a creature that casts spells at all.
+    pub fn spell_save_dc(&self) -> Option<i32> {
+        self.spellcasting.map(|p| p.save_dc())
     }
 
     pub fn with_action(mut self, m: Move) -> Self {

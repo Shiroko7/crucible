@@ -10,7 +10,9 @@ pub use action::{Effect, Move, SaveEffect, Strike, Uses};
 pub use combatant::Creature;
 pub use damage::{DamageKind, DamageRoll};
 pub use rider::Rider;
-pub use types::{Ability, Condition, Cost, Duration, Resource};
+pub use types::{
+    Ability, Condition, Cost, Duration, Resource, SpellCastingProfile, SpellSlots, SPELL_LEVELS,
+};
 
 #[cfg(test)]
 mod tests {
@@ -172,6 +174,92 @@ mod tests {
             },
         ]);
         assert_eq!(mixed.stance(), Some(Condition::Dodging));
+    }
+
+    #[test]
+    fn spell_slots_deduct_on_cast_and_come_back_on_a_long_rest() {
+        let mut slots = SpellSlots::new();
+        slots.set_max(1, 4);
+        slots.set_max(3, 2);
+        // Untouched levels stay at zero, whether or not they were ever set.
+        assert_eq!(slots.available(2), 0);
+        assert_eq!(slots.max(2), 0);
+
+        assert!(slots.cast(1));
+        assert!(slots.cast(1));
+        assert_eq!(slots.available(1), 2);
+        assert_eq!(slots.max(1), 4, "casting never touches the maximum");
+
+        assert!(slots.cast(3));
+        assert!(slots.cast(3));
+        assert_eq!(slots.available(3), 0);
+        // Nothing left at 3rd: casting fails rather than going negative or
+        // borrowing from another level.
+        assert!(!slots.cast(3));
+        assert_eq!(slots.available(3), 0);
+
+        slots.recover_all();
+        assert_eq!(slots.available(1), 4);
+        assert_eq!(slots.available(3), 2);
+    }
+
+    #[test]
+    fn a_partial_recovery_stops_at_the_maximum() {
+        let mut slots = SpellSlots::new();
+        slots.set_max(2, 3);
+        slots.cast(2);
+        slots.cast(2);
+        assert_eq!(slots.available(2), 1);
+
+        // Recovering more than was spent still cannot exceed the max.
+        slots.recover(2, 10);
+        assert_eq!(slots.available(2), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "1-9")]
+    fn a_spell_slot_level_outside_1_to_9_panics() {
+        let mut slots = SpellSlots::new();
+        slots.set_max(10, 1);
+    }
+
+    #[test]
+    fn casting_a_spell_on_a_creature_spends_from_its_own_pool() {
+        let mut caster = Creature::new("caster", 15, 20);
+        caster.spell_slots.set_max(1, 2);
+
+        assert!(caster.cast_spell(1));
+        assert!(caster.cast_spell(1));
+        assert!(!caster.cast_spell(1), "the pool is empty");
+
+        caster.recover_spell_slots();
+        assert!(caster.cast_spell(1), "a rest refills it");
+    }
+
+    /// The formula is generic over the casting ability - Wisdom here, but
+    /// nothing about it hardcodes that choice.
+    #[test]
+    fn spell_attack_and_save_dc_follow_the_5e_formula() {
+        let profile = SpellCastingProfile::new(Ability::Wis, 3, 4);
+        assert_eq!(profile.attack_bonus(), 7);
+        assert_eq!(profile.save_dc(), 15);
+
+        // An item bonus is additive on top, and composable rather than baked
+        // into the ability or proficiency numbers.
+        let with_focus = profile.with_item_bonus(1);
+        assert_eq!(with_focus.attack_bonus(), 8);
+        assert_eq!(with_focus.save_dc(), 16);
+
+        // The formula does not care which ability it is keyed to.
+        let int_caster = SpellCastingProfile::new(Ability::Int, 2, 3);
+        assert_eq!(int_caster.attack_bonus(), 5);
+        assert_eq!(int_caster.save_dc(), 13);
+
+        let mut creature = Creature::new("wizard", 12, 30);
+        assert_eq!(creature.spell_attack_bonus(), None);
+        creature.spellcasting = Some(int_caster);
+        assert_eq!(creature.spell_attack_bonus(), Some(5));
+        assert_eq!(creature.spell_save_dc(), Some(13));
     }
 
     #[test]
