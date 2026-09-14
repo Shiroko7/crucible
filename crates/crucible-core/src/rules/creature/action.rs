@@ -537,6 +537,27 @@ pub enum Uses {
     Recharge(u32),
 }
 
+/// What kind of activity a move represents, beyond its damage/effect shape.
+///
+/// Almost every move needs nothing here - `Standard` covers plain attacks,
+/// stances and saves, and nothing reads this tag at all by default. The two
+/// other variants exist only so a plugin can recognise "this move is RAW an
+/// Action" without the engine needing a separate "Use an Object" or "Magic"
+/// action type of its own: `FastHandsPlugin` is the reader, and rejects
+/// anything tagged `Standard` rather than silently promoting it - see
+/// `crate::dsl::plugin::rogue`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MoveKind {
+    #[default]
+    Standard,
+    /// The Use an Object action - drinking a potion, retrieving a hidden
+    /// blade, activating a non-magical object.
+    ObjectUse,
+    /// Activating a magic item that would otherwise cost the Magic action -
+    /// a wand, a staff, most consumable magic items.
+    MagicItem,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Move {
     pub name: String,
@@ -560,6 +581,10 @@ pub struct Move {
     /// down. `false` for every ordinary move, which is why this defaults with
     /// the rest of [`Move::new`] rather than needing its own builder call.
     pub concentration: bool,
+    /// RAW-Action bookkeeping for plugins like Fast Hands; see [`MoveKind`].
+    /// Irrelevant to how the move actually resolves - only which list it
+    /// ends up in.
+    pub kind: MoveKind,
 }
 
 impl Move {
@@ -572,6 +597,7 @@ impl Move {
             riders: Vec::new(),
             effect,
             concentration: false,
+            kind: MoveKind::Standard,
         }
     }
 
@@ -599,6 +625,11 @@ impl Move {
 
     pub fn with_concentration(mut self) -> Self {
         self.concentration = true;
+        self
+    }
+
+    pub fn with_kind(mut self, kind: MoveKind) -> Self {
+        self.kind = kind;
         self
     }
 

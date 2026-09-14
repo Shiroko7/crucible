@@ -43,6 +43,13 @@ pub struct Creature {
     /// Legendary actions available each round, each move costing one. Real
     /// blocks have moves costing two or three; nothing here needs that yet.
     pub legendary_uses: u32,
+    /// Reliable Talent (2024 Rogue 11): a floor under a d20 roll for a check
+    /// the creature is proficient in - `Some(10)` for the standard feature,
+    /// `None` for a creature without it. Plain field rather than a
+    /// [`Rider`] because, like `legendary_uses`, nothing about it is
+    /// triggered or conditional; see [`Creature::check_floor`] for where the
+    /// "proficient" half of the rule is applied.
+    pub reliable_talent_floor: Option<i32>,
 }
 
 impl Creature {
