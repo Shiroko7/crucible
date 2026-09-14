@@ -1,23 +1,46 @@
-//! Healing and triage spells: Healing Word and Cure Wounds (SRD 5.2, 2024
-//! rules).
+//! Spell feature plugins: official SRD 5.2 spells as `FeaturePlugin`s.
 //!
-//! Both restore hit points using `1..2 dice + the caster's spellcasting
-//! ability modifier`, read from the creature's own
-//! [`crate::rules::creature::SpellCastingProfile`] rather than a hardcoded
-//! number, and both spend one 1st-level spell slot from the caster's
-//! [`crate::rules::creature::SpellSlots`].
+//! Each spell here is a `Move` built the same way any other feature builds
+//! one - see `standard.rs` - rather than new engine branches. The one thing
+//! genuinely new to the engine is [`crate::rules::creature::Effect::AutoHit`],
+//! for Magic Missile's "no attack roll, no save" damage; Blindness/Deafness
+//! and Command both fit entirely inside the existing `Effect::Save` /
+//! `Condition` / `Duration` machinery ARCH-01 and ARCH-05 already built.
+//!
+//! ## What pays for a cast
+//!
+//! Two payment mechanisms coexist here, both legitimate:
+//!
+//! - Healing Word and Cure Wounds spend directly from the caster's own
+//!   [`crate::rules::creature::SpellSlots`] via [`crate::rules::creature::Move::with_spell_slot`]
+//!   and [`crate::rules::creature::Move::pay_spell_cost`].
+//! - Blindness/Deafness, Command, and Magic Missile take their cost as data
+//!   instead: [`SpellCost`] names a resource pool and an amount, resolved
+//!   against whatever the caster's config already declared (see
+//!   `dsl::config::apply_resources`). `SpellSlots` (ARCH-05) exists as a data
+//!   type on `Creature`, but nothing in `sim::duel`'s action economy spends
+//!   from it yet - `Fighter::pay`/`can_pay` only ever look at the generic
+//!   `resources` pool via `Cost`. Wiring real per-level slot spending into the
+//!   duel's turn loop would be a change to that shared economy, not a
+//!   spell-plugin concern, so it is left alone here and noted as a found gap
+//!   rather than worked around with something bespoke. A wizard's real spell
+//!   slot and a wand's limited charges are the same mechanism under this
+//!   scheme - "spend `amount` from a named pool" - so which one a cast draws
+//!   from is a constructor parameter, never hardcoded to a resource name
+//!   inside a plugin.
 //!
 //! Reviving a creature at 0 HP is not spell-specific text - it is 5e's
 //! general "a creature that regains any hit points while it has 0 becomes
 //! conscious" rule - so it is implemented once, in
-//! [`crate::rules::creature::apply_healing`], and inherited by both spells
-//! (and anything else that ever heals) rather than re-implemented per spell.
+//! [`crate::rules::creature::apply_healing`], and inherited by both healing
+//! spells (and anything else that ever heals) rather than re-implemented per
+//! spell.
 //!
 //! Not modelled, on purpose:
 //! - **Range.** `DESIGN.md` already rules positioning out of scope entirely
 //!   ("Positioning is the gap that matters") - there is no notion of distance
-//!   for a melee weapon either, so Healing Word's 60 feet and Cure Wounds'
-//!   touch are flavour text here, not a mechanic.
+//!   for a melee weapon either, so a spell's range in feet is flavour text
+//!   here, not a mechanic.
 //! - **Ally targeting.** The duel engine (`sim::duel`) only ever targets the
 //!   opposing side right now - no move of any kind can target a friendly
 //!   creature yet. These plugins produce fully-formed, fully-testable
@@ -26,8 +49,8 @@
 //!   a separate, considerably larger feature (self/ally targeting for every
 //!   effect, plus a policy that decides when to heal) and is left for a
 //!   follow-up rather than bolted on here.
-//! - **Upcasting.** Both spells are implemented as their base 1st-level
-//!   cast only; scaling the healing dice with a higher slot is skipped.
+//! - **Upcasting.** Every spell here is implemented at its base cast only;
+//!   scaling with a higher slot is skipped.
 //!
 //! Hold Person (SRD 5.2, 2024 rules): a 2nd-level spell that paralyzes a
 //! humanoid who fails a Wisdom saving throw, for as long as the caster keeps
@@ -57,7 +80,9 @@
 //! reasons as the healing spells above: range/positioning is out of scope,
 //! and upcasting (catching more than one humanoid) is skipped.
 
-use crate::rules::creature::{Ability, Condition, Duration, Effect, HealRoll, Move, SaveEffect};
+use crate::rules::creature::{
+    Ability, Condition, Cost, DamageKind, DamageRoll, Duration, Effect, HealRoll, Move, SaveEffect,
+};
 
 use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
 
@@ -207,15 +232,301 @@ impl FeaturePlugin for HoldPersonPlugin {
     }
 }
 
+/// How a spell's use is paid for: a named resource pool, and how much of it
+/// one cast spends.
+///
+/// Deliberately not tied to [`crate::rules::creature::SpellSlots`] - see this
+/// module's own doc for why - so `resource_name` is free to point at
+/// anything the builder has declared: a `spell_slots_1` pool standing in for
+/// a real slot, a `wand_charges` pool for an item, or nothing at all if the
+/// caster building this creature leaves the cost off entirely (an at-will
+/// version, for a homebrew ring or the like).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpellCost {
+    pub resource_name: String,
+    pub amount: u32,
+}
+
+impl SpellCost {
+    pub fn new(resource_name: impl Into<String>, amount: u32) -> Self {
+        Self {
+            resource_name: resource_name.into(),
+            amount,
+        }
+    }
+
+    /// Resolve against `builder`'s already-declared resources, turning the
+    /// name into the indexed [`Cost`] a `Move` actually carries.
+    fn resolve(&self, builder: &CreatureBuilder) -> FeatureResult<Cost> {
+        Ok(Cost {
+            resource: builder.resource_index(&self.resource_name)?,
+            amount: self.amount,
+        })
+    }
+}
+
+/// Resolve an optional [`SpellCost`] into an optional indexed [`Cost`], the
+/// shape every plugin below needs before it can call `Move::with_cost`.
+fn resolve_cost(
+    builder: &CreatureBuilder,
+    cost: &Option<SpellCost>,
+) -> FeatureResult<Option<Cost>> {
+    cost.as_ref().map(|c| c.resolve(builder)).transpose()
+}
+
+/// A caster's save DC, or a configuration error naming which spell needed
+/// one. Every spell below targets a save, so every one of them calls this.
+fn save_dc(builder: &CreatureBuilder, spell_name: &str) -> FeatureResult<i32> {
+    builder.creature.spell_save_dc().ok_or_else(|| {
+        FeatureError::InvalidConfiguration(format!(
+            "{spell_name} needs a `[*.spellcasting]` profile to compute its save DC"
+        ))
+    })
+}
+
+// --- Blindness/Deafness -------------------------------------------------
+
+/// Blindness/Deafness (SRD 5.2, 2nd-level necromancy, Action): a Constitution
+/// save or the target has the Blinded or Deafened condition - the caster's
+/// choice - for the duration.
+///
+/// The SRD 5.2 wording is "At the end of each of its turns, the target can
+/// make a Constitution saving throw. On a success, the spell ends on it" -
+/// exactly the shape [`Duration::SaveEndTurn`] already exists for (see that
+/// variant's own doc, and Hold Person), so this spell needs no new duration
+/// mechanic. It never touches concentration because there is nothing here to
+/// touch: this branch has no concentration tracker at all (ARCH-02), and
+/// Blindness/Deafness would not use one anyway - it is one of the SRD's
+/// non-concentration save-each-turn spells.
+#[derive(Debug, Clone)]
+pub struct BlindnessDeafnessPlugin {
+    /// `false` blinds, `true` deafens - the caster's choice the spell text
+    /// grants, made a constructor parameter rather than two separate plugins.
+    pub deafen: bool,
+    pub cost: Option<SpellCost>,
+}
+
+impl BlindnessDeafnessPlugin {
+    pub fn new(deafen: bool, cost: Option<SpellCost>) -> Self {
+        Self { deafen, cost }
+    }
+
+    fn label(&self) -> &'static str {
+        if self.deafen {
+            "Blindness/Deafness (Deafen)"
+        } else {
+            "Blindness/Deafness (Blind)"
+        }
+    }
+}
+
+impl FeaturePlugin for BlindnessDeafnessPlugin {
+    fn id(&self) -> &'static str {
+        "blindness_deafness"
+    }
+
+    fn name(&self) -> &str {
+        self.label()
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        let dc = save_dc(builder, "Blindness/Deafness")?;
+        let cost = resolve_cost(builder, &self.cost)?;
+        let condition = if self.deafen {
+            Condition::Deafened
+        } else {
+            Condition::Blinded
+        };
+
+        let mut mv = Move::new(
+            self.label(),
+            Effect::Save(SaveEffect {
+                ability: Ability::Con,
+                dc,
+                damage: Vec::new(),
+                half_on_success: false,
+                on_failure: vec![(
+                    condition,
+                    Duration::SaveEndTurn {
+                        ability: Ability::Con,
+                        dc,
+                    },
+                )],
+                max_targets: Some(1),
+            }),
+        );
+        if let Some(cost) = cost {
+            mv = mv.with_cost(cost);
+        }
+        builder.add_action(mv);
+        Ok(())
+    }
+}
+
+// --- Command -------------------------------------------------------------
+
+/// A one-word command Command can cast. The SRD lists five (Approach, Drop,
+/// Flee, Grovel, Halt); only the two this codebase's roadmap asks for are
+/// implemented, but the shape leaves room for the rest without touching
+/// anything above it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandWord {
+    Grovel,
+    Halt,
+}
+
+impl CommandWord {
+    pub fn parse(word: &str) -> Option<Self> {
+        Some(match word.to_ascii_lowercase().as_str() {
+            "grovel" => Self::Grovel,
+            "halt" => Self::Halt,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Grovel => "Grovel",
+            Self::Halt => "Halt",
+        }
+    }
+
+    /// What a failed save applies. Every word shares `Condition::Compelled`
+    /// with `Duration::ApplierTurn` - the engine's handle on "obeys a
+    /// directive on its own very next turn" (see that variant's own doc) and
+    /// denies the rest of that turn's action economy via
+    /// `sim::duel::Fighter::loses_turn`, without touching legendary actions.
+    /// `ApplierTurn` rather than `VictimTurn` is deliberate: it is the
+    /// mechanism Stunning Strike already proves bounds a condition to
+    /// *exactly* the victim's next turn regardless of relative initiative
+    /// (see `Duration::ApplierTurn`'s own doc) - `VictimTurn` clears at the
+    /// start of the victim's own turn, before that turn's incapacitation
+    /// check runs, so it cannot gate the very turn Command means to deny.
+    ///
+    /// Grovel's real text is "the target falls prone and then ends its
+    /// turn", so it stacks `Condition::Prone` on top of the same duration.
+    /// There is no engine mechanic for standing back up (no movement model;
+    /// see `README.md`, "Positioning is the gap that matters"), so tying
+    /// Prone to Compelled's clock is a documented simplification, not a claim
+    /// that a real target could not still be prone once its next turn
+    /// passes. Halt's text - "the target doesn't move and takes no actions" -
+    /// has nothing left over once "takes no actions" is modelled: there is no
+    /// movement to additionally restrict, so `Compelled` alone is the whole
+    /// of it.
+    fn on_failure(self) -> Vec<(Condition, Duration)> {
+        let compelled = (Condition::Compelled, Duration::ApplierTurn);
+        match self {
+            Self::Grovel => vec![(Condition::Prone, Duration::ApplierTurn), compelled],
+            Self::Halt => vec![compelled],
+        }
+    }
+}
+
+/// Command (SRD 5.2, 1st-level enchantment, Action): a Wisdom save or the
+/// target obeys a one-word command on its next turn.
+#[derive(Debug, Clone)]
+pub struct CommandPlugin {
+    pub word: CommandWord,
+    pub cost: Option<SpellCost>,
+}
+
+impl CommandPlugin {
+    pub fn new(word: CommandWord, cost: Option<SpellCost>) -> Self {
+        Self { word, cost }
+    }
+
+    fn label(&self) -> String {
+        format!("Command (\"{}\")", self.word.as_str())
+    }
+}
+
+impl FeaturePlugin for CommandPlugin {
+    fn id(&self) -> &'static str {
+        "command"
+    }
+
+    fn name(&self) -> &str {
+        self.word.as_str()
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        let dc = save_dc(builder, "Command")?;
+        let cost = resolve_cost(builder, &self.cost)?;
+
+        let mut mv = Move::new(
+            self.label(),
+            Effect::Save(SaveEffect {
+                ability: Ability::Wis,
+                dc,
+                damage: Vec::new(),
+                half_on_success: false,
+                on_failure: self.word.on_failure(),
+                max_targets: Some(1),
+            }),
+        );
+        if let Some(cost) = cost {
+            mv = mv.with_cost(cost);
+        }
+        builder.add_action(mv);
+        Ok(())
+    }
+}
+
+// --- Magic Missile ---------------------------------------------------------
+
+/// Magic Missile (SRD 5.2, 1st-level evocation, Action): three darts, each
+/// dealing `1d4 + 1` force damage, automatically hitting - no attack roll,
+/// no saving throw. See [`Effect::AutoHit`] for the mechanism this rests on.
+#[derive(Debug, Clone)]
+pub struct MagicMissilePlugin {
+    pub cost: Option<SpellCost>,
+}
+
+impl MagicMissilePlugin {
+    pub fn new(cost: Option<SpellCost>) -> Self {
+        Self { cost }
+    }
+}
+
+impl FeaturePlugin for MagicMissilePlugin {
+    fn id(&self) -> &'static str {
+        "magic_missile"
+    }
+
+    fn name(&self) -> &str {
+        "Magic Missile"
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        let cost = resolve_cost(builder, &self.cost)?;
+        let darts = vec![DamageRoll::new(1, 4, 1, DamageKind::Force); 3];
+
+        let mut mv = Move::new("Magic Missile", Effect::AutoHit { damage: darts });
+        if let Some(cost) = cost {
+            mv = mv.with_cost(cost);
+        }
+        builder.add_action(mv);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prob::dice::Pmf;
     use crate::prob::rng::Rng;
+    use crate::rules::combat::Reduction;
     use crate::rules::creature::{
         apply_healing, is_down, Ability, Creature, DamageKind, DamageRoll, SpellCastingProfile,
-        Strike,
+        Strike, Uses,
     };
     use crate::sim::duel::{run, run_teams, Budget, Policy};
+
+    const SAMPLES: usize = 200_000;
+
+    fn tolerance(p: f64, n: usize) -> f64 {
+        5.0 * (p * (1.0 - p) / n as f64).sqrt() + 1e-4
+    }
 
     fn wisdom_caster(ability_modifier: i32, proficiency_bonus: i32) -> CreatureBuilder {
         let mut builder = CreatureBuilder::new("Cleric", 14, 30);
@@ -228,6 +539,25 @@ mod tests {
         builder.set_spell_slot_max(2, 1);
         builder
     }
+
+    fn caster(ability: Ability, modifier: i32, proficiency: i32) -> CreatureBuilder {
+        let mut builder = CreatureBuilder::new("Caster", 12, 20);
+        builder.set_spellcasting(SpellCastingProfile::new(ability, modifier, proficiency));
+        builder
+    }
+
+    fn target(ac: i32, save: i32, reductions: &[(DamageKind, Reduction)]) -> Creature {
+        let mut c = Creature::new("target", ac, 1_000);
+        c.saves = [save; 6];
+        c.reductions = reductions.to_vec();
+        c
+    }
+
+    fn effect_of(m: &Move) -> &Effect {
+        &m.effect
+    }
+
+    // --- Healing Word / Cure Wounds ---
 
     #[test]
     fn healing_word_is_a_bonus_action_with_the_right_formula_and_slot() {
@@ -453,6 +783,8 @@ mod tests {
         assert!(new_hp > 0);
         assert!(revived);
     }
+
+    // --- Hold Person ---
 
     #[test]
     fn hold_person_is_a_concentration_action_with_the_right_slot_and_save() {
@@ -792,5 +1124,408 @@ mod tests {
             broken < held,
             "a broken concentration should cost the victim fewer turns than an unbroken one: {broken} vs {held}"
         );
+    }
+
+    // --- Blindness/Deafness ---
+
+    #[test]
+    fn blindness_deafness_needs_a_spellcasting_profile() {
+        let mut builder = CreatureBuilder::new("Caster", 12, 20);
+        let err = BlindnessDeafnessPlugin::new(false, None)
+            .apply(&mut builder)
+            .expect_err("no spellcasting profile means no save DC to compute");
+        assert!(matches!(err, FeatureError::InvalidConfiguration(_)));
+    }
+
+    #[test]
+    fn blindness_deafness_blinds_by_default_and_deafens_on_request() {
+        let mut builder = caster(Ability::Wis, 3, 3); // DC 8 + 3 + 3 = 14
+
+        BlindnessDeafnessPlugin::new(false, None)
+            .apply(&mut builder)
+            .expect("blinds cleanly");
+        let Effect::Save(save) = effect_of(&builder.creature.actions[0]) else {
+            panic!("expected a Save effect");
+        };
+        assert_eq!(save.ability, Ability::Con);
+        assert_eq!(save.dc, 14);
+        assert!(save.damage.is_empty(), "no damage, only a condition");
+        assert_eq!(save.max_targets, Some(1));
+        assert_eq!(
+            save.on_failure,
+            vec![(
+                Condition::Blinded,
+                Duration::SaveEndTurn {
+                    ability: Ability::Con,
+                    dc: 14
+                }
+            )]
+        );
+
+        BlindnessDeafnessPlugin::new(true, None)
+            .apply(&mut builder)
+            .expect("deafens cleanly");
+        let Effect::Save(save) = effect_of(&builder.creature.actions[1]) else {
+            panic!("expected a Save effect");
+        };
+        assert_eq!(
+            save.on_failure,
+            vec![(
+                Condition::Deafened,
+                Duration::SaveEndTurn {
+                    ability: Ability::Con,
+                    dc: 14
+                }
+            )]
+        );
+    }
+
+    /// Never mentions - or needs - a concentration tracker: this branch has
+    /// none (ARCH-02), and the spell would not use one even if it did.
+    #[test]
+    fn blindness_deafness_never_touches_concentration() {
+        let mut builder = caster(Ability::Wis, 3, 3);
+        BlindnessDeafnessPlugin::new(false, None)
+            .apply(&mut builder)
+            .unwrap();
+        // The only state this spell adds is the one action; nothing about
+        // applying it reaches for a resource, rider, or field named
+        // "concentration" because no such thing exists on `Creature`.
+        assert_eq!(builder.creature.actions.len(), 1);
+        assert!(builder.creature.riders.is_empty());
+    }
+
+    #[test]
+    fn blindness_deafness_cost_is_injectable_and_optional() {
+        // With no cost declared, the move is free.
+        let mut free_builder = caster(Ability::Wis, 3, 3);
+        BlindnessDeafnessPlugin::new(false, None)
+            .apply(&mut free_builder)
+            .unwrap();
+        assert!(free_builder.creature.actions[0].is_free());
+
+        // Naming a resource that was never declared is a configuration
+        // error, not a silent free cast.
+        let mut unresolved = caster(Ability::Wis, 3, 3);
+        let err = BlindnessDeafnessPlugin::new(false, Some(SpellCost::new("spell_slots_2", 1)))
+            .apply(&mut unresolved)
+            .expect_err("an undeclared resource must fail loudly");
+        assert!(matches!(err, FeatureError::MissingResource(name) if name == "spell_slots_2"));
+
+        // Once the resource exists, the same plugin spends from it instead -
+        // "how it's paid for" is a parameter, not a hardcoded slot.
+        let mut wired = caster(Ability::Wis, 3, 3);
+        wired.ensure_resource("spell_slots_2", 3);
+        BlindnessDeafnessPlugin::new(false, Some(SpellCost::new("spell_slots_2", 1)))
+            .apply(&mut wired)
+            .unwrap();
+        let cost = wired.creature.actions[0].cost.expect("cost was resolved");
+        assert_eq!(cost.amount, 1);
+        assert_eq!(
+            wired.creature.resources[cost.resource].name,
+            "spell_slots_2"
+        );
+    }
+
+    /// The exact/sampled agreement the project's whole `README.md` is built
+    /// around, applied to a spell whose only randomness is the save itself -
+    /// there is no damage roll to compare, so this is `SaveEffect`'s own
+    /// closed-form failure chance against a Monte Carlo estimate of the same
+    /// event.
+    #[test]
+    fn blindness_deafness_failure_chance_agrees_with_sampled_saves() {
+        let mut builder = caster(Ability::Wis, 4, 3); // DC 15
+        BlindnessDeafnessPlugin::new(false, None)
+            .apply(&mut builder)
+            .unwrap();
+        let Effect::Save(save) = effect_of(&builder.creature.actions[0]) else {
+            panic!("expected a Save effect");
+        };
+
+        let victim = target(14, 1, &[]);
+        let exact = save.failure_chance(&victim);
+
+        let mut rng = Rng::new(2024);
+        let mut fails = 0u32;
+        for _ in 0..SAMPLES {
+            if !save.roll_save(&mut rng, &victim, false) {
+                fails += 1;
+            }
+        }
+        let sampled = f64::from(fails) / SAMPLES as f64;
+        let tol = tolerance(exact, SAMPLES);
+        assert!(
+            (sampled - exact).abs() < tol,
+            "sampled fail rate {sampled:.5} vs exact {exact:.5}, tolerance {tol:.5}"
+        );
+    }
+
+    // --- Command ---
+
+    #[test]
+    fn command_needs_a_spellcasting_profile() {
+        let mut builder = CreatureBuilder::new("Caster", 12, 20);
+        let err = CommandPlugin::new(CommandWord::Grovel, None)
+            .apply(&mut builder)
+            .expect_err("no spellcasting profile means no save DC to compute");
+        assert!(matches!(err, FeatureError::InvalidConfiguration(_)));
+    }
+
+    #[test]
+    fn grovel_forces_prone_and_denies_the_rest_of_the_turn() {
+        let mut builder = caster(Ability::Wis, 3, 2); // DC 8 + 3 + 2 = 13
+        CommandPlugin::new(CommandWord::Grovel, None)
+            .apply(&mut builder)
+            .unwrap();
+        let Effect::Save(save) = effect_of(&builder.creature.actions[0]) else {
+            panic!("expected a Save effect");
+        };
+        assert_eq!(save.ability, Ability::Wis);
+        assert_eq!(save.dc, 13);
+        assert_eq!(
+            save.on_failure,
+            vec![
+                (Condition::Prone, Duration::ApplierTurn),
+                (Condition::Compelled, Duration::ApplierTurn),
+            ]
+        );
+    }
+
+    #[test]
+    fn halt_only_compels_no_prone() {
+        let mut builder = caster(Ability::Wis, 3, 2);
+        CommandPlugin::new(CommandWord::Halt, None)
+            .apply(&mut builder)
+            .unwrap();
+        let Effect::Save(save) = effect_of(&builder.creature.actions[0]) else {
+            panic!("expected a Save effect");
+        };
+        assert_eq!(
+            save.on_failure,
+            vec![(Condition::Compelled, Duration::ApplierTurn)]
+        );
+    }
+
+    #[test]
+    fn command_word_names_round_trip() {
+        assert_eq!(CommandWord::parse("grovel"), Some(CommandWord::Grovel));
+        assert_eq!(CommandWord::parse("HALT"), Some(CommandWord::Halt));
+        assert_eq!(CommandWord::parse("flee"), None);
+    }
+
+    /// The same closed-form-vs-sampled agreement as Blindness/Deafness,
+    /// exercised against Command's Wisdom save instead of a Constitution one.
+    #[test]
+    fn command_failure_chance_agrees_with_sampled_saves() {
+        let mut builder = caster(Ability::Cha, 2, 3); // DC 8 + 2 + 3 = 13
+        CommandPlugin::new(CommandWord::Grovel, None)
+            .apply(&mut builder)
+            .unwrap();
+        let Effect::Save(save) = effect_of(&builder.creature.actions[0]) else {
+            panic!("expected a Save effect");
+        };
+
+        let victim = target(14, -1, &[]);
+        let exact = save.failure_chance(&victim);
+
+        let mut rng = Rng::new(77);
+        let mut fails = 0u32;
+        for _ in 0..SAMPLES {
+            if !save.roll_save(&mut rng, &victim, false) {
+                fails += 1;
+            }
+        }
+        let sampled = f64::from(fails) / SAMPLES as f64;
+        let tol = tolerance(exact, SAMPLES);
+        assert!(
+            (sampled - exact).abs() < tol,
+            "sampled fail rate {sampled:.5} vs exact {exact:.5}, tolerance {tol:.5}"
+        );
+    }
+
+    /// An end-to-end fight, not just the `Move` shape: Grovel really does
+    /// cost the target its very next turn (via `turns_lost`) and really does
+    /// leave it Prone, using the duel engine exactly as any other condition
+    /// does - the acceptance test for `sim::duel::Fighter::loses_turn`.
+    #[test]
+    fn grovel_costs_the_target_its_next_turn_in_a_real_fight() {
+        use crate::sim::duel::{run, Policy};
+
+        let mut builder = caster(Ability::Wis, 5, 4); // DC 8 + 5 + 4 = 17
+        builder.creature.initiative = 100;
+        CommandPlugin::new(CommandWord::Grovel, None)
+            .apply(&mut builder)
+            .unwrap();
+        let mut caster = builder.build().unwrap();
+        // One cast only: a caster who keeps recasting Command every round
+        // would keep the target compelled continuously, which is correct
+        // behaviour but would defeat what this test checks - that a single
+        // application clears on schedule rather than lingering.
+        caster.actions[0].uses = Uses::Limited(1);
+
+        let mut victim = Creature::new("victim", 10, 100);
+        victim.saves[Ability::Wis.index()] = -20; // never saves
+        victim.initiative = -100;
+
+        let mut rng = Rng::new(31);
+        let mut log = Some(Vec::new());
+        let o = run(
+            &mut rng,
+            [&caster, &victim],
+            [Policy::Greedy; 2],
+            3,
+            &mut log,
+        );
+        let narration = log.unwrap().join("\n");
+
+        assert!(
+            narration.contains("prone") && narration.contains("compelled"),
+            "Grovel should land both conditions:\n{narration}"
+        );
+        assert!(
+            o.turns_lost[1] >= 1,
+            "the target must lose at least the one turn Grovel denies it"
+        );
+        // The fight ran three rounds and the victim cannot hurt back (no
+        // actions of its own), so it must not have lost *every* turn -
+        // Compelled expires after the one turn it was meant for.
+        assert!(
+            o.turns_lost[1] < o.rounds,
+            "Compelled must not persist past the one turn it denies: lost {} of {} rounds",
+            o.turns_lost[1],
+            o.rounds
+        );
+    }
+
+    // --- Magic Missile ---
+
+    #[test]
+    fn magic_missile_is_three_darts_of_1d4_plus_1_force() {
+        let mut builder = CreatureBuilder::new("Caster", 12, 20);
+        MagicMissilePlugin::new(None).apply(&mut builder).unwrap();
+        let Effect::AutoHit { damage } = effect_of(&builder.creature.actions[0]) else {
+            panic!("expected an AutoHit effect");
+        };
+        assert_eq!(damage.len(), 3);
+        for roll in damage {
+            assert_eq!(*roll, DamageRoll::new(1, 4, 1, DamageKind::Force));
+        }
+    }
+
+    #[test]
+    fn magic_missile_cost_is_injectable_and_optional() {
+        let mut free_builder = CreatureBuilder::new("Caster", 12, 20);
+        MagicMissilePlugin::new(None)
+            .apply(&mut free_builder)
+            .unwrap();
+        assert!(free_builder.creature.actions[0].is_free());
+
+        // A wand's charge pool works exactly like a spell slot pool would -
+        // same mechanism, different name, entirely caller-supplied.
+        let mut wanded = CreatureBuilder::new("Wand", 10, 1);
+        wanded.ensure_resource("wand_charges", 7);
+        MagicMissilePlugin::new(Some(SpellCost::new("wand_charges", 1)))
+            .apply(&mut wanded)
+            .unwrap();
+        let cost = wanded.creature.actions[0].cost.expect("cost was resolved");
+        assert_eq!(
+            wanded.creature.resources[cost.resource].name,
+            "wand_charges"
+        );
+
+        let mut unresolved = CreatureBuilder::new("Caster", 12, 20);
+        let err = MagicMissilePlugin::new(Some(SpellCost::new("spell_slots_1", 1)))
+            .apply(&mut unresolved)
+            .expect_err("an undeclared resource must fail loudly");
+        assert!(matches!(err, FeatureError::MissingResource(name) if name == "spell_slots_1"));
+    }
+
+    /// Three darts, no roll: mean damage cannot depend on the target's AC at
+    /// all - the acceptance test for "bypasses AC/hit-chance entirely".
+    #[test]
+    fn magic_missile_ignores_ac_entirely() {
+        let effect = Effect::AutoHit {
+            damage: vec![DamageRoll::new(1, 4, 1, DamageKind::Force); 3],
+        };
+        let easy = target(1, 0, &[]);
+        let impossible = target(999, 0, &[]);
+        // 3 * (1d4 + 1): mean of 1d4 is 2.5, so 3 * 3.5 = 10.5.
+        assert!((effect.mean_damage(&easy) - 10.5).abs() < 1e-9);
+        assert_eq!(effect.mean_damage(&easy), effect.mean_damage(&impossible));
+    }
+
+    /// Reduction still applies - what Magic Missile skips is the roll, not
+    /// `Creature::reduction` - so force resistance and immunity must still
+    /// bite even though nothing ever rolled to hit.
+    #[test]
+    fn magic_missile_still_respects_force_resistance_and_immunity() {
+        let effect = Effect::AutoHit {
+            damage: vec![DamageRoll::new(1, 4, 1, DamageKind::Force); 3],
+        };
+        let bare = target(15, 0, &[]);
+        let resistant = target(15, 0, &[(DamageKind::Force, Reduction::Resistant)]);
+        let immune = target(15, 0, &[(DamageKind::Force, Reduction::Immune)]);
+
+        assert!(effect.mean_damage(&resistant) < effect.mean_damage(&bare));
+        assert_eq!(effect.mean_damage(&immune), 0.0);
+    }
+
+    /// The exact-vs-sampled agreement the project is built to require of
+    /// every damage source, applied to the one effect that skips a roll
+    /// entirely: three independent `DamageRoll`s convolved on the exact side
+    /// must match three summed samples on the sampled side.
+    #[test]
+    fn magic_missile_damage_agrees_exact_vs_sampled() {
+        fn agree(name: &str, seed: u64, exact: &Pmf, mut draw: impl FnMut(&mut Rng) -> i32) {
+            let mut rng = Rng::new(seed);
+            let (lo, hi) = (exact.min(), exact.max());
+            assert!(lo >= 0, "{name}: damage should never be negative");
+            let mut counts = vec![0usize; (hi - lo + 1) as usize];
+            for _ in 0..SAMPLES {
+                let d = draw(&mut rng);
+                assert!(
+                    d >= lo && d <= hi,
+                    "{name}: sampled {d} outside the exact support {lo}..={hi}"
+                );
+                counts[(d - lo) as usize] += 1;
+            }
+            for (i, &c) in counts.iter().enumerate() {
+                let value = lo + i as i32;
+                let want = exact.prob(value);
+                let got = c as f64 / SAMPLES as f64;
+                let tol = tolerance(want, SAMPLES);
+                assert!(
+                    (got - want).abs() < tol,
+                    "{name}: P(damage = {value}) sampled {got:.5}, exact {want:.5}, tolerance {tol:.5}"
+                );
+            }
+        }
+
+        let darts = vec![DamageRoll::new(1, 4, 1, DamageKind::Force); 3];
+        let effect = Effect::AutoHit {
+            damage: darts.clone(),
+        };
+
+        let cases: Vec<(&str, Creature)> = vec![
+            ("bare target", target(15, 0, &[])),
+            (
+                "force-resistant target",
+                target(15, 0, &[(DamageKind::Force, Reduction::Resistant)]),
+            ),
+            (
+                "unhittable-by-AC target (irrelevant here, but must still agree)",
+                target(999, 0, &[]),
+            ),
+        ];
+
+        for (seed, (name, defender)) in cases.into_iter().enumerate() {
+            let exact = effect.damage_pmf(&defender);
+            agree(name, seed as u64 + 500, &exact, |rng| {
+                darts
+                    .iter()
+                    .map(|roll| roll.sample(rng, false, defender.reduction(roll.kind)))
+                    .sum()
+            });
+        }
     }
 }

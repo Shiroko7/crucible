@@ -72,7 +72,7 @@ mod tests {
             dc: 25,
             damage: vec![DamageRoll::new(1, 6, 0, DamageKind::Fire)],
             half_on_success: true,
-            on_failure: None,
+            on_failure: vec![],
             max_targets: None,
             requires_type: None,
         };
@@ -96,7 +96,7 @@ mod tests {
             dc: 10,
             damage: vec![DamageRoll::new(0, 6, 21, DamageKind::Fire)],
             half_on_success: true,
-            on_failure: None,
+            on_failure: vec![],
             max_targets: None,
             requires_type: None,
         };
@@ -115,7 +115,7 @@ mod tests {
             dc: 10,
             damage: vec![DamageRoll::new(0, 6, 40, DamageKind::Fire)],
             half_on_success: true,
-            on_failure: None,
+            on_failure: vec![],
             max_targets: None,
             requires_type: None,
         };
@@ -310,6 +310,37 @@ mod tests {
         assert!(!Condition::Stunned.auto_crits());
     }
 
+    /// Deafened carries none of Blinded's combat modifiers - see its own doc
+    /// comment - so it is tracked for provenance only, the same gap Poisoned
+    /// and Blinded already note for ability checks.
+    #[test]
+    fn deafened_changes_nothing_a_duel_checks() {
+        assert!(!Condition::Deafened.incapacitated());
+        assert!(!Condition::Deafened.advantage_to_attackers());
+        assert!(!Condition::Deafened.disadvantage_to_attackers());
+        assert!(!Condition::Deafened.disadvantage_on_attacks());
+        assert!(!Condition::Deafened.auto_fails(Ability::Dex));
+        assert!(!Condition::Deafened.blocks_riders());
+        assert!(!Condition::Deafened.auto_crits());
+    }
+
+    /// Compelled steals the turn Command spends it on (checked at the duel
+    /// layer, in `sim::duel::Fighter::loses_turn`) without carrying any of
+    /// Incapacitated's other side effects - no advantage to attackers, no
+    /// auto-failed Strength or Dexterity saves, and it must not block
+    /// legendary actions the way real Incapacitated does.
+    #[test]
+    fn compelled_carries_none_of_incapacitated_side_effects() {
+        assert!(!Condition::Compelled.incapacitated());
+        assert!(!Condition::Compelled.advantage_to_attackers());
+        assert!(!Condition::Compelled.disadvantage_to_attackers());
+        assert!(!Condition::Compelled.disadvantage_on_attacks());
+        assert!(!Condition::Compelled.auto_fails(Ability::Str));
+        assert!(!Condition::Compelled.auto_fails(Ability::Dex));
+        assert!(!Condition::Compelled.blocks_riders());
+        assert!(!Condition::Compelled.auto_crits());
+    }
+
     #[test]
     fn condition_names_round_trip_through_parse() {
         for c in [
@@ -319,6 +350,8 @@ mod tests {
             Condition::Poisoned,
             Condition::Blinded,
             Condition::Paralyzed,
+            Condition::Deafened,
+            Condition::Compelled,
         ] {
             assert_eq!(Condition::parse(c.name()), Some(c));
         }

@@ -100,6 +100,8 @@ impl Condition {
             "poisoned" => Self::Poisoned,
             "blinded" => Self::Blinded,
             "paralyzed" | "paralysed" => Self::Paralyzed,
+            "deafened" | "deafen" => Self::Deafened,
+            "compelled" | "compel" => Self::Compelled,
             _ => return None,
         })
     }
@@ -112,6 +114,8 @@ impl Condition {
             Self::Poisoned => "poisoned",
             Self::Blinded => "blinded",
             Self::Paralyzed => "paralyzed",
+            Self::Deafened => "deafened",
+            Self::Compelled => "compelled",
         }
     }
 

@@ -227,10 +227,14 @@ pub struct SaveEffect {
     pub dc: i32,
     pub damage: Vec<DamageRoll>,
     pub half_on_success: bool,
-    /// A condition applied when the save fails. Command, Hold Person, and
-    /// every breath weapon whose text does more than deal damage. `None` for
-    /// the plain damaging kind.
-    pub on_failure: Option<(Condition, Duration)>,
+    /// Conditions applied when the save fails. Hold Person and every breath
+    /// weapon whose text does more than deal damage need only one; empty for
+    /// the plain damaging kind. A `Vec` rather than a single `Option` because
+    /// some single saves land more than one condition at once - Command's
+    /// "Grovel" both drops the target Prone and denies it the rest of its
+    /// turn (see [`Condition::Compelled`]), and both have to come off the
+    /// *same* roll rather than two independently-rolled ones.
+    pub on_failure: Vec<(Condition, Duration)>,
     /// How many enemies it can catch. `None` means all of them, which is what a
     /// cone or a sphere does in the absence of a positioning model - the
     /// pessimistic reading. `Some(2)` is for something that names a number, like
@@ -461,6 +465,18 @@ pub enum Effect {
     /// contributes nothing to `mean_damage`/`damage_pmf` and gets its own
     /// `heal_pmf` instead.
     Heal(HealRoll),
+    /// Damage that always lands: no attack roll, no saving throw. Magic
+    /// Missile's mechanism - "you create three glowing darts of magical
+    /// force... each dart hits a creature of your choice" - and the third way
+    /// 5e deals damage alongside `Strikes` and `Save`, which otherwise has
+    /// nowhere to live.
+    ///
+    /// Resistance and immunity still apply - what this skips is the *roll*,
+    /// via `Strike`'s to-hit or `Save`'s ability check, not
+    /// `Creature::reduction`, which every `DamageRoll` still goes through.
+    AutoHit {
+        damage: Vec<DamageRoll>,
+    },
     /// Several effects in one move. A Multiattack of two claws and a bite, or
     /// a monk replacing one of its attacks with a breath weapon.
     Sequence(Vec<Effect>),
@@ -479,6 +495,7 @@ impl Effect {
             Effect::Stance { .. } => 0.0,
             // Heals nothing, damages nothing: it has its own accounting.
             Effect::Heal(_) => 0.0,
+            Effect::AutoHit { .. } => self.damage_pmf(target).mean(),
             Effect::Sequence(parts) => parts.iter().map(|p| p.mean_damage(target)).sum(),
         }
     }
@@ -497,6 +514,9 @@ impl Effect {
             Effect::Save(save) => save.damage_pmf(target),
             Effect::Stance { .. } => Pmf::constant(0),
             Effect::Heal(_) => Pmf::constant(0),
+            Effect::AutoHit { damage } => damage.iter().fold(Pmf::constant(0), |acc, roll| {
+                acc.convolve(&roll.pmf(false, target.reduction(roll.kind)))
+            }),
             Effect::Sequence(parts) => parts.iter().fold(Pmf::constant(0), |acc, p| {
                 acc.convolve(&p.damage_pmf(target))
             }),
