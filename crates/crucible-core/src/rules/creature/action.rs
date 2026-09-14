@@ -604,7 +604,9 @@ impl Move {
 
     /// A move that spends nothing is one a hoarding policy will still take.
     pub fn is_free(&self) -> bool {
-        matches!(self.uses, Uses::Unlimited) && self.cost.is_none() && self.spell_slot_level.is_none()
+        matches!(self.uses, Uses::Unlimited)
+            && self.cost.is_none()
+            && self.spell_slot_level.is_none()
     }
 
     /// Spend this move's spell slot, if it has one, from `caster`'s own

@@ -83,7 +83,9 @@ impl FeatureRegistry {
         });
 
         // Healing Word
-        self.register("healing_word", |_val| Ok(Box::new(HealingWordPlugin::new())));
+        self.register("healing_word", |_val| {
+            Ok(Box::new(HealingWordPlugin::new()))
+        });
 
         // Cure Wounds
         self.register("cure_wounds", |_val| Ok(Box::new(CureWoundsPlugin::new())));

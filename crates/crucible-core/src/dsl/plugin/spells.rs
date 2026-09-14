@@ -39,7 +39,10 @@ const BASE_SLOT_LEVEL: u32 = 1;
 
 /// The ability modifier a healing spell adds, read off the creature's own
 /// casting profile - never a hardcoded number.
-fn spellcasting_ability_modifier(builder: &CreatureBuilder, spell_name: &str) -> FeatureResult<i32> {
+fn spellcasting_ability_modifier(
+    builder: &CreatureBuilder,
+    spell_name: &str,
+) -> FeatureResult<i32> {
     builder
         .creature
         .spellcasting
