@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::rogue::*;
+use super::spells::{CureWoundsPlugin, HealingWordPlugin};
 use super::standard::*;
 use super::traits::{FeatureError, FeaturePlugin, FeatureResult};
 use crate::rules::creature::Ability;
@@ -80,6 +81,12 @@ impl FeatureRegistry {
                 dice_sides,
             )))
         });
+
+        // Healing Word
+        self.register("healing_word", |_val| Ok(Box::new(HealingWordPlugin::new())));
+
+        // Cure Wounds
+        self.register("cure_wounds", |_val| Ok(Box::new(CureWoundsPlugin::new())));
     }
 }
 

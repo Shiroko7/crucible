@@ -363,6 +363,10 @@ fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> {
         name,
         uses: built.uses,
         cost: built.cost,
+        // The text-based scenario/config move syntax has no clause for
+        // spending a spell slot yet; spells are built directly by plugins in
+        // `dsl::plugin::spells` instead.
+        spell_slot_level: None,
         riders: built.riders,
         effect: if effects.len() == 1 {
             effects.pop().unwrap()
