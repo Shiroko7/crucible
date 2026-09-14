@@ -34,7 +34,9 @@
 
 use crate::prob::rng::Rng;
 use crate::rules::combat::{Landed, RollMode};
-use crate::rules::creature::{Condition, Cost, Creature, Duration, Effect, Move, Rider, Uses};
+use crate::rules::creature::{
+    Ability, Condition, Cost, Creature, Duration, Effect, Move, Rider, Uses,
+};
 
 /// Which side of the fight. A side is a team, of any size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,10 +240,8 @@ struct Fighter<'a> {
     /// Remaining uses of each of the creature's own riders, parallel to
     /// `creature.riders`.
     rider_uses: Vec<u32>,
-    /// Active conditions, each tagged with the roster index whose turn start ends
-    /// it. An index rather than a side, because "until the start of your next
-    /// turn" means one specific creature's turn.
-    conditions: Vec<(Condition, usize)>,
+    /// Active conditions, each tagged with how it ends. See [`Expiry`].
+    conditions: Vec<(Condition, Expiry)>,
     once_per_turn_spent: bool,
     dealt: i64,
     /// Resource points and limited uses burnt. This is the second column of the
@@ -346,11 +346,30 @@ impl<'a> Fighter<'a> {
         slot.states_mut(self)[pick].spend(uses);
     }
 
-    fn add_condition(&mut self, condition: Condition, cleared_by: usize) {
+    fn add_condition(&mut self, condition: Condition, expiry: Expiry) {
         if !self.conditions.iter().any(|&(c, _)| c == condition) {
-            self.conditions.push((condition, cleared_by));
+            self.conditions.push((condition, expiry));
         }
     }
+}
+
+/// How one active condition instance ends.
+///
+/// Splitting this out of [`Duration`] rather than storing the duration itself
+/// keeps the roster indices - which only make sense once a condition has
+/// actually been pinned to an applier and a victim - out of the data an
+/// ability declares.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Expiry {
+    /// Cleared at the start of this roster index's turn.
+    TurnStart(usize),
+    /// A saving throw at the end of the victim's own turn, clearing the
+    /// condition on a success. See [`Duration::SaveEndTurn`].
+    SaveEachTurn {
+        victim: usize,
+        ability: Ability,
+        dc: i32,
+    },
 }
 
 /// How one fight ended. Everything is aggregated per side.
@@ -617,6 +636,10 @@ impl<'a> Fight<'a> {
         if !self.turn(round, who, rng, log, plan) {
             self.turns_lost[self.fighters[who].side.index()] += 1;
         }
+        // Runs whether or not the creature actually got to act: a paralyzed
+        // creature still reaches the end of its own turn, which is exactly
+        // when its next chance to shake the condition off falls.
+        self.end_of_turn_saves(round, who, rng, log);
     }
 
     /// Returns whether the creature actually got to act.
@@ -630,8 +653,12 @@ impl<'a> Fight<'a> {
     ) -> bool {
         // Conditions that end at the start of this creature's turn, wherever they
         // sit - the stun a monk landed ends on the monk's turn, not the dragon's.
+        // A `SaveEachTurn` condition is untouched here; it only ever leaves via
+        // `end_of_turn_saves`.
         for f in self.fighters.iter_mut() {
-            f.conditions.retain(|&(_, cleared_by)| cleared_by != me);
+            f.conditions.retain(
+                |&(_, expiry)| !matches!(expiry, Expiry::TurnStart(cleared_by) if cleared_by == me),
+            );
         }
 
         let creature = self.fighters[me].creature;
@@ -703,6 +730,58 @@ impl<'a> Fight<'a> {
             }
         }
         true
+    }
+
+    /// Repeat the saving throw behind any `Duration::SaveEndTurn` condition
+    /// `me` is carrying, at the end of `me`'s own turn, clearing it on a
+    /// success.
+    ///
+    /// A fixed point rather than something a condition polls for itself,
+    /// because "the end of its turn" is a moment in the round structure and
+    /// this is the one place that moment is visible. Runs after `turn`
+    /// whether or not it returned `true`: an incapacitating condition still
+    /// reaches the end of the turn it stole, which is exactly when it is next
+    /// due to be shaken off.
+    fn end_of_turn_saves(
+        &mut self,
+        round: u32,
+        me: usize,
+        rng: &mut Rng,
+        log: &mut Option<Vec<String>>,
+    ) {
+        if !self.fighters[me].alive() {
+            return;
+        }
+        let pending: Vec<(Condition, Ability, i32)> = self.fighters[me]
+            .conditions
+            .iter()
+            .filter_map(|&(condition, expiry)| match expiry {
+                Expiry::SaveEachTurn { ability, dc, .. } => Some((condition, ability, dc)),
+                Expiry::TurnStart(_) => None,
+            })
+            .collect();
+
+        for (condition, ability, dc) in pending {
+            let (saved, resisted) = saving_throw(&mut self.fighters, rng, me, ability, dc);
+            if !saved {
+                continue;
+            }
+            self.fighters[me]
+                .conditions
+                .retain(|&(c, _)| c != condition);
+            if let Some(l) = log.as_mut() {
+                let how = if resisted {
+                    "legendary resistance"
+                } else {
+                    "a save"
+                };
+                l.push(format!(
+                    "r{round} {}: shakes off {} ({how})",
+                    self.fighters[me].creature.name,
+                    condition.name()
+                ));
+            }
+        }
     }
 
     /// Which enemy this creature goes after.
@@ -958,6 +1037,8 @@ impl<'a> Fight<'a> {
                     &self.fighters[me],
                     &self.fighters[current_target],
                 );
+                // Paralyzed: any hit against it is an automatic critical hit.
+                let mut force_crit = self.fighters[current_target].has(Condition::auto_crits);
                 for _ in 0..*count {
                     if !self.fighters[current_target].alive() {
                         let Some(new_target) = self.pick_target(me) else {
@@ -970,8 +1051,9 @@ impl<'a> Fight<'a> {
                             &self.fighters[me],
                             &self.fighters[current_target],
                         );
+                        force_crit = self.fighters[current_target].has(Condition::auto_crits);
                     }
-                    let (raw, landed) = strike.sample_with(rng, against, mode);
+                    let (raw, landed) = strike.sample_forcing_crit(rng, against, mode, force_crit);
                     let (dealt, cut) =
                         reduce_incoming(rng, &mut self.fighters[current_target], strike, raw);
                     self.fighters[me].dealt += i64::from(dealt);
@@ -1010,8 +1092,7 @@ impl<'a> Fight<'a> {
                     self.fighters[me].dealt += i64::from(dealt);
                     self.fighters[i].hp -= dealt;
                     if let (false, Some((condition, duration))) = (saved, save.on_failure) {
-                        let by = cleared_by(me, i, duration);
-                        self.fighters[i].add_condition(condition, by);
+                        self.fighters[i].add_condition(condition, expiry(me, i, duration));
                     }
                     if record {
                         let how = match (saved, resisted) {
@@ -1031,7 +1112,7 @@ impl<'a> Fight<'a> {
                 }
             }
             Effect::Stance { condition } => {
-                self.fighters[me].add_condition(*condition, me);
+                self.fighters[me].add_condition(*condition, Expiry::TurnStart(me));
                 if record {
                     notes.push(condition.name().to_string());
                 }
@@ -1078,8 +1159,7 @@ impl<'a> Fight<'a> {
 
             let (saved, resisted) = saving_throw(&mut self.fighters, rng, target, *ability, *dc);
             if !saved {
-                let by = cleared_by(me, target, *duration);
-                self.fighters[target].add_condition(*condition, by);
+                self.fighters[target].add_condition(*condition, expiry(me, target, *duration));
             }
             if record {
                 notes.push(format!(
@@ -1096,11 +1176,17 @@ impl<'a> Fight<'a> {
     }
 }
 
-/// Which creature's turn start clears a condition just applied.
-fn cleared_by(applier: usize, victim: usize, duration: Duration) -> usize {
+/// How a just-applied condition ends, once `duration` is pinned to the
+/// specific applier and victim that made it real.
+fn expiry(applier: usize, victim: usize, duration: Duration) -> Expiry {
     match duration {
-        Duration::ApplierTurn => applier,
-        Duration::VictimTurn => victim,
+        Duration::ApplierTurn => Expiry::TurnStart(applier),
+        Duration::VictimTurn => Expiry::TurnStart(victim),
+        Duration::SaveEndTurn { ability, dc } => Expiry::SaveEachTurn {
+            victim,
+            ability,
+            dc,
+        },
     }
 }
 
@@ -1543,6 +1629,119 @@ mod tests {
         assert!(
             (forgetful - bare).abs() < 1e-9,
             "a policy that never spends resistance should fare like having none: {forgetful} vs {bare}"
+        );
+    }
+
+    /// Paralyzed adds one thing Stunned does not: a hit against it is an
+    /// automatic critical. The paralyzer lands the condition with its action,
+    /// then a bonus action against the same, now-paralyzed target should read
+    /// as a crit even though the attack roll itself never approached one.
+    #[test]
+    fn paralyzed_turns_a_landed_bonus_action_hit_into_a_crit() {
+        let mut paralyzer = puncher("paralyzer", 30, 200, 30, 0);
+        paralyzer.initiative = 100;
+        paralyzer.actions[0].riders.push(Rider::SaveOrCondition {
+            ability: Ability::Con,
+            dc: 99, // never saved, so the first hit always paralyzes
+            condition: Condition::Paralyzed,
+            duration: Duration::ApplierTurn,
+            cost: None,
+            once_per_turn: false,
+        });
+        // A second, separate strike so its own `force_crit` check runs after
+        // the action above has already applied the condition.
+        paralyzer.bonus_actions.push(Move::new(
+            "Follow-up",
+            Effect::Strikes {
+                strike: Strike::new(30, vec![DamageRoll::new(1, 4, 0, DamageKind::Bludgeoning)]),
+                count: 1,
+            },
+        ));
+
+        let mut victim = puncher("victim", 1, 200, -100, 0);
+        victim.initiative = -100;
+
+        let mut rng = Rng::new(21);
+        let mut log = Some(Vec::new());
+        run(
+            &mut rng,
+            [&paralyzer, &victim],
+            [Policy::Greedy; 2],
+            1,
+            &mut log,
+        );
+        let narration = log.unwrap().join("\n");
+        assert!(
+            narration.contains("crit"),
+            "a hit against a paralyzed target must be an automatic crit:\n{narration}"
+        );
+    }
+
+    /// `Duration::SaveEndTurn` does not expire on a fixed timer at all: it
+    /// repeats its save at the end of the victim's own turn and can clear the
+    /// condition the very turn it landed. A save that easy should cost at most
+    /// the one turn it interrupted; a save that is unbeatable should behave
+    /// exactly like a condition with no expiry.
+    #[test]
+    fn a_repeatable_save_can_end_a_condition_the_turn_it_lands() {
+        let cost = Cost {
+            resource: 0,
+            amount: 1,
+        };
+        let paralyzer = |ability: Ability, dc: i32| {
+            let mut c = puncher("paralyzer", 20, 200, 20, 0);
+            c.initiative = 100;
+            // One shot only, so the condition is never re-applied - the test
+            // is about how long a single application lasts, not how often it
+            // lands.
+            c.actions[0].uses = Uses::Limited(1);
+            c.resources.push(Resource {
+                name: "focus".into(),
+                max: 1,
+            });
+            c.actions[0].riders.push(Rider::SaveOrCondition {
+                ability: Ability::Con,
+                dc: 99, // the one hit always lands the condition
+                condition: Condition::Paralyzed,
+                duration: Duration::SaveEndTurn { ability, dc },
+                cost: Some(cost),
+                once_per_turn: true,
+            });
+            c
+        };
+        let mut victim = puncher("victim", 10, 200, 0, 0);
+        victim.initiative = -100;
+
+        let tally = |monster: &Creature| {
+            let mut rng = Rng::new(13);
+            let (mut lost, mut fights) = (0u32, 0u32);
+            for _ in 0..300 {
+                let mut log = no_log();
+                let o = run(
+                    &mut rng,
+                    [monster, &victim],
+                    [Policy::Greedy; 2],
+                    6,
+                    &mut log,
+                );
+                lost += o.turns_lost[1];
+                fights += 1;
+            }
+            f64::from(lost) / f64::from(fights)
+        };
+
+        // Auto-fails Paralyzed's own Str/Dex saves, so Dex can never clear it.
+        let unbeatable = tally(&paralyzer(Ability::Dex, 99));
+        // Wisdom is untouched by that auto-fail, and DC 1 is a near-certainty.
+        let easy = tally(&paralyzer(Ability::Wis, 1));
+
+        assert!(
+            unbeatable > 3.0,
+            "a save Paralyzed auto-fails should behave like a condition with no expiry: {unbeatable}"
+        );
+        assert!(
+            easy < 1.5,
+            "a near-certain save should clear before it costs a second turn: {easy}"
         );
     }
 

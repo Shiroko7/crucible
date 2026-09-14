@@ -185,4 +185,51 @@ mod tests {
         assert!(Condition::Prone.advantage_to_attackers());
         assert!(Condition::Prone.disadvantage_on_attacks());
     }
+
+    #[test]
+    fn poisoned_only_burdens_its_own_attacks() {
+        assert!(Condition::Poisoned.disadvantage_on_attacks());
+        assert!(!Condition::Poisoned.advantage_to_attackers());
+        assert!(!Condition::Poisoned.incapacitated());
+        assert!(!Condition::Poisoned.auto_crits());
+    }
+
+    #[test]
+    fn blinded_burdens_its_own_attacks_and_helps_attackers() {
+        assert!(Condition::Blinded.disadvantage_on_attacks());
+        assert!(Condition::Blinded.advantage_to_attackers());
+        assert!(!Condition::Blinded.incapacitated());
+        assert!(!Condition::Blinded.auto_crits());
+    }
+
+    /// Paralyzed is Stunned's three effects plus the auto-crit, not a fresh
+    /// set - the compiler should catch it if a future edit to Stunned's
+    /// semantics forgets its sibling.
+    #[test]
+    fn paralyzed_is_stunned_plus_the_close_range_crit() {
+        assert!(Condition::Paralyzed.incapacitated());
+        assert!(Condition::Paralyzed.advantage_to_attackers());
+        assert!(Condition::Paralyzed.auto_fails(Ability::Str));
+        assert!(Condition::Paralyzed.auto_fails(Ability::Dex));
+        assert!(!Condition::Paralyzed.auto_fails(Ability::Con));
+        assert!(Condition::Paralyzed.blocks_riders());
+        assert!(Condition::Paralyzed.auto_crits());
+        assert!(!Condition::Stunned.auto_crits());
+    }
+
+    #[test]
+    fn condition_names_round_trip_through_parse() {
+        for c in [
+            Condition::Stunned,
+            Condition::Dodging,
+            Condition::Prone,
+            Condition::Poisoned,
+            Condition::Blinded,
+            Condition::Paralyzed,
+        ] {
+            assert_eq!(Condition::parse(c.name()), Some(c));
+        }
+        assert_eq!(Condition::parse("paralysed"), Some(Condition::Paralyzed));
+        assert_eq!(Condition::parse("nonsense"), None);
+    }
 }
