@@ -1,18 +1,87 @@
 //! Configuration loading and deserialization for PC and Monster files.
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 use super::monster::MonsterDefinition;
 use super::pc::PlayerCharacter;
-use super::plugin::{FeatureError, FeatureRegistry, FeatureResult};
-use crate::rules::creature::{Creature, Move, Rider};
+use super::plugin::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
+use crate::rules::creature::{Ability, Creature, Move, Rider, SpellCastingProfile};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MoveEntry {
     pub name: String,
     pub effect: String,
+}
+
+/// A creature's `[*.resources]` table: named pools (`focus = 8`) plus the
+/// nested, special-cased spell slot table.
+///
+/// Spell slots are nested under `resources` rather than living alongside
+/// `focus` and friends because they are not one flat pool - they are nine
+/// independent counters, one per level - so `[*.resources.slots]` gets its own
+/// sub-table instead of a scalar entry.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ResourcesConfig {
+    #[serde(flatten)]
+    pub pools: HashMap<String, u32>,
+    #[serde(default)]
+    pub slots: HashMap<String, u32>,
+}
+
+/// A creature's `[*.spellcasting]` table: the ability and numbers behind its
+/// spell attack bonus and save DC.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpellcastingConfig {
+    pub ability: String,
+    #[serde(default)]
+    pub ability_modifier: i32,
+    #[serde(default)]
+    pub proficiency_bonus: i32,
+    #[serde(default)]
+    pub item_bonus: i32,
+}
+
+impl SpellcastingConfig {
+    pub fn to_profile(&self) -> FeatureResult<SpellCastingProfile> {
+        let ability = Ability::parse(&self.ability)
+            .ok_or_else(|| FeatureError::UnknownAbility(self.ability.clone()))?;
+        Ok(
+            SpellCastingProfile::new(ability, self.ability_modifier, self.proficiency_bonus)
+                .with_item_bonus(self.item_bonus),
+        )
+    }
+}
+
+/// Parse a `[*.resources]` table into the builder: scalar entries become
+/// named resource pools, and the nested `slots` table (level -> max, e.g.
+/// `[pc.resources.slots]` with `1 = 4`) becomes the creature's spell slots.
+///
+/// TOML bare keys are always strings even when they look like integers, which
+/// is why `slots` is keyed by level number written as text.
+pub fn apply_resources(
+    builder: &mut CreatureBuilder,
+    resources: &ResourcesConfig,
+) -> FeatureResult<()> {
+    for (name, &max) in &resources.pools {
+        builder.ensure_resource(name, max);
+    }
+    for (level_str, &max) in &resources.slots {
+        let level: u32 = level_str.parse().map_err(|_| {
+            FeatureError::InvalidConfiguration(format!(
+                "spell slot level '{level_str}' is not a number"
+            ))
+        })?;
+        if !(1..=crate::rules::creature::SPELL_LEVELS).contains(&level) {
+            return Err(FeatureError::InvalidConfiguration(format!(
+                "spell slot level {level} is out of range 1-9"
+            )));
+        }
+        builder.set_spell_slot_max(level, max);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -154,5 +223,69 @@ mod tests {
         assert_eq!(ogre.hp, 68);
         assert_eq!(ogre.initiative, -1);
         assert_eq!(ogre.actions.len(), 2);
+    }
+
+    /// `[pc.resources.slots]` mirrors the existing `[pc.resources]`
+    /// convention for a flat pool, but nests because a caster's slots are
+    /// nine independent counters rather than one.
+    #[test]
+    fn a_spellcaster_pc_loads_slots_and_a_casting_profile() {
+        let registry = FeatureRegistry::new();
+        let toml = r#"
+            [pc]
+            name = "Test Wizard"
+            ac = 12
+            hp = 30
+
+            [pc.resources]
+            focus = 2
+
+            [pc.resources.slots]
+            1 = 4
+            2 = 3
+            3 = 2
+
+            [pc.spellcasting]
+            ability = "int"
+            ability_modifier = 4
+            proficiency_bonus = 3
+            item_bonus = 1
+        "#;
+
+        let wizard = load_creature_from_str(toml, &registry)
+            .expect("a pc with slots and a spellcasting profile parses");
+
+        // The flat pool alongside the nested slot table still loads.
+        assert_eq!(wizard.resources[0].name, "focus");
+        assert_eq!(wizard.resources[0].max, 2);
+
+        assert_eq!(wizard.spell_slots.max(1), 4);
+        assert_eq!(wizard.spell_slots.available(1), 4);
+        assert_eq!(wizard.spell_slots.max(2), 3);
+        assert_eq!(wizard.spell_slots.max(3), 2);
+        // A level never mentioned in the config starts at zero.
+        assert_eq!(wizard.spell_slots.max(4), 0);
+
+        // 4 (INT mod) + 3 (proficiency) + 1 (item) = 8; DC is 8 + that.
+        assert_eq!(wizard.spell_attack_bonus(), Some(8));
+        assert_eq!(wizard.spell_save_dc(), Some(16));
+    }
+
+    #[test]
+    fn an_out_of_range_slot_level_is_rejected() {
+        let registry = FeatureRegistry::new();
+        let toml = r#"
+            [pc]
+            name = "Bad Config"
+            ac = 10
+            hp = 10
+
+            [pc.resources.slots]
+            10 = 1
+        "#;
+
+        let err = load_creature_from_str(toml, &registry)
+            .expect_err("a slot level outside 1-9 must be rejected, not silently ignored");
+        assert!(matches!(err, FeatureError::InvalidConfiguration(_)));
     }
 }

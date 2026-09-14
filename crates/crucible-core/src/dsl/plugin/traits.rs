@@ -5,7 +5,9 @@
 //! creatures are data-driven configurations composed of these plugins.
 
 use crate::rules::combat::Reduction;
-use crate::rules::creature::{Ability, Creature, DamageKind, Move, Resource, Rider};
+use crate::rules::creature::{
+    Ability, Creature, DamageKind, Move, Resource, Rider, SpellCastingProfile,
+};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +121,17 @@ impl CreatureBuilder {
     /// Set a saving throw bonus for an ability.
     pub fn set_save(&mut self, ability: Ability, bonus: i32) {
         self.creature.saves[ability.index()] = bonus;
+    }
+
+    /// Declare a spell slot pool's maximum (and starting available count) at
+    /// `level`, 1st through 9th.
+    pub fn set_spell_slot_max(&mut self, level: u32, max: u32) {
+        self.creature.spell_slots.set_max(level, max);
+    }
+
+    /// Set how this creature's spell attacks and save DCs are computed.
+    pub fn set_spellcasting(&mut self, profile: SpellCastingProfile) {
+        self.creature.spellcasting = Some(profile);
     }
 
     /// Finalize and validate the combatant.

@@ -138,3 +138,129 @@ pub struct Cost {
     pub resource: usize,
     pub amount: u32,
 }
+
+// --- Spellcasting -----------------------------------------------------
+//
+// Kept in its own section at the end of the file: unrelated to the types
+// above it, and spell slots and the attack/DC formula are the kind of thing
+// several other features (upcasting, Warlock slots, item bonuses) will want
+// to extend without conflicting with edits elsewhere in this file.
+
+/// How many spell levels a caster can have slots at: 1st through 9th.
+pub const SPELL_LEVELS: u32 = 9;
+
+/// A caster's spell slot pools: one independent counter per level, 1st
+/// through 9th.
+///
+/// Distinct from [`Resource`], which is a single named pool shared across
+/// several moves (focus, ki, sorcery points). A caster's slots are nine
+/// separate counters instead, each with its own maximum, and a slot spent at
+/// one level can never fill a different one - so this earns its own type
+/// rather than being nine `Resource`s wearing a trenchcoat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SpellSlots {
+    max: [u32; SPELL_LEVELS as usize],
+    available: [u32; SPELL_LEVELS as usize],
+}
+
+impl SpellSlots {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn index(level: u32) -> usize {
+        assert!(
+            (1..=SPELL_LEVELS).contains(&level),
+            "spell slot level must be 1-9, got {level}"
+        );
+        (level - 1) as usize
+    }
+
+    /// Declare (or redeclare) the maximum slots at `level`, refilling
+    /// `available` to match. This is how a config loader sets a caster's
+    /// starting pool, before anything has been spent.
+    pub fn set_max(&mut self, level: u32, max: u32) {
+        let i = Self::index(level);
+        self.max[i] = max;
+        self.available[i] = max;
+    }
+
+    pub fn max(&self, level: u32) -> u32 {
+        self.max[Self::index(level)]
+    }
+
+    pub fn available(&self, level: u32) -> u32 {
+        self.available[Self::index(level)]
+    }
+
+    /// Spend one slot of exactly `level`. `false` and no change if none are
+    /// left - upcasting and slot substitution are a policy decision for
+    /// whatever calls this, not this type's job.
+    pub fn cast(&mut self, level: u32) -> bool {
+        let i = Self::index(level);
+        if self.available[i] == 0 {
+            return false;
+        }
+        self.available[i] -= 1;
+        true
+    }
+
+    /// A long rest: every slot returns.
+    pub fn recover_all(&mut self) {
+        self.available = self.max;
+    }
+
+    /// Return `amount` slots at `level`, capped at the maximum. A short-rest
+    /// feature (Arcane Recovery, a Warlock's own slots) recovers less than
+    /// everything, which is why this takes an amount rather than always
+    /// filling the pool.
+    pub fn recover(&mut self, level: u32, amount: u32) {
+        let i = Self::index(level);
+        self.available[i] = (self.available[i] + amount).min(self.max[i]);
+    }
+}
+
+/// How a creature's spell attacks and save DCs are computed - kept distinct
+/// from physical weapon stats, and generic over which ability fuels it, since
+/// Wisdom, Intelligence and Charisma casters share this formula and differ
+/// only in which score feeds it.
+///
+/// Fields are public and the formula is two small methods rather than one
+/// hardcoded number, so a magic item can inspect and adjust `item_bonus`
+/// without reconstructing the rest of the profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SpellCastingProfile {
+    pub ability: Ability,
+    pub ability_modifier: i32,
+    pub proficiency_bonus: i32,
+    /// A flat bonus from equipment: a +1 spell focus, a Rod of the Pact
+    /// Keeper. Kept separate from the other two fields so an item can be
+    /// swapped without recomputing them.
+    pub item_bonus: i32,
+}
+
+impl SpellCastingProfile {
+    pub fn new(ability: Ability, ability_modifier: i32, proficiency_bonus: i32) -> Self {
+        Self {
+            ability,
+            ability_modifier,
+            proficiency_bonus,
+            item_bonus: 0,
+        }
+    }
+
+    pub fn with_item_bonus(mut self, bonus: i32) -> Self {
+        self.item_bonus = bonus;
+        self
+    }
+
+    /// Spell attack modifier: ability modifier + proficiency bonus + item bonus.
+    pub fn attack_bonus(&self) -> i32 {
+        self.ability_modifier + self.proficiency_bonus + self.item_bonus
+    }
+
+    /// Spell save DC: 8 + ability modifier + proficiency bonus + item bonus.
+    pub fn save_dc(&self) -> i32 {
+        8 + self.attack_bonus()
+    }
+}
