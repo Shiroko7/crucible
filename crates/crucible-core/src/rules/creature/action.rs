@@ -55,7 +55,29 @@ impl Strike {
     /// hit. Must be distributed according to [`Strike::damage_pmf_with`];
     /// `tests/duel_agreement.rs` requires it.
     pub fn sample_with(&self, rng: &mut Rng, target: &Creature, mode: RollMode) -> (i32, Landed) {
+        self.sample_forcing_crit(rng, target, mode, false)
+    }
+
+    /// As [`Strike::sample_with`], but `force_crit` upgrades an ordinary hit to
+    /// a critical one before damage is rolled.
+    ///
+    /// This is Paralyzed's "a hit against this creature is a critical hit" -
+    /// see `Condition::auto_crits` - folded into the roll rather than the
+    /// caller re-deriving damage after the fact, which would have to
+    /// duplicate the crit-doubling logic below to get the same distribution.
+    pub fn sample_forcing_crit(
+        &self,
+        rng: &mut Rng,
+        target: &Creature,
+        mode: RollMode,
+        force_crit: bool,
+    ) -> (i32, Landed) {
         let landed = sample_hit(rng, self.to_hit, mode, target.ac);
+        let landed = if force_crit && landed == Landed::Hit {
+            Landed::Crit
+        } else {
+            landed
+        };
         let crit = match landed {
             Landed::Miss => return (0, landed),
             Landed::Hit => false,
