@@ -12,9 +12,12 @@
 //! a window after *every* enemy's turn rather than one a round, which is most of
 //! what a party of four changes about fighting one.
 //!
-//! Riders fire at four fixed points, which is where the event pipeline
+//! Riders fire at five fixed points, which is where the event pipeline
 //! `DESIGN.md` describes will eventually go:
 //!
+//! - **on being targeted, before an attack's hit or miss is finalized**,
+//!   [`Rider::ReactionOnTargeted`] spends a reaction to add an AC bonus,
+//!   capable of turning that one attack's hit into a miss;
 //! - **on an incoming attack's damage**, [`Rider::ReduceDamage`] spends a
 //!   reaction to cut it;
 //! - **on a hit**, [`Rider::SaveOrCondition`] forces a save and may apply a
@@ -35,7 +38,7 @@
 use crate::prob::rng::Rng;
 use crate::rules::combat::{Landed, RollMode};
 use crate::rules::creature::{
-    Ability, Condition, Cost, Creature, Duration, Effect, Move, Rider, Uses,
+    Ability, AttackTrigger, Condition, Cost, Creature, Duration, Effect, Move, Rider, Uses,
 };
 
 /// Which side of the fight. A side is a team, of any size.
@@ -1053,13 +1056,32 @@ impl<'a> Fight<'a> {
                         );
                         force_crit = self.fighters[current_target].has(Condition::auto_crits);
                     }
-                    let (raw, landed) = strike.sample_forcing_crit(rng, against, mode, force_crit);
+                    let reaction =
+                        ac_boost_reaction(&self.fighters[current_target], AttackTrigger::AnyAttack);
+                    let (ac_bonus, reaction_available) = match reaction {
+                        Some((_, bonus)) => (bonus, true),
+                        None => (0, false),
+                    };
+                    let (raw, landed, consumed) = strike.sample_forcing_crit_with_reaction(
+                        rng,
+                        against,
+                        mode,
+                        force_crit,
+                        ac_bonus,
+                        reaction_available,
+                    );
+                    if consumed {
+                        if let Some((i, _)) = reaction {
+                            self.fighters[current_target].rider_uses[i] -= 1;
+                        }
+                    }
                     let (dealt, cut) =
                         reduce_incoming(rng, &mut self.fighters[current_target], strike, raw);
                     self.fighters[me].dealt += i64::from(dealt);
                     self.fighters[current_target].hp -= dealt;
                     if record {
                         notes.push(match landed {
+                            Landed::Miss if consumed => "miss (AC boosted)".to_string(),
                             Landed::Miss => "miss".to_string(),
                             _ if cut > 0 => format!("{dealt} (deflected {cut})"),
                             Landed::Crit => format!("{dealt} crit"),
@@ -1239,8 +1261,11 @@ fn refresh(f: &mut Fighter<'_>, rng: &mut Rng) {
     f.legendary_left = creature.legendary_uses;
     f.once_per_turn_spent = false;
     for (uses, rider) in f.rider_uses.iter_mut().zip(&creature.riders) {
-        if let Rider::ReduceDamage { per_round, .. } = rider {
-            *uses = *per_round;
+        match rider {
+            Rider::ReduceDamage { per_round, .. } | Rider::ReactionOnTargeted { per_round, .. } => {
+                *uses = *per_round;
+            }
+            _ => {}
         }
     }
 }
@@ -1358,6 +1383,28 @@ fn saving_throw(
         }
     }
     (false, false)
+}
+
+/// The AC bonus [`Rider::ReactionOnTargeted`] offers against an incoming
+/// attack matching `trigger`, and which rider slot it would spend - so the
+/// caller can debit the right per-round counter once it learns whether the
+/// reaction actually fired. `None` when the creature has no such rider for
+/// this trigger, or its reaction is already spent this round.
+fn ac_boost_reaction(f: &Fighter<'_>, trigger: AttackTrigger) -> Option<(usize, i32)> {
+    f.creature.riders.iter().enumerate().find_map(|(i, rider)| {
+        let Rider::ReactionOnTargeted {
+            trigger: t,
+            ac_bonus,
+            ..
+        } = rider
+        else {
+            return None;
+        };
+        if *t != trigger || f.rider_uses[i] == 0 {
+            return None;
+        }
+        Some((i, *ac_bonus))
+    })
 }
 
 /// Spend a reaction to cut an incoming attack's damage, if anything can.
@@ -1808,6 +1855,156 @@ mod tests {
         );
         // One reaction a round, so it cannot blunt all three attacks.
         assert!(taken(&deflector) > base / 2);
+    }
+
+    /// [`Rider::ReactionOnTargeted`] is the mirror of [`Rider::ReduceDamage`]:
+    /// it acts before the hit is even decided, converting what would have
+    /// been a hit into a miss instead of shaving damage off one that already
+    /// landed.
+    #[test]
+    fn a_reactive_ac_boost_converts_a_would_be_hit_into_a_miss() {
+        let attacker = {
+            let mut c = puncher("attacker", 10, 10_000, 5, 0);
+            c.actions[0].effect = Effect::Strikes {
+                strike: Strike::new(5, vec![DamageRoll::new(2, 6, 4, DamageKind::Slashing)]),
+                count: 3,
+            };
+            c.initiative = -100;
+            c
+        };
+        let plain = {
+            let mut c = Creature::new("plain", 15, 10_000);
+            c.initiative = 100;
+            c
+        };
+        let shielded = {
+            let mut c = plain.clone();
+            c.riders.push(Rider::ReactionOnTargeted {
+                trigger: AttackTrigger::AnyAttack,
+                // Large enough that, whenever the reaction fires, it always
+                // succeeds in turning the hit into a miss.
+                ac_bonus: 100,
+                per_round: 1,
+            });
+            c
+        };
+
+        let taken = |defender: &Creature| {
+            let mut rng = Rng::new(8);
+            let mut total = 0i64;
+            for _ in 0..400 {
+                let mut log = no_log();
+                let o = run(
+                    &mut rng,
+                    [defender, &attacker],
+                    [Policy::Greedy; 2],
+                    5,
+                    &mut log,
+                );
+                total += o.damage_dealt[1];
+            }
+            total
+        };
+
+        let base = taken(&plain);
+        let with_reaction = taken(&shielded);
+        assert!(
+            with_reaction < base,
+            "a reactive AC boost must reduce incoming damage: {with_reaction} vs {base}"
+        );
+        // One reaction a round protects at most one of the three attacks each
+        // round, so it cannot blunt them all.
+        assert!(with_reaction > base / 4);
+    }
+
+    /// The per-round budget in isolation: available at the start, gone the
+    /// instant it is spent, and back only once the creature's turn refreshes
+    /// it - the same lifecycle [`Rider::ReduceDamage`] already has.
+    #[test]
+    fn a_reaction_on_targeted_is_available_once_then_spent_for_the_round() {
+        let mut c = Creature::new("defender", 15, 20);
+        c.riders.push(Rider::ReactionOnTargeted {
+            trigger: AttackTrigger::AnyAttack,
+            ac_bonus: 5,
+            per_round: 1,
+        });
+        let mut f = Fighter::new(&c, Side::A, Policy::Greedy, 0);
+
+        let reaction = ac_boost_reaction(&f, AttackTrigger::AnyAttack);
+        assert_eq!(
+            reaction,
+            Some((0, 5)),
+            "the reaction should be available before anything spends it"
+        );
+
+        // Spend it exactly the way the strike-resolution loop does.
+        let (i, _) = reaction.unwrap();
+        f.rider_uses[i] -= 1;
+        assert_eq!(
+            ac_boost_reaction(&f, AttackTrigger::AnyAttack),
+            None,
+            "spent this round, it must not be offered again"
+        );
+
+        // Refreshing at the start of a turn is the only thing that brings a
+        // reaction back.
+        let mut rng = Rng::new(1);
+        refresh(&mut f, &mut rng);
+        assert_eq!(
+            ac_boost_reaction(&f, AttackTrigger::AnyAttack),
+            Some((0, 5)),
+            "a new turn should refresh the reaction"
+        );
+    }
+
+    /// A multiattack throws several attack rolls in one turn, but a reaction
+    /// is still only spendable once: at most one of them should ever be the
+    /// one it was spent on.
+    #[test]
+    fn the_reaction_only_converts_one_attack_per_round_even_in_a_multiattack() {
+        let attacker = {
+            // AC 1 and a +30 to hit: every roll but a natural 1 is an
+            // ordinary hit against the base AC, so the reaction has every
+            // chance to fire on each of the three swings if it could.
+            let mut c = puncher("attacker", 10, 10_000, 30, 0);
+            c.actions[0].effect = Effect::Strikes {
+                strike: Strike::new(30, vec![DamageRoll::new(1, 4, 0, DamageKind::Bludgeoning)]),
+                count: 3,
+            };
+            c.initiative = -100;
+            c
+        };
+        let mut defender = Creature::new("defender", 1, 10_000);
+        defender.initiative = 100;
+        defender.riders.push(Rider::ReactionOnTargeted {
+            trigger: AttackTrigger::AnyAttack,
+            ac_bonus: 100,
+            per_round: 1,
+        });
+
+        let mut rng = Rng::new(3);
+        let mut saw_a_boosted_miss = false;
+        for _ in 0..200 {
+            let mut log = Some(Vec::new());
+            run(
+                &mut rng,
+                [&defender, &attacker],
+                [Policy::Greedy; 2],
+                1,
+                &mut log,
+            );
+            let narration = log.unwrap().join("\n");
+            let boosted = narration.matches("AC boosted").count();
+            assert!(
+                boosted <= 1,
+                "one reaction a round should never convert more than one attack:\n{narration}"
+            );
+            saw_a_boosted_miss |= boosted == 1;
+        }
+        assert!(
+            saw_a_boosted_miss,
+            "an available reaction against a would-be hit should have fired at least once in 200 rounds"
+        );
     }
 
     #[test]

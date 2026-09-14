@@ -2,7 +2,10 @@
 
 use crate::prob::dice::Pmf;
 use crate::prob::rng::Rng;
-use crate::rules::combat::{hit_outcomes_with, sample_hit_with, AttackModifier, Landed, RollMode};
+use crate::rules::combat::{
+    hit_outcomes_with, hit_outcomes_with_reaction, sample_hit_with, sample_hit_with_reaction,
+    AttackModifier, Landed, RollMode,
+};
 
 use super::combatant::Creature;
 use super::damage::{DamageKind, DamageRoll};
@@ -77,6 +80,27 @@ impl Strike {
         self.damage_pmf_with(target, self.mode)
     }
 
+    /// As [`Strike::damage_pmf_with_modifiers`], with the same reactive AC
+    /// boost as [`Strike::sample_forcing_crit_with_reaction`] -
+    /// [`super::rider::Rider::ReactionOnTargeted`]. See
+    /// [`hit_outcomes_with_reaction`] for why spending the reaction whenever
+    /// `available` is exactly equivalent, in the aggregate, to fighting
+    /// against a raised AC.
+    pub fn damage_pmf_with_reaction(
+        &self,
+        target: &Creature,
+        mode: RollMode,
+        ac_bonus: i32,
+        available: bool,
+    ) -> Pmf {
+        let o = hit_outcomes_with_reaction(self.to_hit, mode, target.ac, &[], ac_bonus, available);
+        Pmf::mixture(&[
+            (o.miss, Pmf::constant(0)),
+            (o.hit, self.landed_pmf(target, false, &[])),
+            (o.crit, self.landed_pmf(target, true, &[])),
+        ])
+    }
+
     /// One sampled strike, reporting how it landed so a rider can key off the
     /// hit. Must be distributed according to [`Strike::damage_pmf_with`];
     /// `tests/duel_agreement.rs` requires it.
@@ -137,6 +161,52 @@ impl Strike {
 
     pub fn sample(&self, rng: &mut Rng, target: &Creature) -> i32 {
         self.sample_with(rng, target, self.mode).0
+    }
+
+    /// As [`Strike::sample_forcing_crit`], but the defender may spend a
+    /// reaction to add `ac_bonus` to its AC against this one attack before
+    /// hit or miss is finalized - [`super::rider::Rider::ReactionOnTargeted`],
+    /// the mirror of [`super::rider::Rider::ReduceDamage`]: that one reacts
+    /// to an attack that already hit, on its damage; this one reacts to
+    /// being targeted, before the roll against AC is decided, and can turn
+    /// what would have been a hit into a miss. Returns whether the reaction
+    /// actually fired alongside the damage and how the attack landed, so the
+    /// caller - `sim::duel`, which owns the per-round budget - can debit it
+    /// only when it does.
+    pub fn sample_forcing_crit_with_reaction(
+        &self,
+        rng: &mut Rng,
+        target: &Creature,
+        mode: RollMode,
+        force_crit: bool,
+        ac_bonus: i32,
+        reaction_available: bool,
+    ) -> (i32, Landed, bool) {
+        let (landed, consumed) = sample_hit_with_reaction(
+            rng,
+            self.to_hit,
+            mode,
+            target.ac,
+            &[],
+            ac_bonus,
+            reaction_available,
+        );
+        let landed = if force_crit && landed == Landed::Hit {
+            Landed::Crit
+        } else {
+            landed
+        };
+        let crit = match landed {
+            Landed::Miss => return (0, landed, consumed),
+            Landed::Hit => false,
+            Landed::Crit => true,
+        };
+        let total = self
+            .damage
+            .iter()
+            .map(|roll| roll.sample(rng, crit, target.reduction(roll.kind)))
+            .sum();
+        (total, landed, consumed)
     }
 
     pub fn mean_damage(&self, target: &Creature) -> f64 {

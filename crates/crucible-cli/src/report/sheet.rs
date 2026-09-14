@@ -174,5 +174,10 @@ pub fn describe_trait(rider: &Rider) -> String {
             "+{dice_count}d{dice_sides} on advantage or an adjacent ally, not disadvantage{}",
             if *once_per_turn { " (once/turn)" } else { "" }
         ),
+        Rider::ReactionOnTargeted {
+            ac_bonus,
+            per_round,
+            ..
+        } => format!("reaction: +{ac_bonus} ac vs one targeting attack ({per_round}/round)"),
     }
 }
