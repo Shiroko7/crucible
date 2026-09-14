@@ -241,6 +241,23 @@ pub struct Attack {
     /// Active extra damage dice, from as many unrelated sources as apply at
     /// once - see [`DamageRider`].
     pub damage_riders: Vec<DamageRider>,
+    /// Whether the weapon used for this attack has the finesse or ranged
+    /// property - the weapon-side gate 2024 Sneak Attack needs alongside
+    /// [`Attack::ally_adjacent`]. `false` for anything else, and irrelevant
+    /// to a creature that has no feature asking about it.
+    pub finesse_or_ranged: bool,
+    /// Whether an ally is within 5 feet of this attack's target.
+    ///
+    /// The engine has no positioning model (see `DESIGN.md`'s "Positioning
+    /// is the gap that matters"), so this cannot be derived from geometry.
+    /// It is an explicit flag on the attack itself instead - set per-attack,
+    /// or held fixed for a whole scenario - the same way [`Attack::mode`]
+    /// stands in for whether *this* creature happens to have advantage
+    /// rather than deriving it from who is prone or flanking. Sneak Attack
+    /// is the first feature that reads it; anything later that also keys off
+    /// "an ally is next to the target" sets the same flag rather than
+    /// growing a second one.
+    pub ally_adjacent: bool,
 }
 
 impl Attack {
@@ -253,11 +270,27 @@ impl Attack {
             mode: RollMode::Normal,
             attack_modifiers: Vec::new(),
             damage_riders: Vec::new(),
+            finesse_or_ranged: false,
+            ally_adjacent: false,
         }
     }
 
     pub fn with_mode(mut self, mode: RollMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    /// Mark this attack as made with a finesse or ranged weapon - see
+    /// [`Attack::finesse_or_ranged`].
+    pub fn with_finesse_or_ranged(mut self, finesse_or_ranged: bool) -> Self {
+        self.finesse_or_ranged = finesse_or_ranged;
+        self
+    }
+
+    /// Mark that an ally is within 5 feet of this attack's target - see
+    /// [`Attack::ally_adjacent`].
+    pub fn with_ally_adjacent(mut self, ally_adjacent: bool) -> Self {
+        self.ally_adjacent = ally_adjacent;
         self
     }
 

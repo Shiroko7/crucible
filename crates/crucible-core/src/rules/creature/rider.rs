@@ -2,6 +2,7 @@
 
 use super::damage::{DamageKind, DamageRoll};
 use super::types::{Ability, Condition, Cost, Duration};
+use crate::rules::combat::{Attack, DamageRider, RollMode};
 
 /// A triggered modifier.
 ///
@@ -44,6 +45,23 @@ pub enum Rider {
         /// Reactions refresh at the start of the creature's turn.
         per_round: u32,
     },
+    /// Extra damage dice on a hit, gated on the attack roll having advantage
+    /// or an ally next to the target - and never at all if the attacker also
+    /// has disadvantage, which overrides an ally in place. Spendable once per
+    /// turn if `once_per_turn`.
+    ///
+    /// Sneak Attack. The gate itself is evaluated by whoever resolves the
+    /// attack, from flags on the attack rather than derived geometry - see
+    /// [`crate::rules::combat::Attack::ally_adjacent`] and
+    /// [`crate::rules::combat::Attack::finesse_or_ranged`] for why. This
+    /// variant only carries the dice pool and the once-per-turn budget, so
+    /// anything else that shares the exact same gate is this variant too,
+    /// not a new branch.
+    ConditionalExtraDamage {
+        dice_count: u32,
+        dice_sides: u32,
+        once_per_turn: bool,
+    },
 }
 
 impl Rider {
@@ -53,6 +71,45 @@ impl Rider {
             Rider::AlwaysSucceed { uses } => *uses,
             Rider::ReduceDamage { per_round, .. } => *per_round,
             _ => 0,
+        }
+    }
+
+    /// The [`DamageRider`] this rider contributes to `attack`, or `None` if
+    /// it does not apply - either because this variant is not
+    /// [`Rider::ConditionalExtraDamage`], or because its gate does not hold.
+    ///
+    /// The gate (Sneak Attack's, specifically): a finesse or ranged weapon,
+    /// on a roll that is not at disadvantage, with either advantage or an
+    /// ally next to the target. `used_this_turn` is the once-per-turn
+    /// budget, tracked by the caller - the same shared per-creature flag
+    /// `sim::duel` already keeps for Stunning-Strike-style riders (see
+    /// `README.md`'s note that a creature gets one once-per-turn rider
+    /// trigger per turn in total, not one per rider).
+    ///
+    /// Returns the *full* qualifying dice pool. A feature that spends part
+    /// of it on something other than damage (Cunning Strike) reduces
+    /// `dice_count` on the result before handing it to
+    /// [`Attack::with_damage_rider`] - [`DamageRider`] is a plain count of
+    /// dice, so rolling fewer of them is not a special case.
+    pub fn extra_damage_for(&self, attack: &Attack, used_this_turn: bool) -> Option<DamageRider> {
+        let Rider::ConditionalExtraDamage {
+            dice_count,
+            dice_sides,
+            once_per_turn,
+        } = self
+        else {
+            return None;
+        };
+        if *once_per_turn && used_this_turn {
+            return None;
+        }
+        if !attack.finesse_or_ranged || attack.mode == RollMode::Disadvantage {
+            return None;
+        }
+        if attack.mode == RollMode::Advantage || attack.ally_adjacent {
+            Some(DamageRider::new(*dice_count, *dice_sides))
+        } else {
+            None
         }
     }
 }

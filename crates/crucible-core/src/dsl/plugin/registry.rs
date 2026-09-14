@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::rogue::*;
 use super::standard::*;
 use super::traits::{FeatureError, FeaturePlugin, FeatureResult};
 use crate::rules::creature::Ability;
@@ -61,5 +62,70 @@ impl FeatureRegistry {
             let uses = val.get("uses").and_then(|v| v.as_integer()).unwrap_or(3) as u32;
             Ok(Box::new(LegendaryResistancePlugin::new(uses)))
         });
+
+        // Sneak Attack (2024 Rogue 1)
+        self.register("sneak_attack", |val| {
+            let dice_count = val.get("dice_count").and_then(|v| v.as_integer()).ok_or_else(|| {
+                FeatureError::InvalidConfiguration(
+                    "sneak_attack needs a `dice_count` (its level-scaled d6 count, e.g. 4 at level 7)"
+                        .to_string(),
+                )
+            })? as u32;
+            let dice_sides = val
+                .get("dice_sides")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(6) as u32;
+            Ok(Box::new(SneakAttackPlugin::with_sides(
+                dice_count,
+                dice_sides,
+            )))
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `dice_count` is the whole point of making Sneak Attack a plugin
+    /// parameter rather than a hardcoded 4d6 - a level-9 rogue's TOML feature
+    /// declares 5, and the registry has to carry that through.
+    #[test]
+    fn sneak_attack_reads_its_dice_count_from_toml() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value =
+            toml::from_str("plugin = \"sneak_attack\"\ndice_count = 5").unwrap();
+        let plugin = registry
+            .build_plugin("sneak_attack", &params)
+            .expect("sneak_attack builds from toml");
+        assert_eq!(plugin.id(), "sneak_attack");
+        assert_eq!(plugin.name(), "Sneak Attack");
+    }
+
+    #[test]
+    fn sneak_attack_defaults_to_d6_but_can_be_overridden() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str("dice_count = 4").unwrap();
+        let plugin = registry.build_plugin("sneak_attack", &params).unwrap();
+        let mut builder = crate::dsl::plugin::CreatureBuilder::new("Rogue", 15, 40);
+        plugin.apply(&mut builder).unwrap();
+        assert_eq!(
+            builder.creature.riders,
+            vec![crate::rules::creature::Rider::ConditionalExtraDamage {
+                dice_count: 4,
+                dice_sides: 6,
+                once_per_turn: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn sneak_attack_requires_a_dice_count() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str("plugin = \"sneak_attack\"").unwrap();
+        assert!(matches!(
+            registry.build_plugin("sneak_attack", &params),
+            Err(FeatureError::InvalidConfiguration(_))
+        ));
     }
 }
