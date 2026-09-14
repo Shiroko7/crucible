@@ -23,6 +23,11 @@ pub struct Creature {
     pub count: u32,
     pub ac: i32,
     pub hp: i32,
+    /// The statblock's type line - "Humanoid", "Dragon", "Giant" - used only
+    /// to gate spells whose targeting rules name a creature type (Hold
+    /// Person, Charm Person). `None` for anything that never stated one:
+    /// every player character, and any monster whose config omitted it.
+    pub creature_type: Option<String>,
     pub initiative: i32,
     pub saves: [i32; 6],
     pub reductions: Vec<(DamageKind, Reduction)>,
@@ -60,6 +65,7 @@ impl Creature {
             count: 1,
             ac,
             hp,
+            creature_type: None,
             initiative: 0,
             saves: [0; 6],
             reductions: Vec::new(),
@@ -93,6 +99,19 @@ impl Creature {
         self.riders
             .iter()
             .any(|r| matches!(r, Rider::NothingOnSuccess { ability: a } if *a == ability))
+    }
+
+    /// Does this creature's stated type match `type_name`, case-insensitively?
+    ///
+    /// Missing type information matches anything: the restriction exists to
+    /// keep a spell like Hold Person off creatures explicitly stated to be
+    /// something else, not off ones nobody labelled - every PC in this
+    /// simulator, and a monster whose config simply left the field out.
+    pub fn is_creature_type(&self, type_name: &str) -> bool {
+        match &self.creature_type {
+            Some(t) => t.eq_ignore_ascii_case(type_name),
+            None => true,
+        }
     }
 
     pub fn resource_index(&self, name: &str) -> Option<usize> {

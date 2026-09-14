@@ -236,6 +236,14 @@ pub struct SaveEffect {
     /// pessimistic reading. `Some(2)` is for something that names a number, like
     /// a second-level Command.
     pub max_targets: Option<u32>,
+    /// Restricts who this can even affect to creatures whose
+    /// [`Creature::creature_type`] matches, case-insensitively - Hold
+    /// Person's "you can only target a humanoid", Charm Person's identical
+    /// restriction. `None` for anything untargeted this way, which is every
+    /// save effect that is not itself type-restricted. Checked before a save
+    /// is even rolled: an excluded creature is not caught by this effect at
+    /// all, the same as being out of `max_targets`' cap.
+    pub requires_type: Option<String>,
 }
 
 impl SaveEffect {

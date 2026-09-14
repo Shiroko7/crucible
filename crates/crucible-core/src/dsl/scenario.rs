@@ -454,6 +454,9 @@ fn parse_body<'a>(
             half_on_success,
             on_failure,
             max_targets,
+            // The DSL has no clause for it yet; a scenario that needs a
+            // type-restricted save waits on that syntax, not on the engine.
+            requires_type: None,
         }))
     } else if !damage.is_empty() {
         let to_hit = to_hit.ok_or("a damaging move needs a `hit +N` clause or a `save`")?;

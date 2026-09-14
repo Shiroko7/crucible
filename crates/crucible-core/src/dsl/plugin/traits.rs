@@ -141,6 +141,12 @@ impl CreatureBuilder {
         self.creature.spellcasting = Some(profile);
     }
 
+    /// Set the creature's stated type ("Humanoid", "Dragon", ...), used to
+    /// gate spells with a target-type restriction such as Hold Person.
+    pub fn set_creature_type(&mut self, creature_type: impl Into<String>) {
+        self.creature.creature_type = Some(creature_type.into());
+    }
+
     /// Finalize and validate the combatant.
     pub fn build(self) -> FeatureResult<Creature> {
         if self.creature.hp <= 0 {

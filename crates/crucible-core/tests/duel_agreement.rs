@@ -135,6 +135,7 @@ fn a_saving_throw_samples_like_its_exact_distribution() {
         half_on_success: half,
         on_failure: None,
         max_targets: None,
+        requires_type: None,
     };
 
     let cases: Vec<(&str, SaveEffect, Creature)> = vec![
@@ -186,6 +187,7 @@ fn evasion_and_resistance_together_sample_like_the_exact_shape() {
         half_on_success: true,
         on_failure: None,
         max_targets: None,
+        requires_type: None,
     };
 
     let mut monk = target(20, 2, &[(DamageKind::Fire, Reduction::Resistant)]);

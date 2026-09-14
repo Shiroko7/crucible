@@ -53,6 +53,9 @@ impl MonsterDefinition {
         let mut builder = CreatureBuilder::new(&self.name, self.ac, self.hp);
         builder.creature.initiative = self.initiative;
         builder.creature.legendary_uses = self.legendary_uses;
+        if let Some(creature_type) = &self.creature_type {
+            builder.set_creature_type(creature_type.clone());
+        }
 
         // Apply saves
         for (ability_name, &bonus) in &self.saves {
