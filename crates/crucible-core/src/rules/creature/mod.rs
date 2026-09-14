@@ -6,7 +6,7 @@ pub mod damage;
 pub mod rider;
 pub mod types;
 
-pub use action::{Effect, Move, SaveEffect, Strike, Uses};
+pub use action::{Effect, Move, MoveKind, SaveEffect, Strike, Uses};
 pub use combatant::Creature;
 pub use damage::{DamageKind, DamageRoll};
 pub use rider::Rider;

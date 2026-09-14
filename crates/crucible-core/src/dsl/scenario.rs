@@ -40,8 +40,8 @@ use std::fmt;
 
 use crate::rules::combat::{Reduction, RollMode};
 use crate::rules::creature::{
-    Ability, Condition, Cost, Creature, DamageKind, DamageRoll, Duration, Effect, Move, Resource,
-    Rider, SaveEffect, Strike, Uses,
+    Ability, Condition, Cost, Creature, DamageKind, DamageRoll, Duration, Effect, Move, MoveKind,
+    Resource, Rider, SaveEffect, Strike, Uses,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,6 +369,10 @@ fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> {
         } else {
             Effect::Sequence(effects)
         },
+        // The string DSL has no clause for it yet; every move it produces is
+        // `Standard` until one is added. `FastHandsPlugin` only ever sees a
+        // `Move` built in Rust, not through this parser.
+        kind: MoveKind::Standard,
     })
 }
 
