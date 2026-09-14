@@ -70,6 +70,25 @@ pub enum Condition {
     /// [`Condition::auto_crits`]: a hit landed against it is an automatic
     /// critical.
     Paralyzed,
+    /// Can't hear. Carries none of Blinded's combat modifiers - nothing here
+    /// rolls a hearing-based check any more than an ability check, so this is
+    /// tracked for provenance (Blindness/Deafness names it explicitly as the
+    /// caster's alternative choice to Blinded) without changing anything a
+    /// duel resolves. The same gap [`Condition::Poisoned`] and
+    /// [`Condition::Blinded`] already note.
+    Deafened,
+    /// Obeys, or resists, a directive on its own very next turn - Command's
+    /// mechanism, and Suggestion's and Dominate's if they are ever added. Not
+    /// itself a named SRD condition, the same way [`Condition::Dodging`]
+    /// names a stance rather than a PHB condition: it is the engine's handle
+    /// on "loses this turn to a compulsion" as its own mechanism, distinct
+    /// from Incapacitated ([`Condition::incapacitated`]) because it carries
+    /// none of that condition's side effects - attacks against a compelled
+    /// creature gain no advantage, it does not auto-fail Strength or
+    /// Dexterity saves, and (see `sim::duel::Fight::legendary`) it does not
+    /// take away legendary actions, since Command's text only ever reaches
+    /// the target's own next turn.
+    Compelled,
 }
 
 impl Condition {
