@@ -80,6 +80,14 @@ impl FeatureRegistry {
                 dice_sides,
             )))
         });
+
+        // Reliable Talent (2024 Rogue 11). `fast_hands` has no entry here -
+        // it needs a full `Move` (see `FastHandsPlugin`'s doc comment),
+        // which these toml-parameter factories cannot build yet.
+        self.register("reliable_talent", |val| {
+            let floor = val.get("floor").and_then(|v| v.as_integer()).unwrap_or(10) as i32;
+            Ok(Box::new(ReliableTalentPlugin::with_floor(floor)))
+        });
     }
 }
 

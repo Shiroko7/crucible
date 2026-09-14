@@ -123,6 +123,13 @@ impl CreatureBuilder {
         self.creature.saves[ability.index()] = bonus;
     }
 
+    /// Set the floor Reliable Talent (or anything shaped like it) puts under
+    /// a proficient ability check's raw d20 roll; see
+    /// [`crate::rules::creature::Creature::check_floor`].
+    pub fn set_reliable_talent_floor(&mut self, floor: i32) {
+        self.creature.reliable_talent_floor = Some(floor);
+    }
+
     /// Declare a spell slot pool's maximum (and starting available count) at
     /// `level`, 1st through 9th.
     pub fn set_spell_slot_max(&mut self, level: u32, max: u32) {

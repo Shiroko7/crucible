@@ -1,8 +1,8 @@
 //! Rogue class feature plugins.
 
-use crate::rules::creature::Rider;
+use crate::rules::creature::{Move, MoveKind, Rider};
 
-use super::traits::{CreatureBuilder, FeaturePlugin, FeatureResult};
+use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
 
 /// Sneak Attack (2024 Rogue 1): once per turn, extra damage dice on a hit
 /// with a finesse or ranged weapon, if the attack has advantage or an ally
@@ -62,6 +62,109 @@ impl FeaturePlugin for SneakAttackPlugin {
             dice_sides: self.dice_sides,
             once_per_turn: true,
         });
+        Ok(())
+    }
+}
+
+/// Fast Hands (2024 Rogue Thief 3): use a Bonus Action to take the Use an
+/// Object action, or to activate a magic item that would otherwise cost the
+/// Magic action - drinking a potion, retrieving a hidden blade, waving a
+/// wand - freeing the Action for something else that turn.
+///
+/// The engine has no generic "Use an Object" or "Magic" action of its own
+/// (see [`MoveKind`]); a creature's actual item-activation move is just
+/// another [`Move`], declared wherever the rest of its actions are. This
+/// plugin's whole job is to take that move and register it as a bonus
+/// action too: `crate::sim::duel` already picks one move from `actions` and,
+/// independently, one from `bonus_actions` each turn, so having the same
+/// move available in both lists *is* the feature - no special-casing in the
+/// turn loop required. Whatever resource or `Uses` budget the move is under
+/// still gates it exactly once, whichever slot spends it.
+///
+/// Takes ownership of the `Move` itself rather than a name to look up,
+/// because the string DSL has no clause yet for tagging a parsed move
+/// `ObjectUse` or `MagicItem` (see the note on `MoveKind::Standard` in
+/// `dsl::scenario::parse_move`) - a move this plugin can apply to only
+/// exists built directly in Rust for now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FastHandsPlugin {
+    pub item_move: Move,
+}
+
+impl FastHandsPlugin {
+    pub fn new(item_move: Move) -> Self {
+        Self { item_move }
+    }
+}
+
+impl FeaturePlugin for FastHandsPlugin {
+    fn id(&self) -> &'static str {
+        "fast_hands"
+    }
+
+    fn name(&self) -> &str {
+        "Fast Hands"
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        match self.item_move.kind {
+            MoveKind::ObjectUse | MoveKind::MagicItem => {
+                builder.add_bonus_action(self.item_move.clone());
+                Ok(())
+            }
+            MoveKind::Standard => Err(FeatureError::InvalidConfiguration(format!(
+                "Fast Hands only promotes a Use an Object or magic item move to a bonus \
+                 action; '{}' is tagged Standard",
+                self.item_move.name
+            ))),
+        }
+    }
+}
+
+/// Reliable Talent (2024 Rogue 11): treat any d20 roll of less than 10 as a
+/// 10, for an ability check using a skill or tool the rogue is proficient
+/// in - a floor under the roll, not a reroll, so it can only ever help.
+///
+/// This only sets [`crate::rules::creature::Creature::reliable_talent_floor`]
+/// via [`CreatureBuilder::set_reliable_talent_floor`]; the "proficient" half
+/// of the rule is up to whoever builds the [`crate::rules::check::CheckRoll`]
+/// for a given check, via [`crate::rules::creature::Creature::check_floor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReliableTalentPlugin {
+    pub floor: i32,
+}
+
+impl ReliableTalentPlugin {
+    /// The standard feature: a floor of 10.
+    pub fn new() -> Self {
+        Self { floor: 10 }
+    }
+
+    /// As [`ReliableTalentPlugin::new`], with an overridden floor - kept
+    /// configurable for the same reason Sneak Attack's dice count is, even
+    /// though 5e only ever prints 10.
+    pub fn with_floor(floor: i32) -> Self {
+        Self { floor }
+    }
+}
+
+impl Default for ReliableTalentPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FeaturePlugin for ReliableTalentPlugin {
+    fn id(&self) -> &'static str {
+        "reliable_talent"
+    }
+
+    fn name(&self) -> &str {
+        "Reliable Talent"
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        builder.set_reliable_talent_floor(self.floor);
         Ok(())
     }
 }
@@ -244,5 +347,122 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn item_move(kind: MoveKind) -> Move {
+        use crate::rules::creature::Effect;
+        Move::new("Potion of Healing", Effect::Sequence(Vec::new())).with_kind(kind)
+    }
+
+    #[test]
+    fn fast_hands_registers_an_object_use_move_as_a_bonus_action() {
+        let builder = CreatureBuilder::new("Thief", 15, 40);
+        let built = builder
+            .apply_feature(&FastHandsPlugin::new(item_move(MoveKind::ObjectUse)))
+            .expect("fast hands applies to an object-use move")
+            .build()
+            .expect("builds");
+        assert_eq!(built.bonus_actions.len(), 1);
+        assert_eq!(built.bonus_actions[0].name, "Potion of Healing");
+        // The Action slot is untouched - it stays free for something else.
+        assert!(built.actions.is_empty());
+    }
+
+    #[test]
+    fn fast_hands_registers_a_magic_item_move_as_a_bonus_action() {
+        let builder = CreatureBuilder::new("Thief", 15, 40);
+        let built = builder
+            .apply_feature(&FastHandsPlugin::new(item_move(MoveKind::MagicItem)))
+            .expect("fast hands applies to a magic item activation")
+            .build()
+            .expect("builds");
+        assert_eq!(built.bonus_actions.len(), 1);
+        assert_eq!(built.bonus_actions[0].name, "Potion of Healing");
+    }
+
+    #[test]
+    fn fast_hands_rejects_a_plain_standard_move() {
+        let builder = CreatureBuilder::new("Thief", 15, 40);
+        let err = builder
+            .apply_feature(&FastHandsPlugin::new(item_move(MoveKind::Standard)))
+            .expect_err("a move not tagged ObjectUse or MagicItem must not be silently promoted");
+        assert!(matches!(err, FeatureError::InvalidConfiguration(_)));
+    }
+
+    #[test]
+    fn fast_hands_leaves_an_already_declared_action_copy_alone() {
+        // A creature can have the same move declared as its Action (the
+        // baseline "Use an Object" everyone can already take) and, once Fast
+        // Hands applies, also as a Bonus Action - both slots usable the same
+        // turn, gated by whatever `Uses`/`Cost` budget the move itself
+        // carries.
+        let mut builder = CreatureBuilder::new("Thief", 15, 40);
+        builder.add_action(item_move(MoveKind::ObjectUse));
+        let built = builder
+            .apply_feature(&FastHandsPlugin::new(item_move(MoveKind::ObjectUse)))
+            .expect("fast hands applies")
+            .build()
+            .expect("builds");
+        assert_eq!(built.actions.len(), 1);
+        assert_eq!(built.bonus_actions.len(), 1);
+    }
+
+    #[test]
+    fn reliable_talent_defaults_to_a_floor_of_ten() {
+        let built = CreatureBuilder::new("Rogue", 15, 40)
+            .apply_feature(&ReliableTalentPlugin::new())
+            .expect("reliable talent applies")
+            .build()
+            .expect("builds");
+        assert_eq!(built.check_floor(true), Some(10));
+        // Never applies to a check the creature isn't proficient in.
+        assert_eq!(built.check_floor(false), None);
+    }
+
+    #[test]
+    fn a_creature_without_reliable_talent_has_no_floor_even_when_proficient() {
+        let built = CreatureBuilder::new("Fighter", 15, 40)
+            .build()
+            .expect("builds");
+        assert_eq!(built.check_floor(true), None);
+    }
+
+    #[test]
+    fn reliable_talent_floor_can_be_overridden() {
+        let built = CreatureBuilder::new("Homebrew Rogue", 15, 40)
+            .apply_feature(&ReliableTalentPlugin::with_floor(12))
+            .expect("reliable talent applies")
+            .build()
+            .expect("builds");
+        assert_eq!(built.check_floor(true), Some(12));
+    }
+
+    /// End-to-end with `CheckRoll`: a proficient check against a dc a floor
+    /// of 10 always meets, once Reliable Talent is applied.
+    #[test]
+    fn reliable_talent_floor_feeds_check_roll_and_guarantees_success() {
+        use crate::rules::check::CheckRoll;
+
+        let built = CreatureBuilder::new("Rogue", 15, 40)
+            .apply_feature(&ReliableTalentPlugin::new())
+            .expect("reliable talent applies")
+            .build()
+            .expect("builds");
+
+        let proficient_check = CheckRoll::new(0, 10);
+        let proficient_check = match built.check_floor(true) {
+            Some(floor) => proficient_check.with_floor(floor),
+            None => proficient_check,
+        };
+        assert!((proficient_check.success_chance() - 1.0).abs() < 1e-12);
+
+        // The same DC, without the floor because this check is not one the
+        // creature is proficient in, is not a guaranteed success.
+        let unproficient_check = CheckRoll::new(0, 10);
+        let unproficient_check = match built.check_floor(false) {
+            Some(floor) => unproficient_check.with_floor(floor),
+            None => unproficient_check,
+        };
+        assert!(unproficient_check.success_chance() < 1.0);
     }
 }
