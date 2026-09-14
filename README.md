@@ -39,7 +39,7 @@ times, reported.
 |---|---|---|
 | `rng` | `prob::rng` | PCG32, seedable, independent streams for parallel rollouts |
 | `dice` | `prob::dice` | exact PMFs by convolution: pools, mixtures, flooring, halving |
-| `combat` | `rules::combat` | attack resolution, both exact and sampled: crits, advantage, resistance |
+| `combat` | `rules::combat` | attack resolution, both exact and sampled: crits, advantage, resistance, composable `AttackModifier`/`DamageRider` lists (Bless, Bane, extra damage dice) |
 | `exact` | `prob::exact` | closed-form kill curves and expected attacks, by dynamic programming |
 | `creature` | `rules::creature` | modular combatant model: multi-type damage, saves, recharge, resource pools, riders |
 | `dsl` | `dsl` | Monad Plugin Architecture (`FeaturePlugin`, `CreatureBuilder`, `FeatureRegistry`), PC & Monster abstractions, TOML config loaders |
