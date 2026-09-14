@@ -369,6 +369,9 @@ fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> {
         } else {
             Effect::Sequence(effects)
         },
+        // The DSL has no clause for it yet; a scenario that needs
+        // concentration waits on that syntax, not on the engine.
+        concentration: false,
     })
 }
 

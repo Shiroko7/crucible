@@ -242,6 +242,9 @@ struct Fighter<'a> {
     rider_uses: Vec<u32>,
     /// Active conditions, each tagged with how it ends. See [`Expiry`].
     conditions: Vec<(Condition, Expiry)>,
+    /// The one spell this creature is concentrating on, if any. See
+    /// [`ActiveConcentration`].
+    concentration: Option<ActiveConcentration>,
     once_per_turn_spent: bool,
     dealt: i64,
     /// Resource points and limited uses burnt. This is the second column of the
@@ -280,6 +283,7 @@ impl<'a> Fighter<'a> {
             resources: creature.resources.iter().map(|r| r.max).collect(),
             rider_uses: creature.riders.iter().map(|r| r.initial_uses()).collect(),
             conditions: Vec::new(),
+            concentration: None,
             once_per_turn_spent: false,
             dealt: 0,
             spent: 0,
@@ -370,6 +374,43 @@ enum Expiry {
         ability: Ability,
         dc: i32,
     },
+}
+
+/// What a concentration spell is maintaining, so ending concentration can
+/// clear it without the tracker needing to know which spell this is.
+///
+/// One variant today, because a condition applied to one or more targets is
+/// the only kind of ongoing effect this engine can express yet - Hold
+/// Person, Hypnotic Pattern. A later spell that maintains something else
+/// instead - Bless and Bane are a flat modifier to a roll, not a condition -
+/// adds a sibling here rather than teaching the clearing logic a hardcoded
+/// case per spell.
+#[derive(Debug, Clone, PartialEq)]
+enum ConcentrationEffect {
+    /// A condition maintained on one or more targets, all cleared at once
+    /// when concentration ends.
+    Condition {
+        targets: Vec<usize>,
+        condition: Condition,
+    },
+}
+
+/// One creature's single slot of concentration.
+///
+/// 5e allows exactly one at a time, which is why this is an `Option` on
+/// [`Fighter`] rather than a collection: starting a new one always replaces
+/// whatever was here, clearing it first exactly as if it had failed a save.
+#[derive(Debug, Clone, PartialEq)]
+struct ActiveConcentration {
+    effect: ConcentrationEffect,
+}
+
+/// DC for the Constitution save concentration takes when its holder takes
+/// `damage`: 10, or half the damage taken, whichever is higher. 5e rounds
+/// the half down, which integer division already does for a non-negative
+/// dividend.
+fn concentration_dc(damage: i32) -> i32 {
+    (damage / 2).max(10)
 }
 
 /// How one fight ended. Everything is aggregated per side.
@@ -993,6 +1034,11 @@ impl<'a> Fight<'a> {
     }
 
     /// Resolve one move and apply everything it does.
+    ///
+    /// A concentration move drops whatever the user was already maintaining
+    /// before it does anything else - even a cast that lands on nobody still
+    /// ends the old spell - and then, if it landed a condition on anyone,
+    /// that becomes the new thing concentration maintains.
     fn apply(
         &mut self,
         m: &Move,
@@ -1002,8 +1048,31 @@ impl<'a> Fight<'a> {
         record: bool,
         line: &mut String,
     ) {
+        if m.concentration {
+            self.end_concentration(me);
+        }
         let mut notes: Vec<String> = Vec::new();
-        self.resolve(&m.effect, rng, me, target, &m.riders, record, &mut notes);
+        let mut landed: Vec<(usize, Condition)> = Vec::new();
+        self.resolve(
+            &m.effect,
+            rng,
+            me,
+            target,
+            &m.riders,
+            record,
+            &mut notes,
+            &mut landed,
+        );
+        if m.concentration {
+            if let Some(&(_, condition)) = landed.first() {
+                self.fighters[me].concentration = Some(ActiveConcentration {
+                    effect: ConcentrationEffect::Condition {
+                        targets: landed.iter().map(|&(t, _)| t).collect(),
+                        condition,
+                    },
+                });
+            }
+        }
         if record {
             if !line.is_empty() {
                 line.push_str(" | ");
@@ -1027,6 +1096,7 @@ impl<'a> Fight<'a> {
         move_riders: &[Rider],
         record: bool,
         notes: &mut Vec<String>,
+        landed_conditions: &mut Vec<(usize, Condition)>,
     ) {
         match effect {
             Effect::Strikes { strike, count } => {
@@ -1057,7 +1127,7 @@ impl<'a> Fight<'a> {
                     let (dealt, cut) =
                         reduce_incoming(rng, &mut self.fighters[current_target], strike, raw);
                     self.fighters[me].dealt += i64::from(dealt);
-                    self.fighters[current_target].hp -= dealt;
+                    self.apply_damage(rng, current_target, dealt);
                     if record {
                         notes.push(match landed {
                             Landed::Miss => "miss".to_string(),
@@ -1067,7 +1137,15 @@ impl<'a> Fight<'a> {
                         });
                     }
                     if landed != Landed::Miss {
-                        self.fire_on_hit(rng, me, current_target, move_riders, record, notes);
+                        self.fire_on_hit(
+                            rng,
+                            me,
+                            current_target,
+                            move_riders,
+                            record,
+                            notes,
+                            landed_conditions,
+                        );
                     }
                 }
             }
@@ -1090,9 +1168,10 @@ impl<'a> Fight<'a> {
                         && !self.fighters[i].has(Condition::blocks_riders);
                     let dealt = save.sample_known(rng, against, saved, evasion);
                     self.fighters[me].dealt += i64::from(dealt);
-                    self.fighters[i].hp -= dealt;
+                    self.apply_damage(rng, i, dealt);
                     if let (false, Some((condition, duration))) = (saved, save.on_failure) {
-                        self.fighters[i].add_condition(condition, expiry(me, i, duration));
+                        self.apply_condition(i, condition, expiry(me, i, duration));
+                        landed_conditions.push((i, condition));
                     }
                     if record {
                         let how = match (saved, resisted) {
@@ -1112,19 +1191,30 @@ impl<'a> Fight<'a> {
                 }
             }
             Effect::Stance { condition } => {
-                self.fighters[me].add_condition(*condition, Expiry::TurnStart(me));
+                self.apply_condition(me, *condition, Expiry::TurnStart(me));
+                landed_conditions.push((me, *condition));
                 if record {
                     notes.push(condition.name().to_string());
                 }
             }
             Effect::Sequence(parts) => {
                 for part in parts {
-                    self.resolve(part, rng, me, target, move_riders, record, notes);
+                    self.resolve(
+                        part,
+                        rng,
+                        me,
+                        target,
+                        move_riders,
+                        record,
+                        notes,
+                        landed_conditions,
+                    );
                 }
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fire_on_hit(
         &mut self,
         rng: &mut Rng,
@@ -1133,6 +1223,7 @@ impl<'a> Fight<'a> {
         move_riders: &[Rider],
         record: bool,
         notes: &mut Vec<String>,
+        landed_conditions: &mut Vec<(usize, Condition)>,
     ) {
         for rider in move_riders {
             let Rider::SaveOrCondition {
@@ -1159,7 +1250,8 @@ impl<'a> Fight<'a> {
 
             let (saved, resisted) = saving_throw(&mut self.fighters, rng, target, *ability, *dc);
             if !saved {
-                self.fighters[target].add_condition(*condition, expiry(me, target, *duration));
+                self.apply_condition(target, *condition, expiry(me, target, *duration));
+                landed_conditions.push((target, *condition));
             }
             if record {
                 notes.push(format!(
@@ -1171,6 +1263,62 @@ impl<'a> Fight<'a> {
                         _ => "LANDED",
                     }
                 ));
+            }
+        }
+    }
+
+    /// Add `condition` to `victim`, then end their concentration if this
+    /// takes away their turn. An Incapacitated creature cannot concentrate on
+    /// anything, and 5e offers no save against losing it that way - unlike
+    /// damage, which gets one.
+    fn apply_condition(&mut self, victim: usize, condition: Condition, expiry: Expiry) {
+        self.fighters[victim].add_condition(condition, expiry);
+        if condition.incapacitated() {
+            self.end_concentration(victim);
+        }
+    }
+
+    /// Apply damage already run through resistance and reactions, then
+    /// handle what it does to the target's concentration: dropping to 0 HP
+    /// ends it outright (no save offered, same as Incapacitated), and
+    /// surviving damage forces the save that might end it anyway.
+    fn apply_damage(&mut self, rng: &mut Rng, target: usize, dealt: i32) {
+        self.fighters[target].hp -= dealt;
+        if !self.fighters[target].alive() {
+            self.end_concentration(target);
+        } else if dealt > 0 {
+            self.concentration_check(rng, target, dealt);
+        }
+    }
+
+    /// The Constitution save concentration takes when its holder is
+    /// damaged. Reuses [`saving_throw`], so an auto-failing condition and
+    /// Legendary Resistance both apply to it exactly as they do to any other
+    /// save.
+    fn concentration_check(&mut self, rng: &mut Rng, who: usize, damage: i32) {
+        if self.fighters[who].concentration.is_none() {
+            return;
+        }
+        let dc = concentration_dc(damage);
+        let (saved, _resisted) = saving_throw(&mut self.fighters, rng, who, Ability::Con, dc);
+        if !saved {
+            self.end_concentration(who);
+        }
+    }
+
+    /// End `who`'s concentration, if they have any, clearing whatever it was
+    /// maintaining from every combatant it was maintained on.
+    fn end_concentration(&mut self, who: usize) {
+        let Some(active) = self.fighters[who].concentration.take() else {
+            return;
+        };
+        match active.effect {
+            ConcentrationEffect::Condition { targets, condition } => {
+                for t in targets {
+                    if let Some(f) = self.fighters.get_mut(t) {
+                        f.conditions.retain(|&(c, _)| c != condition);
+                    }
+                }
             }
         }
     }
@@ -2343,5 +2491,226 @@ mod tests {
             &mut log,
         );
         assert!(o.rounds >= 1);
+    }
+
+    /// DC 10, or half the damage taken, whichever is higher - and 5e's "half,
+    /// rounded down" so the boundary sits exactly at 20/21 damage rather than
+    /// drifting up at odd numbers.
+    #[test]
+    fn concentration_dc_is_ten_or_half_the_damage_whichever_is_higher() {
+        assert_eq!(concentration_dc(0), 10);
+        assert_eq!(concentration_dc(10), 10);
+        assert_eq!(concentration_dc(19), 10);
+        assert_eq!(concentration_dc(20), 10);
+        assert_eq!(concentration_dc(21), 10, "half of 21 rounds down to 10");
+        assert_eq!(concentration_dc(22), 11);
+        assert_eq!(concentration_dc(41), 20, "half of 41 rounds down to 20");
+        assert_eq!(concentration_dc(42), 21);
+    }
+
+    /// Casting a second concentration spell ends the first immediately, even
+    /// though nothing here ever deals damage - a check that only fires on
+    /// "took damage and failed the save" would miss the rule that *starting*
+    /// a new one is what breaks the old one.
+    #[test]
+    fn a_second_concentration_spell_ends_the_first() {
+        let cast = |condition: Condition| {
+            Move::new(
+                "Spell",
+                Effect::Save(SaveEffect {
+                    ability: Ability::Wis,
+                    dc: 99, // never saved
+                    damage: vec![],
+                    half_on_success: false,
+                    on_failure: Some((condition, Duration::ApplierTurn)),
+                    max_targets: None,
+                }),
+            )
+            .with_concentration()
+        };
+
+        let mut caster = Creature::new("caster", 10, 100);
+        caster.actions.push(cast(Condition::Prone));
+        caster.bonus_actions.push(cast(Condition::Blinded));
+        let victim = Creature::new("victim", 10, 100);
+
+        let roster = [(&caster, Side::A), (&victim, Side::B)];
+        let mut rng = Rng::new(1);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+        fight.take_turn(1, 0, &mut rng, &mut log, None);
+
+        assert!(
+            !fight.fighters[1].has(|c| c == Condition::Prone),
+            "the action's condition must be cleared once the bonus action starts concentrating on something else"
+        );
+        assert!(
+            fight.fighters[1].has(|c| c == Condition::Blinded),
+            "the second spell's condition must still land"
+        );
+        let active = fight.fighters[0]
+            .concentration
+            .as_ref()
+            .expect("still concentrating on the second spell");
+        match &active.effect {
+            ConcentrationEffect::Condition { targets, condition } => {
+                assert_eq!(*condition, Condition::Blinded);
+                assert_eq!(*targets, vec![1]);
+            }
+        }
+    }
+
+    /// A failed concentration save clears the condition from every combatant
+    /// it was maintained on, not just one - the shape an area concentration
+    /// spell (Hypnotic Pattern) needs.
+    #[test]
+    fn a_failed_concentration_save_clears_the_effect_from_every_target() {
+        let mut caster = Creature::new("caster", 10, 100);
+        caster.saves[Ability::Con.index()] = -100; // never saves
+        let a = Creature::new("a", 10, 100);
+        let b = Creature::new("b", 10, 100);
+
+        let roster = [(&caster, Side::A), (&a, Side::B), (&b, Side::B)];
+        let mut rng = Rng::new(2);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        fight.fighters[1]
+            .conditions
+            .push((Condition::Poisoned, Expiry::TurnStart(1)));
+        fight.fighters[2]
+            .conditions
+            .push((Condition::Poisoned, Expiry::TurnStart(2)));
+        fight.fighters[0].concentration = Some(ActiveConcentration {
+            effect: ConcentrationEffect::Condition {
+                targets: vec![1, 2],
+                condition: Condition::Poisoned,
+            },
+        });
+
+        fight.concentration_check(&mut rng, 0, 100); // dc 50, and the save always fails
+        assert!(fight.fighters[0].concentration.is_none());
+        assert!(!fight.fighters[1].has(|c| c == Condition::Poisoned));
+        assert!(!fight.fighters[2].has(|c| c == Condition::Poisoned));
+    }
+
+    /// A save that is beaten leaves concentration alone - the counterpart to
+    /// the failure case above, so a check that always breaks it cannot pass
+    /// both.
+    #[test]
+    fn a_beaten_concentration_save_keeps_it_active() {
+        let mut caster = Creature::new("caster", 10, 100);
+        caster.saves[Ability::Con.index()] = 100; // always saves
+        let victim = Creature::new("victim", 10, 100);
+        let roster = [(&caster, Side::A), (&victim, Side::B)];
+        let mut rng = Rng::new(3);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        fight.fighters[1]
+            .conditions
+            .push((Condition::Poisoned, Expiry::TurnStart(1)));
+        fight.fighters[0].concentration = Some(ActiveConcentration {
+            effect: ConcentrationEffect::Condition {
+                targets: vec![1],
+                condition: Condition::Poisoned,
+            },
+        });
+
+        fight.concentration_check(&mut rng, 0, 100);
+        assert!(fight.fighters[0].concentration.is_some());
+        assert!(fight.fighters[1].has(|c| c == Condition::Poisoned));
+    }
+
+    /// Dropping to 0 HP ends concentration outright - no save offered, unlike
+    /// ordinary damage. A Con save bonus of +100 would beat any DC, so if the
+    /// implementation quietly rolled one anyway this would still pass; the
+    /// point is that it must not need to.
+    #[test]
+    fn dropping_to_zero_hp_ends_concentration_without_a_save() {
+        let mut caster = Creature::new("caster", 10, 100);
+        caster.saves[Ability::Con.index()] = 100;
+        let victim = Creature::new("victim", 10, 100);
+        let roster = [(&caster, Side::A), (&victim, Side::B)];
+        let mut rng = Rng::new(4);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        fight.fighters[1]
+            .conditions
+            .push((Condition::Poisoned, Expiry::TurnStart(1)));
+        fight.fighters[0].concentration = Some(ActiveConcentration {
+            effect: ConcentrationEffect::Condition {
+                targets: vec![1],
+                condition: Condition::Poisoned,
+            },
+        });
+
+        fight.apply_damage(&mut rng, 0, fight.fighters[0].hp);
+        assert!(fight.fighters[0].concentration.is_none());
+        assert!(!fight.fighters[1].has(|c| c == Condition::Poisoned));
+    }
+
+    /// Becoming Incapacitated ends concentration immediately too, the same
+    /// way 0 HP does - no save, because an Incapacitated creature cannot
+    /// concentrate on anything at all.
+    #[test]
+    fn becoming_incapacitated_ends_concentration_without_a_save() {
+        let mut caster = Creature::new("caster", 10, 100);
+        caster.saves[Ability::Con.index()] = 100;
+        let victim = Creature::new("victim", 10, 100);
+        let roster = [(&caster, Side::A), (&victim, Side::B)];
+        let mut rng = Rng::new(5);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        fight.fighters[1]
+            .conditions
+            .push((Condition::Poisoned, Expiry::TurnStart(1)));
+        fight.fighters[0].concentration = Some(ActiveConcentration {
+            effect: ConcentrationEffect::Condition {
+                targets: vec![1],
+                condition: Condition::Poisoned,
+            },
+        });
+
+        fight.apply_condition(0, Condition::Stunned, Expiry::TurnStart(0));
+        assert!(fight.fighters[0].concentration.is_none());
+        assert!(!fight.fighters[1].has(|c| c == Condition::Poisoned));
     }
 }
