@@ -359,3 +359,75 @@ fn a_reactive_ac_boost_agrees_with_the_exact_path_on_a_multi_type_strike() {
         });
     }
 }
+
+/// A passive item's flat AC bonus (`trait: ac 2`) is not a new engine hook -
+/// it folds straight into the creature's own `ac` field before combat
+/// resolution ever runs, unlike [`Rider::ReactionOnTargeted`]'s *reactive*
+/// boost above. So the agreement this needs is the plainest kind: build a
+/// creature through the same `trait:` DSL a real item's bundle would use, and
+/// check the exact and sampled paths still agree on the AC that comes out.
+#[test]
+fn an_item_ac_bonus_trait_composes_into_ac_and_still_agrees_with_the_exact_path() {
+    let boosted = crucible_core::scenario::parse(
+        "creature: x\nac: 14\nhp: 1000\ntrait: ac 2\ntrait: ac bonus 2\n",
+    )
+    .expect("an ac-boosted creature parses")
+    .remove(0);
+    // Two stacked AC-granting traits, on top of a 14 base.
+    assert_eq!(boosted.ac, 18);
+
+    let strike = rend();
+    let exact = strike.damage_pmf(&boosted);
+    agree(
+        "a rend against a target wearing two AC-granting items",
+        970,
+        &exact,
+        |rng| strike.sample(rng, &boosted),
+    );
+}
+
+/// The mirror case for the spell attack/DC bonus: it composes additively
+/// into [`crucible_core::creature::SpellCastingProfile::item_bonus`], and the
+/// resulting DC is then just an ordinary saving throw DC, so the same
+/// agreement machinery [`a_saving_throw_samples_like_its_exact_distribution`]
+/// uses applies unchanged - the point is that the number the trait produces
+/// is the number both paths already agree on.
+#[test]
+fn an_item_spell_dc_bonus_composes_and_still_agrees_with_the_exact_path() {
+    let registry = crucible_core::FeatureRegistry::new();
+    let toml = r#"
+        [pc]
+        name = "Test Caster"
+        ac = 12
+        hp = 30
+        traits = ["spell 2"]
+
+        [pc.spellcasting]
+        ability = "int"
+        ability_modifier = 3
+        proficiency_bonus = 2
+    "#;
+    let caster = crucible_core::load_creature_from_str(toml, &registry)
+        .expect("a caster with a spell-bonus trait parses");
+    // 3 (INT mod) + 2 (proficiency) + 2 (item, from the trait) = 7; DC 15.
+    assert_eq!(caster.spell_save_dc(), Some(15));
+    let dc = caster.spell_save_dc().unwrap();
+
+    let breath = SaveEffect {
+        ability: Ability::Dex,
+        dc,
+        damage: vec![DamageRoll::new(8, 6, 0, DamageKind::Necrotic)],
+        half_on_success: true,
+        on_failure: Vec::new(),
+        max_targets: None,
+        requires_type: None,
+    };
+    let defender = target(16, 2, &[]);
+    let exact = breath.damage_pmf(&defender);
+    agree(
+        "a save against a dc raised by an item's spell bonus trait",
+        980,
+        &exact,
+        |rng| breath.sample(rng, &defender).0,
+    );
+}
