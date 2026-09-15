@@ -375,12 +375,14 @@ pub enum Uses {
 /// What kind of activity a move represents, beyond its damage/effect shape.
 ///
 /// Almost every move needs nothing here - `Standard` covers plain attacks,
-/// stances and saves, and nothing reads this tag at all by default. The two
-/// other variants exist only so a plugin can recognise "this move is RAW an
-/// Action" without the engine needing a separate "Use an Object" or "Magic"
-/// action type of its own: `FastHandsPlugin` is the reader, and rejects
-/// anything tagged `Standard` rather than silently promoting it - see
-/// `crate::dsl::plugin::rogue`.
+/// stances and saves, and nothing reads this tag at all by default. The other
+/// variants exist only so a plugin, or a condition's move gating, can
+/// recognise "this move is RAW an Action" - `ObjectUse`/`MagicItem` for
+/// `FastHandsPlugin`, which rejects anything tagged `Standard` or `Spell`
+/// rather than silently promoting it - see `crate::dsl::plugin::rogue` - and
+/// `Spell`/`MagicItem` for a condition like
+/// [`crate::rules::creature::Condition::Suppressed`] that blocks casting and
+/// item activation, via `sim::duel`'s move gating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MoveKind {
     #[default]
@@ -391,6 +393,11 @@ pub enum MoveKind {
     /// Activating a magic item that would otherwise cost the Magic action -
     /// a wand, a staff, most consumable magic items.
     MagicItem,
+    /// Casting a spell. Nothing yet spends a spell slot when a move tagged
+    /// this way is taken - that wiring is a separate concern from the tag
+    /// existing at all, the same way `MoveKind` existed before
+    /// `FastHandsPlugin` had anything to promote.
+    Spell,
 }
 
 #[derive(Debug, Clone, PartialEq)]
