@@ -24,6 +24,10 @@
 //! trait: evasion dex
 //! trait: legendary resistance 3
 //! trait: deflect 1d10+7 bludgeoning, piercing, slashing
+//! trait: ac 2
+//! trait: saves 1
+//! trait: spell 1
+//! trait: resistance fire, cold
 //! action: Greatclub | strikes 1 | hit +6 | 2d8+4 bludgeoning
 //! action: Staff | strikes 2 | hit +9 | 1d8+6 bludgeoning
 //!              | on hit save con dc 16 stunned once cost focus 1
@@ -176,8 +180,8 @@ pub fn parse(text: &str) -> Result<Vec<Creature>, ParseError> {
                 });
             }
             "trait" => {
-                let rider = parse_trait(&value).map_err(fail)?;
-                current.riders.push(rider);
+                let effect = parse_trait(&value).map_err(fail)?;
+                effect.apply(current).map_err(fail)?;
             }
             "action" | "bonus" | "legendary" => {
                 let m = parse_move(&value, current).map_err(fail)?;
@@ -258,8 +262,71 @@ fn logical_lines(text: &str) -> Vec<(usize, String)> {
     out
 }
 
-/// An always-on or reactive modifier.
-pub fn parse_trait_external(value: &str) -> Result<Rider, String> {
+/// The direct effect of one `trait:` line.
+///
+/// Most traits so far - Evasion, Legendary Resistance, Deflect Attacks - are
+/// [`Rider`]s: they only matter at a specific point the combat engine already
+/// hooks (a save, a reaction). A magic item's passive stat boost is not that
+/// shape - a flat bonus to AC, to every saving throw, or to a spell attack/DC
+/// is just a number the engine already reads straight off the creature, so it
+/// is applied directly rather than routed through a rider that would have
+/// nowhere new to fire. Keeping both kinds behind one `TraitEffect` is what
+/// lets `traits = [...]` stay one flat list of independent, composable
+/// keyword phrases regardless of which shape a given trait turns out to be.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TraitEffect {
+    Rider(Rider),
+    /// A flat, always-on bonus to Armor Class - distinct from
+    /// [`Rider::ReactionOnTargeted`], which is a *reactive* AC bonus spent
+    /// against one attack rather than always active.
+    AcBonus(i32),
+    /// A flat, always-on bonus to every saving throw.
+    SavesBonus(i32),
+    /// A flat, always-on bonus to spell attack rolls and spell save DC,
+    /// added to the creature's existing [`crate::rules::creature::SpellCastingProfile::item_bonus`].
+    SpellBonus(i32),
+    /// Resistance to one or more damage types.
+    Resistance(Vec<DamageKind>),
+}
+
+impl TraitEffect {
+    /// Apply this effect directly onto `creature`.
+    ///
+    /// Every variant but [`TraitEffect::SpellBonus`] always succeeds: there is
+    /// nothing to validate about adding a number to an AC, a save array, or a
+    /// reduction list. A spell attack/DC bonus needs a caster to add itself
+    /// to, and a creature with no `spellcasting` profile at all is the one
+    /// case this cannot silently do something reasonable with, so it is
+    /// reported rather than dropped.
+    pub fn apply(self, creature: &mut Creature) -> Result<(), String> {
+        match self {
+            Self::Rider(rider) => creature.riders.push(rider),
+            Self::AcBonus(n) => creature.ac += n,
+            Self::SavesBonus(n) => {
+                for save in creature.saves.iter_mut() {
+                    *save += n;
+                }
+            }
+            Self::SpellBonus(n) => {
+                let profile = creature.spellcasting.as_mut().ok_or_else(|| {
+                    "a spell attack/DC bonus trait needs this creature to already have a \
+                     `spellcasting` profile"
+                        .to_string()
+                })?;
+                profile.item_bonus += n;
+            }
+            Self::Resistance(kinds) => {
+                for kind in kinds {
+                    creature.reductions.push((kind, Reduction::Resistant));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An always-on or reactive modifier, or a flat passive stat bonus.
+pub fn parse_trait_external(value: &str) -> Result<TraitEffect, String> {
     parse_trait(value)
 }
 
@@ -268,8 +335,36 @@ pub fn parse_move_external(value: &str, owner: &Creature) -> Result<Move, String
     parse_move(value, owner)
 }
 
-/// An always-on or reactive modifier.
-fn parse_trait(value: &str) -> Result<Rider, String> {
+/// A comma-separated list of damage types: `fire, cold`. Blank entries - from
+/// a trailing comma - are dropped rather than rejected.
+fn parse_damage_kinds(text: &str, context: &str) -> Result<Vec<DamageKind>, String> {
+    let mut kinds = Vec::new();
+    for word in text.split(',') {
+        let word = word.trim();
+        if word.is_empty() {
+            continue;
+        }
+        kinds.push(
+            DamageKind::parse(word)
+                .ok_or_else(|| format!("unknown damage type `{word}` in `{context}`"))?,
+        );
+    }
+    Ok(kinds)
+}
+
+/// The first word, scanning from the end, that parses as a signed number -
+/// tolerating a filler word in between, so `ac 2` and the more readable
+/// `ac bonus 2` both work.
+fn trailing_number(words: &[&str], context: &str) -> Result<i32, String> {
+    words
+        .iter()
+        .rev()
+        .find_map(|w| number(w).ok())
+        .ok_or_else(|| format!("expected a bonus number in `{context}`"))
+}
+
+/// An always-on or reactive modifier, or a flat passive stat bonus.
+fn parse_trait(value: &str) -> Result<TraitEffect, String> {
     let words: Vec<&str> = value.split_whitespace().collect();
     let head = words
         .first()
@@ -280,7 +375,7 @@ fn parse_trait(value: &str) -> Result<Rider, String> {
             let name = arg(&words, 1, value)?;
             let ability = Ability::parse(name)
                 .ok_or_else(|| format!("unknown ability `{name}` in `{value}`"))?;
-            Ok(Rider::NothingOnSuccess { ability })
+            Ok(TraitEffect::Rider(Rider::NothingOnSuccess { ability }))
         }
         // `legendary resistance 3`, or the mechanism's own name.
         "legendary" | "always" => {
@@ -289,7 +384,7 @@ fn parse_trait(value: &str) -> Result<Rider, String> {
                 .rev()
                 .find_map(|w| count(w).ok())
                 .ok_or_else(|| format!("expected a number of uses in `{value}`"))?;
-            Ok(Rider::AlwaysSucceed { uses: n })
+            Ok(TraitEffect::Rider(Rider::AlwaysSucceed { uses: n }))
         }
         // `deflect 1d10+7 bludgeoning, piercing, slashing [per round 2]`
         "deflect" | "reduce" => {
@@ -305,26 +400,37 @@ fn parse_trait(value: &str) -> Result<Rider, String> {
                 }
                 None => (rest, 1),
             };
-            let mut kinds = Vec::new();
-            for word in kinds_text.split(',') {
-                let word = word.trim();
-                if word.is_empty() {
-                    continue;
-                }
-                kinds.push(
-                    DamageKind::parse(word)
-                        .ok_or_else(|| format!("unknown damage type `{word}` in `{value}`"))?,
-                );
-            }
+            let kinds = parse_damage_kinds(kinds_text, value)?;
             if kinds.is_empty() {
                 return Err(format!("`{value}` needs the damage types it applies to"));
             }
-            Ok(Rider::ReduceDamage {
+            Ok(TraitEffect::Rider(Rider::ReduceDamage {
                 // The type on the reduction roll is never read; only its dice.
                 roll: DamageRoll::new(dice, sides, bonus, DamageKind::Force),
                 kinds,
                 per_round,
-            })
+            }))
+        }
+        // `ac 2`, or the more readable `ac bonus 2` - a passive item's flat
+        // Armor Class bonus.
+        "ac" => Ok(TraitEffect::AcBonus(trailing_number(&words, value)?)),
+        // `saves 1`, or `saves bonus 1` - a passive item's flat bonus to
+        // every saving throw, as opposed to one ability at a time the way
+        // the stat block's own `saves:` table works.
+        "saves" | "save" => Ok(TraitEffect::SavesBonus(trailing_number(&words, value)?)),
+        // `spell 1`, or `spell bonus 1` - a passive item's flat bonus to
+        // spell attack rolls and spell save DC, added to the caster's own
+        // `SpellCastingProfile::item_bonus`.
+        "spell" => Ok(TraitEffect::SpellBonus(trailing_number(&words, value)?)),
+        // `resistance fire`, or `resistance fire, cold` - a passive item's
+        // grant of resistance to one or more damage types, alongside
+        // whatever the stat block's own `resist:` list already carries.
+        "resistance" | "resist" => {
+            let kinds = parse_damage_kinds(&words[1..].join(" "), value)?;
+            if kinds.is_empty() {
+                return Err(format!("`{value}` needs at least one damage type"));
+            }
+            Ok(TraitEffect::Resistance(kinds))
         }
         other => Err(format!("unknown trait `{other}`")),
     }
@@ -702,6 +808,73 @@ trait: deflect 1d10+7 bludgeoning, piercing, slashing
             (1, 10, 7)
         );
         assert_eq!(*deflect.2, 1);
+    }
+
+    /// The four generic item-passive traits ARCH-05's spellcasting profile and
+    /// the existing AC/saves/resistance fields make possible: none of them
+    /// are riders, and a creature can carry any subset of them at once,
+    /// exactly the way real items grant different subsets of these.
+    #[test]
+    fn stat_boost_traits_stack_directly_onto_the_creature_and_combine() {
+        let text = "
+creature: x
+hp: 10
+ac: 14
+saves: str +1, dex +1, con +1, int +1, wis +1, cha +1
+resist: cold
+trait: ac 2
+trait: ac bonus 1
+trait: saves 1
+trait: resistance fire, radiant
+";
+        let c = &parse(text).unwrap()[0];
+        // Two separate AC-granting items stack: 14 base + 2 + 1.
+        assert_eq!(c.ac, 17);
+        // The flat saves trait adds on top of the stat block's own +1 to
+        // every ability, not just one.
+        for ability in [
+            Ability::Str,
+            Ability::Dex,
+            Ability::Con,
+            Ability::Int,
+            Ability::Wis,
+            Ability::Cha,
+        ] {
+            assert_eq!(c.save(ability), 2, "{ability:?} should be +1 base, +1 item");
+        }
+        // The trait-granted resistances sit alongside the stat block's own
+        // `resist:` list rather than replacing it.
+        assert_eq!(c.reduction(DamageKind::Cold), Reduction::Resistant);
+        assert_eq!(c.reduction(DamageKind::Fire), Reduction::Resistant);
+        assert_eq!(c.reduction(DamageKind::Radiant), Reduction::Resistant);
+        assert_eq!(c.reduction(DamageKind::Acid), Reduction::Normal);
+    }
+
+    /// A spell attack/DC bonus needs an existing spellcasting profile to add
+    /// itself to - there is nothing reasonable to do with "add 2 to a spell
+    /// attack bonus" on a creature that does not cast spells, so this is
+    /// reported rather than silently dropped.
+    #[test]
+    fn a_spell_bonus_trait_without_a_spellcasting_profile_is_an_error() {
+        let text = "
+creature: x
+hp: 10
+trait: spell 2
+";
+        let err = parse(text).expect_err("no spellcasting profile to add the bonus to");
+        assert!(err.message.contains("spellcasting"), "{}", err.message);
+    }
+
+    /// A malformed or unrecognised trait keyword is a parse error rather than
+    /// something silently ignored.
+    #[test]
+    fn an_unknown_trait_keyword_is_rejected() {
+        let text = "
+creature: x
+hp: 10
+trait: flight 60
+";
+        assert!(parse(text).is_err());
     }
 
     /// A monk's turn, which is what forced resource pools and on-hit riders to
