@@ -9,5 +9,5 @@ pub use combat::{
 };
 pub use creature::{
     Ability, Condition, Cost, Creature, DamageKind, DamageRoll, Duration, Effect, Move, Resource,
-    Rider, SaveEffect, Strike, Uses,
+    Rider, SaveEffect, Size, Strike, Uses,
 };

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::dsl::plugin::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
 use crate::rules::combat::Reduction;
-use crate::rules::creature::{Ability, Creature, DamageKind};
+use crate::rules::creature::{Ability, Creature, DamageKind, Size};
 
 /// Structured representation of a Monster / NPC.
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +53,16 @@ impl MonsterDefinition {
         let mut builder = CreatureBuilder::new(&self.name, self.ac, self.hp);
         builder.creature.initiative = self.initiative;
         builder.creature.legendary_uses = self.legendary_uses;
+
+        // Apply the size category - the gate Cunning Strike's Trip option
+        // reads (a Huge or Gargantuan target cannot be tripped at all).
+        // Left at `Size::default()` (Medium) for a statblock that never
+        // declares one, same as `creature_type` staying `None`.
+        if let Some(size_name) = &self.size {
+            let size = Size::parse(size_name)
+                .ok_or_else(|| FeatureError::UnknownSize(size_name.clone()))?;
+            builder.set_size(size);
+        }
 
         // Apply saves
         for (ability_name, &bonus) in &self.saves {
