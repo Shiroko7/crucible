@@ -6,7 +6,7 @@
 
 use crate::rules::combat::Reduction;
 use crate::rules::creature::{
-    Ability, Creature, CreatureType, DamageKind, Move, Resource, Rider, SpellCastingProfile,
+    Ability, Creature, CreatureType, DamageKind, Move, Resource, Rider, Size, SpellCastingProfile,
 };
 use std::fmt;
 
@@ -17,6 +17,7 @@ pub enum FeatureError {
     UnknownAbility(String),
     UnknownDamageKind(String),
     UnknownCreatureType(String),
+    UnknownSize(String),
     InvalidConfiguration(String),
     ExecutionError(String),
 }
@@ -29,6 +30,7 @@ impl fmt::Display for FeatureError {
             Self::UnknownAbility(a) => write!(f, "unknown ability '{a}'"),
             Self::UnknownDamageKind(d) => write!(f, "unknown damage kind '{d}'"),
             Self::UnknownCreatureType(t) => write!(f, "unknown creature type '{t}'"),
+            Self::UnknownSize(s) => write!(f, "unknown size '{s}'"),
             Self::InvalidConfiguration(msg) => write!(f, "invalid configuration: {msg}"),
             Self::ExecutionError(msg) => write!(f, "feature execution error: {msg}"),
         }
@@ -137,6 +139,11 @@ impl CreatureBuilder {
     /// [`crate::rules::creature::Rider::BonusDamageVsCreatureType`].
     pub fn set_creature_type(&mut self, creature_type: CreatureType) {
         self.creature.creature_type = Some(creature_type);
+    }
+
+    /// Set this creature's 5e size category.
+    pub fn set_size(&mut self, size: Size) {
+        self.creature.size = size;
     }
 
     /// Declare a spell slot pool's maximum (and starting available count) at
