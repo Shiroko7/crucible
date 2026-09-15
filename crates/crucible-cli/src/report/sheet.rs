@@ -174,5 +174,8 @@ pub fn describe_trait(rider: &Rider) -> String {
             "+{dice_count}d{dice_sides} on advantage or an adjacent ally, not disadvantage{}",
             if *once_per_turn { " (once/turn)" } else { "" }
         ),
+        Rider::CunningStrike { dc } => {
+            format!("cunning strike: spend sneak attack dice dc {dc}")
+        }
     }
 }

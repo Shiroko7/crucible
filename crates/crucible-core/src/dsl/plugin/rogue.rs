@@ -1,6 +1,6 @@
 //! Rogue class feature plugins.
 
-use crate::rules::creature::Rider;
+use crate::rules::creature::{Ability, Rider, SpellCastingProfile};
 
 use super::traits::{CreatureBuilder, FeaturePlugin, FeatureResult};
 
@@ -62,6 +62,65 @@ impl FeaturePlugin for SneakAttackPlugin {
             dice_sides: self.dice_sides,
             once_per_turn: true,
         });
+        Ok(())
+    }
+}
+
+/// Cunning Strike (2024 Rogue 5): forgo some of a qualifying Sneak Attack's
+/// dice, 1d6 at a time, to fund a rider effect at this creature's own Cunning
+/// Strike DC instead of rolling that share for damage.
+///
+/// This plugin is deliberately the whole framework and nothing else: it only
+/// unlocks the DC and the ability to spend from Sneak Attack's pool (see
+/// [`Rider::CunningStrike`] and [`crate::rules::combat::DamageRider::spend`]).
+/// Which effects a spend actually buys - poison, a shove, breaking a grapple -
+/// is future work, one plugin per effect, each reading this same DC.
+///
+/// `dex_modifier` and `proficiency_bonus` are plugin parameters rather than a
+/// baked-in `dc`, for the same reason [`crate::dsl::config::SpellcastingConfig`]
+/// carries its own ability modifier and proficiency bonus instead of a single
+/// precomputed number: a magic item or a level-up changes one of the inputs
+/// without this plugin's shape changing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CunningStrikePlugin {
+    pub dex_modifier: i32,
+    pub proficiency_bonus: i32,
+}
+
+impl CunningStrikePlugin {
+    pub fn new(dex_modifier: i32, proficiency_bonus: i32) -> Self {
+        Self {
+            dex_modifier,
+            proficiency_bonus,
+        }
+    }
+
+    /// The Cunning Strike DC: `8 + Dexterity modifier + proficiency bonus`.
+    ///
+    /// That is exactly [`SpellCastingProfile::save_dc`]'s `8 + ability
+    /// modifier + proficiency bonus` shape, reused here rather than
+    /// reimplemented - constructed on the fly and keyed to
+    /// [`Ability::Dex`] specifically, never read off `creature.spellcasting`.
+    /// Cunning Strike is not spellcasting: it uses this same formula even for
+    /// a Rogue with no spellcasting profile at all (every base Rogue) and
+    /// even for one whose actual spellcasting ability is something else
+    /// entirely (an Arcane Trickster's Intelligence).
+    pub fn dc(&self) -> i32 {
+        SpellCastingProfile::new(Ability::Dex, self.dex_modifier, self.proficiency_bonus).save_dc()
+    }
+}
+
+impl FeaturePlugin for CunningStrikePlugin {
+    fn id(&self) -> &'static str {
+        "cunning_strike"
+    }
+
+    fn name(&self) -> &str {
+        "Cunning Strike"
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        builder.add_rider(Rider::CunningStrike { dc: self.dc() });
         Ok(())
     }
 }
@@ -244,5 +303,93 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `8 + Dex modifier + proficiency bonus`, the printed 2024 Cunning
+    /// Strike DC - and not the spellcasting formula's `item_bonus`, which
+    /// Cunning Strike has no equivalent of and this plugin never exposes.
+    #[test]
+    fn cunning_strike_dc_follows_the_5e_formula() {
+        assert_eq!(CunningStrikePlugin::new(3, 3).dc(), 14);
+        assert_eq!(CunningStrikePlugin::new(4, 3).dc(), 15);
+        // Generic over the numbers, the same way SpellCastingProfile is
+        // generic over the ability: a higher proficiency bonus at a later
+        // tier raises the DC by exactly that much.
+        assert_eq!(CunningStrikePlugin::new(4, 6).dc(), 18);
+    }
+
+    #[test]
+    fn applying_the_plugin_registers_a_cunning_strike_marker_rider() {
+        let builder = CreatureBuilder::new("Rogue", 15, 40);
+        let built = builder
+            .apply_feature(&CunningStrikePlugin::new(4, 3))
+            .expect("cunning strike applies")
+            .build()
+            .expect("builds");
+        assert_eq!(built.riders, vec![Rider::CunningStrike { dc: 15 }]);
+    }
+
+    /// The framework acceptance test: a level-5 Rogue built from both
+    /// plugins can inspect its full Sneak Attack pool, reduce it by some
+    /// amount before damage is rolled, and combine two 1d6 spends against a
+    /// stand-in "costs 1d6, does nothing" Cunning Strike option - proving
+    /// dice deduction, DC computation and combination all work together
+    /// exactly as a later Poison or Trip/Withdraw plugin would use them.
+    #[test]
+    fn a_level_five_rogue_can_fund_two_stand_in_cunning_strike_options_from_one_sneak_attack() {
+        let builder = CreatureBuilder::new("Rogue", 15, 40);
+        let creature = builder
+            .apply_feature(&SneakAttackPlugin::new(4))
+            .expect("sneak attack applies")
+            .apply_feature(&CunningStrikePlugin::new(4, 3))
+            .expect("cunning strike applies")
+            .build()
+            .expect("builds");
+
+        let sneak_attack_rider = creature
+            .riders
+            .iter()
+            .find(|r| matches!(r, Rider::ConditionalExtraDamage { .. }))
+            .expect("the sneak attack rider is present");
+        let dc = creature
+            .riders
+            .iter()
+            .find_map(Rider::cunning_strike_dc)
+            .expect("cunning strike is unlocked");
+        assert_eq!(dc, 15);
+
+        let attack = Attack::new(7, 1, 6, 4)
+            .with_mode(RollMode::Advantage)
+            .with_finesse_or_ranged(true);
+        let full = sneak_attack_rider
+            .extra_damage_for(&attack, false)
+            .expect("qualifies");
+        assert_eq!(full, DamageRider::new(4, 6));
+
+        // Two 1d6 test-only "does nothing" Cunning Strike options, funded
+        // from the same pool Sneak Attack would otherwise roll whole.
+        const TEST_OPTION_COST: u32 = 1;
+        let after_both_options = full
+            .spend(TEST_OPTION_COST)
+            .and_then(|r| r.spend(TEST_OPTION_COST))
+            .expect("4 dice affords two 1d6 options");
+        assert_eq!(after_both_options.dice_count, 2);
+
+        // Only 2 dice actually get rolled for damage now - checked against
+        // the exact distribution, not merely against the field value, so a
+        // regression that rolls the full pool anyway cannot slip through.
+        let defense = Defense::new(1, 60); // AC 1: every non-fumble roll hits
+        let reduced = damage_pmf(
+            &attack.clone().with_damage_rider(after_both_options),
+            &defense,
+        );
+        let unspent = damage_pmf(&attack.with_damage_rider(full), &defense);
+        assert_eq!(reduced.max(), 2 * 6 + 2 * 2 * 6 + 4);
+        assert_eq!(unspent.max(), 2 * 6 + 2 * 4 * 6 + 4);
+        assert!(reduced.mean() < unspent.mean());
+
+        // Spending more than remains is refused rather than silently capped,
+        // so a later effect plugin cannot overdraw the pool by accident.
+        assert_eq!(after_both_options.spend(3), None);
     }
 }

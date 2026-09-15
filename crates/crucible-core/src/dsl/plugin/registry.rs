@@ -80,6 +80,31 @@ impl FeatureRegistry {
                 dice_sides,
             )))
         });
+
+        // Cunning Strike (2024 Rogue 5)
+        self.register("cunning_strike", |val| {
+            let dex_modifier = val
+                .get("dex_modifier")
+                .and_then(|v| v.as_integer())
+                .ok_or_else(|| {
+                    FeatureError::InvalidConfiguration(
+                        "cunning_strike needs a `dex_modifier` (the Rogue's Dexterity modifier)"
+                            .to_string(),
+                    )
+                })? as i32;
+            let proficiency_bonus = val
+                .get("proficiency_bonus")
+                .and_then(|v| v.as_integer())
+                .ok_or_else(|| {
+                    FeatureError::InvalidConfiguration(
+                        "cunning_strike needs a `proficiency_bonus`".to_string(),
+                    )
+                })? as i32;
+            Ok(Box::new(CunningStrikePlugin::new(
+                dex_modifier,
+                proficiency_bonus,
+            )))
+        });
     }
 }
 
@@ -125,6 +150,44 @@ mod tests {
         let params: toml::Value = toml::from_str("plugin = \"sneak_attack\"").unwrap();
         assert!(matches!(
             registry.build_plugin("sneak_attack", &params),
+            Err(FeatureError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn cunning_strike_reads_its_dc_inputs_from_toml() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value =
+            toml::from_str("plugin = \"cunning_strike\"\ndex_modifier = 4\nproficiency_bonus = 3")
+                .unwrap();
+        let plugin = registry
+            .build_plugin("cunning_strike", &params)
+            .expect("cunning_strike builds from toml");
+        assert_eq!(plugin.id(), "cunning_strike");
+        assert_eq!(plugin.name(), "Cunning Strike");
+
+        let mut builder = crate::dsl::plugin::CreatureBuilder::new("Rogue", 15, 40);
+        plugin.apply(&mut builder).unwrap();
+        assert_eq!(
+            builder.creature.riders,
+            vec![crate::rules::creature::Rider::CunningStrike { dc: 15 }]
+        );
+    }
+
+    #[test]
+    fn cunning_strike_requires_both_dc_inputs() {
+        let registry = FeatureRegistry::new();
+        let missing_proficiency: toml::Value =
+            toml::from_str("plugin = \"cunning_strike\"\ndex_modifier = 4").unwrap();
+        assert!(matches!(
+            registry.build_plugin("cunning_strike", &missing_proficiency),
+            Err(FeatureError::InvalidConfiguration(_))
+        ));
+
+        let missing_dex: toml::Value =
+            toml::from_str("plugin = \"cunning_strike\"\nproficiency_bonus = 3").unwrap();
+        assert!(matches!(
+            registry.build_plugin("cunning_strike", &missing_dex),
             Err(FeatureError::InvalidConfiguration(_))
         ));
     }
