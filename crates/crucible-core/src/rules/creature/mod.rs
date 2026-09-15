@@ -13,7 +13,8 @@ pub use combatant::Creature;
 pub use damage::{DamageKind, DamageRoll};
 pub use rider::{AttackTrigger, Rider};
 pub use types::{
-    Ability, Condition, Cost, Duration, Resource, SpellCastingProfile, SpellSlots, SPELL_LEVELS,
+    Ability, Condition, Cost, Duration, Resource, Size, SpellCastingProfile, SpellSlots,
+    SPELL_LEVELS,
 };
 
 #[cfg(test)]
@@ -321,5 +322,40 @@ mod tests {
         }
         assert_eq!(Condition::parse("paralysed"), Some(Condition::Paralyzed));
         assert_eq!(Condition::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn size_names_round_trip_through_parse() {
+        for s in [
+            Size::Tiny,
+            Size::Small,
+            Size::Medium,
+            Size::Large,
+            Size::Huge,
+            Size::Gargantuan,
+        ] {
+            assert_eq!(Size::parse(s.name()), Some(s));
+        }
+        assert_eq!(Size::parse("colossal"), None);
+    }
+
+    /// Ord is the whole point of `Size` existing as a type: a size-gated
+    /// effect (Cunning Strike's Trip: "Large size or smaller") compares
+    /// directly instead of matching every qualifying variant.
+    #[test]
+    fn size_orders_smallest_to_largest() {
+        assert!(Size::Tiny < Size::Small);
+        assert!(Size::Large < Size::Huge);
+        assert!(Size::Medium <= Size::Large);
+        assert!(Size::Huge > Size::Large);
+        assert!(Size::Gargantuan > Size::Large);
+    }
+
+    #[test]
+    fn a_creature_defaults_to_medium_size_but_can_be_overridden() {
+        let creature = Creature::new("dummy", 12, 10);
+        assert_eq!(creature.size, Size::Medium);
+        let huge = Creature::new("big", 12, 10).with_size(Size::Huge);
+        assert_eq!(huge.size, Size::Huge);
     }
 }

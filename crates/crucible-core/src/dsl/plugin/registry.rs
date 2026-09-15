@@ -122,6 +122,16 @@ impl FeatureRegistry {
                 proficiency_bonus,
             )))
         });
+
+        // Cunning Strike: Trip (2024 Rogue 5)
+        self.register("cunning_strike_trip", |_val| {
+            Ok(Box::new(CunningStrikeTripPlugin))
+        });
+
+        // Cunning Strike: Withdraw (2024 Rogue 5)
+        self.register("cunning_strike_withdraw", |_val| {
+            Ok(Box::new(CunningStrikeWithdrawPlugin))
+        });
     }
 }
 
@@ -207,5 +217,35 @@ mod tests {
             registry.build_plugin("cunning_strike", &missing_dex),
             Err(FeatureError::InvalidConfiguration(_))
         ));
+    }
+
+    #[test]
+    fn cunning_strike_trip_and_withdraw_register_their_marker_riders() {
+        let registry = FeatureRegistry::new();
+        let no_params: toml::Value = toml::from_str("plugin = \"cunning_strike_trip\"").unwrap();
+
+        let trip = registry
+            .build_plugin("cunning_strike_trip", &no_params)
+            .expect("cunning_strike_trip builds from toml");
+        assert_eq!(trip.id(), "cunning_strike_trip");
+        assert_eq!(trip.name(), "Cunning Strike: Trip");
+        let mut builder = crate::dsl::plugin::CreatureBuilder::new("Rogue", 15, 40);
+        trip.apply(&mut builder).unwrap();
+        assert_eq!(
+            builder.creature.riders,
+            vec![crate::rules::creature::Rider::CunningStrikeTrip]
+        );
+
+        let withdraw = registry
+            .build_plugin("cunning_strike_withdraw", &no_params)
+            .expect("cunning_strike_withdraw builds from toml");
+        assert_eq!(withdraw.id(), "cunning_strike_withdraw");
+        assert_eq!(withdraw.name(), "Cunning Strike: Withdraw");
+        let mut builder = crate::dsl::plugin::CreatureBuilder::new("Rogue", 15, 40);
+        withdraw.apply(&mut builder).unwrap();
+        assert_eq!(
+            builder.creature.riders,
+            vec![crate::rules::creature::Rider::CunningStrikeWithdraw]
+        );
     }
 }
