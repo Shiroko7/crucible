@@ -9,7 +9,7 @@ pub mod types;
 pub use action::{Effect, Move, SaveEffect, Strike, Uses};
 pub use combatant::Creature;
 pub use damage::{DamageKind, DamageRoll};
-pub use rider::Rider;
+pub use rider::{save_success_probability, saving_throw_against_condition, Rider};
 pub use types::{
     Ability, Condition, Cost, Duration, Resource, SpellCastingProfile, SpellSlots, SPELL_LEVELS,
 };

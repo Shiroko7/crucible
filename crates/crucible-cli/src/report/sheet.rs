@@ -177,5 +177,17 @@ pub fn describe_trait(rider: &Rider) -> String {
         Rider::CunningStrike { dc } => {
             format!("cunning strike: spend sneak attack dice dc {dc}")
         }
+        Rider::DowngradeImmunity { damage, condition } => {
+            let parts: Vec<String> = damage
+                .iter()
+                .map(|k| format!("{} damage immunity to resistance", k.name()))
+                .chain(
+                    condition
+                        .iter()
+                        .map(|c| format!("{} immunity to a save with advantage", c.name())),
+                )
+                .collect();
+            format!("downgrade {}", parts.join(" and "))
+        }
     }
 }
