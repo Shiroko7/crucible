@@ -39,7 +39,7 @@ use crate::prob::rng::Rng;
 use crate::rules::combat::{Landed, RollMode};
 use crate::rules::creature::{
     apply_healing, Ability, AttackTrigger, Condition, Cost, Creature, Duration, Effect, Move,
-    Rider, Uses,
+    MoveKind, Rider, Uses,
 };
 
 /// Which side of the fight. A side is a team, of any size.
@@ -308,6 +308,16 @@ impl<'a> Fighter<'a> {
 
     fn incapacitated(&self) -> bool {
         self.has(Condition::incapacitated)
+    }
+
+    /// Is this creature currently allowed to take a move of `kind`? Only
+    /// [`MoveKind::Spell`] and [`MoveKind::MagicItem`] are ever blocked - by
+    /// [`Condition::blocks_magic`] - so an ordinary attack or stance is
+    /// unaffected whatever else is active. Checked everywhere a move's
+    /// legality is checked: [`Policy::choose`], [`Fight::legal`],
+    /// [`Fight::turn`]'s execution-time recheck, and [`Fight::repair`].
+    fn move_allowed(&self, kind: MoveKind) -> bool {
+        !matches!(kind, MoveKind::Spell | MoveKind::MagicItem) || !self.has(Condition::blocks_magic)
     }
 
     /// Is this creature willing to spend a finite resource right now?
@@ -756,6 +766,7 @@ impl<'a> Fight<'a> {
             let chosen = &moves[pick];
             if !slot.states(&self.fighters[me])[pick].available()
                 || !self.fighters[me].can_pay(chosen.cost)
+                || !self.fighters[me].move_allowed(chosen.kind)
             {
                 continue;
             }
@@ -893,9 +904,9 @@ impl<'a> Fight<'a> {
         let against = self.fighters[target].creature;
         let fix = |slot: Slot, pick: Option<usize>| -> Option<usize> {
             let still_legal = pick.is_some_and(|i| {
-                slot.moves(f.creature)
-                    .get(i)
-                    .is_some_and(|m| slot.states(f)[i].available() && f.can_pay(m.cost))
+                slot.moves(f.creature).get(i).is_some_and(|m| {
+                    slot.states(f)[i].available() && f.can_pay(m.cost) && f.move_allowed(m.kind)
+                })
             });
             if pick.is_none() || still_legal {
                 pick
@@ -923,7 +934,7 @@ impl<'a> Fight<'a> {
             .zip(slot.states(f))
             .enumerate()
         {
-            if state.available() && f.can_pay(m.cost) {
+            if state.available() && f.can_pay(m.cost) && f.move_allowed(m.kind) {
                 out.push(Some(i));
             }
         }
@@ -1148,6 +1159,7 @@ impl<'a> Fight<'a> {
                     }
                     let (dealt, cut) =
                         reduce_incoming(rng, &mut self.fighters[current_target], strike, raw);
+                    let dealt = halve_if_suppressed(&self.fighters, me, dealt);
                     self.fighters[me].dealt += i64::from(dealt);
                     self.apply_damage(rng, current_target, dealt);
                     if record {
@@ -1190,6 +1202,7 @@ impl<'a> Fight<'a> {
                     let evasion = against.has_evasion(save.ability)
                         && !self.fighters[i].has(Condition::blocks_riders);
                     let dealt = save.sample_known(rng, against, saved, evasion);
+                    let dealt = halve_if_suppressed(&self.fighters, me, dealt);
                     self.fighters[me].dealt += i64::from(dealt);
                     self.apply_damage(rng, i, dealt);
                     if let (false, Some((condition, duration))) = (saved, save.on_failure) {
@@ -1455,7 +1468,7 @@ impl Policy {
         let bloodied = f.bloodied();
         let mut best: Option<(usize, (f64, f64))> = None;
         for (i, (m, state)) in moves.iter().zip(states).enumerate() {
-            if !state.available() || !f.can_pay(m.cost) {
+            if !state.available() || !f.can_pay(m.cost) || !f.move_allowed(m.kind) {
                 continue;
             }
             // A hoarding policy passes over anything with a price on it, not just
@@ -1519,8 +1532,27 @@ fn attack_mode(base: RollMode, attacker: &Fighter<'_>, target: &Fighter<'_>) -> 
     }
 }
 
-/// Roll a saving throw, letting conditions force a failure and
-/// [`Rider::AlwaysSucceed`] buy one back.
+/// The same stacking rule [`attack_mode`] applies to attack rolls, applied
+/// here to a creature's own saving throws: any source of disadvantage
+/// composes with any other rather than overriding it, so a second condition
+/// that also touches this creature's saves is additive with this one, not a
+/// replacement for it. Nothing yet grants advantage on a save to cancel
+/// against, but the shape is written the same way regardless, for when
+/// something does.
+fn save_mode(f: &Fighter<'_>) -> RollMode {
+    let mut disadvantage = false;
+    for &(c, _) in &f.conditions {
+        disadvantage |= c.disadvantage_on_saves();
+    }
+    if disadvantage {
+        RollMode::Disadvantage
+    } else {
+        RollMode::Normal
+    }
+}
+
+/// Roll a saving throw, letting conditions force a failure or disadvantage
+/// the roll, and [`Rider::AlwaysSucceed`] buy one back.
 fn saving_throw(
     fighters: &mut [Fighter<'_>],
     rng: &mut Rng,
@@ -1530,7 +1562,8 @@ fn saving_throw(
 ) -> (bool, bool) {
     let f = &fighters[who];
     let auto_fail = f.has(|c| c.auto_fails(ability));
-    let rolled = !auto_fail && rng.die(20) + f.creature.save(ability) >= dc;
+    let mode = save_mode(f);
+    let rolled = !auto_fail && mode.roll(rng) + f.creature.save(ability) >= dc;
     if rolled {
         return (true, false);
     }
@@ -1599,6 +1632,21 @@ fn reduce_incoming(
         }
     }
     (damage, 0)
+}
+
+/// This creature's own outgoing damage, halved if
+/// [`Condition::halves_own_damage`] is active - the attacker-side
+/// counterpart to a target's own [`crate::rules::combat::Reduction`], which
+/// only ever halves by the target's damage type. Applied last, after any
+/// reaction that already cut the incoming damage - the same place a target's
+/// own resistance sits at the end of `damage_pmf`'s pipeline - and rounds
+/// down exactly like [`crate::rules::combat::Reduction::Resistant`].
+fn halve_if_suppressed(fighters: &[Fighter<'_>], me: usize, dealt: i32) -> i32 {
+    if fighters[me].has(Condition::halves_own_damage) {
+        dealt / 2
+    } else {
+        dealt
+    }
 }
 
 /// What a finished or truncated rollout is worth to `side`.
@@ -1680,7 +1728,7 @@ mod tests {
     use super::*;
     use crate::rules::combat::Reduction;
     use crate::rules::creature::{
-        Ability, DamageKind, DamageRoll, HealRoll, Resource, SaveEffect, Strike,
+        Ability, DamageKind, DamageRoll, HealRoll, MoveKind, Resource, SaveEffect, Strike,
     };
 
     fn puncher(name: &str, ac: i32, hp: i32, to_hit: i32, bonus: i32) -> Creature {
@@ -3017,6 +3065,195 @@ mod tests {
         assert!(
             notes.iter().all(|n| !n.contains("revives")),
             "was never down, so nothing to revive: {notes:?}"
+        );
+    }
+
+    // -- Condition::Suppressed: the limited-use debuff trigger mechanism ---
+    //
+    // Four effects, and their expiry: blocking a Spell-tagged move, blocking
+    // a MagicItem-tagged move, disadvantage on saves, and halved outgoing
+    // damage. The first four are pure `Fighter`-level checks - deterministic
+    // and independent of everything the round structure does - and the last
+    // is one end-to-end fight proving the wiring, since a mechanism that
+    // only ever gets unit-tested in isolation is exactly the kind that goes
+    // unwired by accident.
+
+    #[test]
+    fn suppressed_blocks_only_spell_and_magic_item_moves() {
+        let creature = Creature::new("x", 10, 10);
+        let mut fighter = Fighter::new(&creature, Side::A, Policy::Greedy, 0);
+        for kind in [
+            MoveKind::Standard,
+            MoveKind::ObjectUse,
+            MoveKind::MagicItem,
+            MoveKind::Spell,
+        ] {
+            assert!(
+                fighter.move_allowed(kind),
+                "{kind:?} should be unblocked with no conditions active"
+            );
+        }
+
+        fighter
+            .conditions
+            .push((Condition::Suppressed, Expiry::TurnStart(0)));
+        assert!(fighter.move_allowed(MoveKind::Standard));
+        assert!(fighter.move_allowed(MoveKind::ObjectUse));
+        assert!(
+            !fighter.move_allowed(MoveKind::MagicItem),
+            "a magic item activation must be blocked while suppressed"
+        );
+        assert!(
+            !fighter.move_allowed(MoveKind::Spell),
+            "casting a spell must be blocked while suppressed"
+        );
+
+        // Expiry: once the condition is gone, both are usable again.
+        fighter.conditions.clear();
+        assert!(fighter.move_allowed(MoveKind::MagicItem));
+        assert!(fighter.move_allowed(MoveKind::Spell));
+    }
+
+    #[test]
+    fn suppressed_grants_disadvantage_on_saves_until_it_expires() {
+        let creature = Creature::new("x", 10, 10);
+        let mut fighter = Fighter::new(&creature, Side::A, Policy::Greedy, 0);
+        assert_eq!(save_mode(&fighter), RollMode::Normal);
+
+        fighter
+            .conditions
+            .push((Condition::Suppressed, Expiry::TurnStart(0)));
+        assert_eq!(save_mode(&fighter), RollMode::Disadvantage);
+
+        fighter.conditions.clear();
+        assert_eq!(
+            save_mode(&fighter),
+            RollMode::Normal,
+            "the disadvantage must not outlive the condition"
+        );
+    }
+
+    /// Wired into the actual roll, not just the mode computation: a
+    /// suppressed creature really does fail more saves than an unsuppressed
+    /// one against the same DC.
+    #[test]
+    fn saving_throw_rolls_worse_while_suppressed() {
+        let creature = Creature::new("x", 10, 10);
+        let mut plain = vec![Fighter::new(&creature, Side::A, Policy::Greedy, 0)];
+        let mut suppressed = vec![Fighter::new(&creature, Side::A, Policy::Greedy, 0)];
+        suppressed[0]
+            .conditions
+            .push((Condition::Suppressed, Expiry::TurnStart(0)));
+
+        let mut rng = Rng::new(11);
+        let trials = 20_000;
+        let (mut fails_plain, mut fails_suppressed) = (0u32, 0u32);
+        for _ in 0..trials {
+            if !saving_throw(&mut plain, &mut rng, 0, Ability::Dex, 11).0 {
+                fails_plain += 1;
+            }
+            if !saving_throw(&mut suppressed, &mut rng, 0, Ability::Dex, 11).0 {
+                fails_suppressed += 1;
+            }
+        }
+        assert!(
+            fails_suppressed > fails_plain + trials / 20,
+            "disadvantage should fail noticeably more often: {fails_suppressed} vs {fails_plain} of {trials}"
+        );
+    }
+
+    #[test]
+    fn halve_if_suppressed_only_halves_while_active_and_rounds_down() {
+        let creature = Creature::new("x", 10, 10);
+        let mut fighters = vec![Fighter::new(&creature, Side::A, Policy::Greedy, 0)];
+        assert_eq!(halve_if_suppressed(&fighters, 0, 7), 7);
+
+        fighters[0]
+            .conditions
+            .push((Condition::Suppressed, Expiry::TurnStart(0)));
+        assert_eq!(
+            halve_if_suppressed(&fighters, 0, 7),
+            3,
+            "rounds down, like Reduction::Resistant"
+        );
+        assert_eq!(halve_if_suppressed(&fighters, 0, 0), 0);
+
+        fighters[0].conditions.clear();
+        assert_eq!(
+            halve_if_suppressed(&fighters, 0, 7),
+            7,
+            "expiry restores full damage"
+        );
+    }
+
+    /// End-to-end: the item's own forced save actually lands the bundled
+    /// condition, which blocks the victim's own magic-item bonus action for
+    /// exactly as long as `Duration::ApplierTurn` says - through the rest of
+    /// the round it landed in, gone by the start of the applier's next turn.
+    /// Fully deterministic: the save DC is unbeatable and the "should be
+    /// blocked" move never rolls anything, so nothing here depends on the
+    /// seed.
+    #[test]
+    fn a_failed_save_suppresses_the_targets_own_item_use_until_the_debuff_expires() {
+        let mut caster = Creature::new("caster", 10, 20);
+        caster.initiative = 100;
+        caster.bonus_actions.push(
+            Move::new(
+                "Trinket",
+                Effect::Save(SaveEffect {
+                    ability: Ability::Con,
+                    dc: 99, // a +0 Con save can never clear this
+                    damage: Vec::new(),
+                    half_on_success: false,
+                    on_failure: Some((Condition::Suppressed, Duration::ApplierTurn)),
+                    max_targets: Some(1),
+                }),
+            )
+            .with_uses(Uses::Limited(1))
+            .with_kind(MoveKind::MagicItem),
+        );
+
+        let mut target = Creature::new("target", 10, 20);
+        target.initiative = -100;
+        target.bonus_actions.push(
+            Move::new(
+                "Warded Reflex",
+                Effect::Stance {
+                    condition: Condition::Dodging,
+                },
+            )
+            .with_kind(MoveKind::MagicItem),
+        );
+
+        let mut rng = Rng::new(1);
+        let mut log = Some(Vec::new());
+        run(
+            &mut rng,
+            [&caster, &target],
+            [Policy::Greedy; 2],
+            2,
+            &mut log,
+        );
+        let lines = log.unwrap();
+        let narration = lines.join("\n");
+
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("r1 ") && l.contains("suppressed")),
+            "the item's own save should land the debuff in round 1:\n{narration}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.starts_with("r1 ") && l.contains("Warded Reflex")),
+            "the target's own magic item move must not fire while suppressed:\n{narration}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("r2 ") && l.contains("Warded Reflex")),
+            "once the debuff expires the target's item use is available again:\n{narration}"
         );
     }
 }
