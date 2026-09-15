@@ -6,7 +6,7 @@
 
 use crate::rules::combat::Reduction;
 use crate::rules::creature::{
-    Ability, Creature, DamageKind, Move, Resource, Rider, SpellCastingProfile,
+    Ability, Creature, CreatureType, DamageKind, Move, Resource, Rider, SpellCastingProfile,
 };
 use std::fmt;
 
@@ -16,6 +16,7 @@ pub enum FeatureError {
     UnknownCondition(String),
     UnknownAbility(String),
     UnknownDamageKind(String),
+    UnknownCreatureType(String),
     InvalidConfiguration(String),
     ExecutionError(String),
 }
@@ -27,6 +28,7 @@ impl fmt::Display for FeatureError {
             Self::UnknownCondition(c) => write!(f, "unknown condition '{c}'"),
             Self::UnknownAbility(a) => write!(f, "unknown ability '{a}'"),
             Self::UnknownDamageKind(d) => write!(f, "unknown damage kind '{d}'"),
+            Self::UnknownCreatureType(t) => write!(f, "unknown creature type '{t}'"),
             Self::InvalidConfiguration(msg) => write!(f, "invalid configuration: {msg}"),
             Self::ExecutionError(msg) => write!(f, "feature execution error: {msg}"),
         }
@@ -130,6 +132,13 @@ impl CreatureBuilder {
         self.creature.reliable_talent_floor = Some(floor);
     }
 
+    /// Declare this creature's 5e type - Humanoid, Dragon, ... Gates both
+    /// spells with a target-type restriction (Hold Person) and
+    /// [`crate::rules::creature::Rider::BonusDamageVsCreatureType`].
+    pub fn set_creature_type(&mut self, creature_type: CreatureType) {
+        self.creature.creature_type = Some(creature_type);
+    }
+
     /// Declare a spell slot pool's maximum (and starting available count) at
     /// `level`, 1st through 9th.
     pub fn set_spell_slot_max(&mut self, level: u32, max: u32) {
@@ -139,12 +148,6 @@ impl CreatureBuilder {
     /// Set how this creature's spell attacks and save DCs are computed.
     pub fn set_spellcasting(&mut self, profile: SpellCastingProfile) {
         self.creature.spellcasting = Some(profile);
-    }
-
-    /// Set the creature's stated type ("Humanoid", "Dragon", ...), used to
-    /// gate spells with a target-type restriction such as Hold Person.
-    pub fn set_creature_type(&mut self, creature_type: impl Into<String>) {
-        self.creature.creature_type = Some(creature_type.into());
     }
 
     /// Finalize and validate the combatant.

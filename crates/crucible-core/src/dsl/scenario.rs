@@ -24,6 +24,7 @@
 //! trait: evasion dex
 //! trait: legendary resistance 3
 //! trait: deflect 1d10+7 bludgeoning, piercing, slashing
+//! trait: bonus 3d6 piercing vs dragon
 //! action: Greatclub | strikes 1 | hit +6 | 2d8+4 bludgeoning
 //! action: Staff | strikes 2 | hit +9 | 1d8+6 bludgeoning
 //!              | on hit save con dc 16 stunned once cost focus 1
@@ -40,8 +41,8 @@ use std::fmt;
 
 use crate::rules::combat::{Reduction, RollMode};
 use crate::rules::creature::{
-    Ability, Condition, Cost, Creature, DamageKind, DamageRoll, Duration, Effect, Move, MoveKind,
-    Resource, Rider, SaveEffect, Strike, Uses,
+    Ability, Condition, Cost, Creature, CreatureType, DamageKind, DamageRoll, Duration, Effect,
+    Move, MoveKind, Resource, Rider, SaveEffect, Strike, Uses,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,6 +325,30 @@ fn parse_trait(value: &str) -> Result<Rider, String> {
                 roll: DamageRoll::new(dice, sides, bonus, DamageKind::Force),
                 kinds,
                 per_round,
+            })
+        }
+        // `bonus 3d6 piercing vs dragon` - extra damage dice on a hit against
+        // one creature type: a slaying weapon, a favoured-enemy bonus.
+        "bonus" => {
+            let (dice, sides, bonus) = parse_dice(arg(&words, 1, value)?)?;
+            let kind_word = arg(&words, 2, value)?;
+            let damage_kind = DamageKind::parse(kind_word)
+                .ok_or_else(|| format!("unknown damage type `{kind_word}` in `{value}`"))?;
+            let vs_word = arg(&words, 3, value)?;
+            if !vs_word.eq_ignore_ascii_case("vs") {
+                return Err(format!(
+                    "expected `bonus NdM <damage type> vs <creature type>`, got `{value}`"
+                ));
+            }
+            let type_word = arg(&words, 4, value)?;
+            let creature_type = CreatureType::parse(type_word)
+                .ok_or_else(|| format!("unknown creature type `{type_word}` in `{value}`"))?;
+            Ok(Rider::BonusDamageVsCreatureType {
+                dice_count: dice,
+                dice_sides: sides,
+                bonus,
+                damage_kind,
+                creature_type,
             })
         }
         other => Err(format!("unknown trait `{other}`")),
@@ -719,6 +744,41 @@ trait: deflect 1d10+7 bludgeoning, piercing, slashing
             (1, 10, 7)
         );
         assert_eq!(*deflect.2, 1);
+    }
+
+    /// The generic "bonus damage vs a creature type" trait: any weapon or
+    /// attack can carry it, parameterized entirely by the trait string - no
+    /// struct or plugin names the specific weapon.
+    #[test]
+    fn bonus_damage_vs_creature_type_trait_parses() {
+        let text = "
+creature: x
+hp: 10
+trait: bonus 3d6 piercing vs dragon
+";
+        let c = &parse(text).unwrap()[0];
+        assert_eq!(
+            c.riders,
+            vec![Rider::BonusDamageVsCreatureType {
+                dice_count: 3,
+                dice_sides: 6,
+                bonus: 0,
+                damage_kind: DamageKind::Piercing,
+                creature_type: CreatureType::Dragon,
+            }]
+        );
+    }
+
+    #[test]
+    fn bonus_damage_vs_creature_type_rejects_an_unknown_damage_or_creature_type() {
+        let bad_damage = parse_trait("bonus 3d6 sparkly vs dragon").unwrap_err();
+        assert!(bad_damage.contains("sparkly"), "{bad_damage}");
+
+        let bad_creature = parse_trait("bonus 3d6 piercing vs beholder-kin").unwrap_err();
+        assert!(bad_creature.contains("beholder-kin"), "{bad_creature}");
+
+        let missing_vs = parse_trait("bonus 3d6 piercing dragon").unwrap_err();
+        assert!(missing_vs.contains("vs"), "{missing_vs}");
     }
 
     /// A monk's turn, which is what forced resource pools and on-hit riders to
