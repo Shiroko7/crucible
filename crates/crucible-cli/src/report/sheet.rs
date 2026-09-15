@@ -197,5 +197,8 @@ pub fn describe_trait(rider: &Rider) -> String {
             per_round,
             ..
         } => format!("reaction: +{ac_bonus} ac vs one targeting attack ({per_round}/round)"),
+        Rider::CunningStrike { dc } => {
+            format!("cunning strike: spend sneak attack dice dc {dc}")
+        }
     }
 }
