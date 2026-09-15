@@ -24,6 +24,7 @@
 //! trait: evasion dex
 //! trait: legendary resistance 3
 //! trait: deflect 1d10+7 bludgeoning, piercing, slashing
+//! trait: downgrade immunity poison damage, poisoned condition
 //! action: Greatclub | strikes 1 | hit +6 | 2d8+4 bludgeoning
 //! action: Staff | strikes 2 | hit +9 | 1d8+6 bludgeoning
 //!              | on hit save con dc 16 stunned once cost focus 1
@@ -325,6 +326,57 @@ fn parse_trait(value: &str) -> Result<Rider, String> {
                 kinds,
                 per_round,
             })
+        }
+        // `downgrade immunity poison damage, poisoned condition` - either
+        // term alone, or both combined, in any order.
+        "downgrade" => {
+            let lower = value.to_ascii_lowercase();
+            let at = lower
+                .find("immunity")
+                .ok_or_else(|| format!("expected `downgrade immunity ...`, got `{value}`"))?;
+            let rest = &value[at + "immunity".len()..];
+            let mut damage = None;
+            let mut condition = None;
+            for term in rest.split(',') {
+                let term = term.trim();
+                if term.is_empty() {
+                    continue;
+                }
+                let mut words = term.split_whitespace();
+                let (Some(name), Some(kind_word)) = (words.next(), words.next()) else {
+                    return Err(format!(
+                        "expected `<name> damage` or `<name> condition` in `{value}`, got `{term}`"
+                    ));
+                };
+                if words.next().is_some() {
+                    return Err(format!(
+                        "`{term}` has more than a name and a type in `{value}`"
+                    ));
+                }
+                match kind_word.to_ascii_lowercase().as_str() {
+                    "damage" => {
+                        damage = Some(DamageKind::parse(name).ok_or_else(|| {
+                            format!("unknown damage type `{name}` in `{value}`")
+                        })?);
+                    }
+                    "condition" => {
+                        condition = Some(Condition::parse(name).ok_or_else(|| {
+                            format!("unknown condition `{name}` in `{value}`")
+                        })?);
+                    }
+                    other => {
+                        return Err(format!(
+                            "expected `damage` or `condition` after `{name}`, got `{other}` in `{value}`"
+                        ))
+                    }
+                }
+            }
+            if damage.is_none() && condition.is_none() {
+                return Err(format!(
+                    "`{value}` needs at least one of a damage type or a condition to downgrade"
+                ));
+            }
+            Ok(Rider::DowngradeImmunity { damage, condition })
         }
         other => Err(format!("unknown trait `{other}`")),
     }
@@ -713,6 +765,76 @@ trait: deflect 1d10+7 bludgeoning, piercing, slashing
             (1, 10, 7)
         );
         assert_eq!(*deflect.2, 1);
+    }
+
+    /// The generic immunity-downgrade trait, parsed with both halves present
+    /// at once - the case a single attacker with both a damage-type and a
+    /// condition it punches through needs.
+    #[test]
+    fn downgrade_immunity_trait_parses_both_halves_together() {
+        let text = "
+creature: x
+hp: 10
+trait: downgrade immunity poison damage, poisoned condition
+";
+        let c = &parse(text).unwrap()[0];
+        let rider = c
+            .riders
+            .iter()
+            .find(|r| matches!(r, Rider::DowngradeImmunity { .. }))
+            .expect("parsed a downgrade-immunity rider");
+        match rider {
+            Rider::DowngradeImmunity { damage, condition } => {
+                assert_eq!(*damage, Some(DamageKind::Poison));
+                assert_eq!(*condition, Some(Condition::Poisoned));
+            }
+            other => panic!("expected DowngradeImmunity, got {other:?}"),
+        }
+    }
+
+    /// Each half is independently optional - an attacker might carry only
+    /// one, so the parser must not require both.
+    #[test]
+    fn downgrade_immunity_trait_allows_either_half_alone() {
+        let damage_only = parse_trait_external("downgrade immunity fire damage").unwrap();
+        assert_eq!(
+            damage_only,
+            Rider::DowngradeImmunity {
+                damage: Some(DamageKind::Fire),
+                condition: None,
+            }
+        );
+
+        let condition_only = parse_trait_external("downgrade immunity stunned condition").unwrap();
+        assert_eq!(
+            condition_only,
+            Rider::DowngradeImmunity {
+                damage: None,
+                condition: Some(Condition::Stunned),
+            }
+        );
+    }
+
+    #[test]
+    fn downgrade_immunity_trait_rejects_garbage() {
+        let unknown_damage = parse_trait_external("downgrade immunity sparkly damage").unwrap_err();
+        assert!(unknown_damage.contains("sparkly"), "{unknown_damage}");
+
+        let unknown_condition =
+            parse_trait_external("downgrade immunity confused condition").unwrap_err();
+        assert!(
+            unknown_condition.contains("confused"),
+            "{unknown_condition}"
+        );
+
+        let missing_immunity = parse_trait_external("downgrade poison damage").unwrap_err();
+        assert!(missing_immunity.contains("immunity"), "{missing_immunity}");
+
+        let empty = parse_trait_external("downgrade immunity").unwrap_err();
+        assert!(empty.contains("at least one"), "{empty}");
+
+        let bad_type = parse_trait_external("downgrade immunity poison sparkly").unwrap_err();
+        assert!(bad_type.contains("sparkly"), "{bad_type}");
     }
 
     /// A monk's turn, which is what forced resource pools and on-hit riders to
