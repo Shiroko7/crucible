@@ -1,6 +1,9 @@
 //! Rogue class feature plugins.
 
-use crate::rules::creature::{Ability, Move, MoveKind, Rider, SpellCastingProfile};
+use crate::rules::combat::DamageRider;
+use crate::rules::creature::{
+    Ability, Condition, Duration, Move, MoveKind, Rider, SpellCastingProfile,
+};
 
 use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
 
@@ -226,6 +229,52 @@ impl FeaturePlugin for CunningStrikePlugin {
         builder.add_rider(Rider::CunningStrike { dc: self.dc() });
         Ok(())
     }
+}
+
+/// Cunning Strike: Poison (2024 Rogue 5) - one of the effects a spend from a
+/// qualifying Sneak Attack's pool can buy once [`CunningStrikePlugin`] has
+/// unlocked it. Forgo 1d6: the target makes a Constitution saving throw
+/// against the Cunning Strike DC or gains [`Condition::Poisoned`] for a
+/// minute, repeating that same save at the end of each of its own turns
+/// until it succeeds.
+///
+/// Deliberately a plain function rather than a `FeaturePlugin`, unlike
+/// [`SneakAttackPlugin`] and [`CunningStrikePlugin`]: there is nothing to add
+/// to a creature's static rider list here. The DC already lives on the
+/// [`Rider::CunningStrike`] marker the creature carries -
+/// [`Rider::cunning_strike_dc`] - and which option a spend buys is a
+/// per-attack choice made by whoever resolves it, the same reason
+/// [`Rider::extra_damage_for`] is itself a method rather than something baked
+/// into the creature ahead of time.
+///
+/// `sneak_attack` is the qualifying Sneak Attack's [`DamageRider`], full or
+/// already reduced by other options spent from the same pool. `dc` is
+/// [`Rider::cunning_strike_dc`]'s value, never a creature's spellcasting DC
+/// (Cunning Strike is not spellcasting - see that method's own doc comment).
+/// Returns `None` if the pool cannot afford the 1d6 price,
+/// [`DamageRider::spend`]'s own refusal rather than a silent clamp.
+///
+/// The returned [`Rider::SaveOrCondition`] reuses that mechanism - already
+/// exactly "on a hit, the target saves or takes a condition" - instead of
+/// inventing a new one: its `cost` is `None` because the price already came
+/// out of the Sneak Attack pool above, not a separate resource, and
+/// `once_per_turn` is `false` because Cunning Strike spends Sneak Attack's
+/// own once-per-turn budget, already enforced wherever
+/// [`Rider::extra_damage_for`] is checked.
+pub fn cunning_strike_poison(sneak_attack: DamageRider, dc: i32) -> Option<(DamageRider, Rider)> {
+    let reduced = sneak_attack.spend(1)?;
+    let effect = Rider::SaveOrCondition {
+        ability: Ability::Con,
+        dc,
+        condition: Condition::Poisoned,
+        duration: Duration::SaveEndTurn {
+            ability: Ability::Con,
+            dc,
+        },
+        cost: None,
+        once_per_turn: false,
+    };
+    Some((reduced, effect))
 }
 
 #[cfg(test)]
@@ -611,5 +660,95 @@ mod tests {
         // Spending more than remains is refused rather than silently capped,
         // so a later effect plugin cannot overdraw the pool by accident.
         assert_eq!(after_both_options.spend(3), None);
+    }
+
+    /// The first real Cunning Strike option (ROG-03): spending it takes 1d6
+    /// out of the pool and hands back the exact `SaveOrCondition` effect a
+    /// failed Constitution save should produce - reusing that mechanism
+    /// rather than a new one, and reading the Cunning Strike DC rather than
+    /// inventing an ability-to-DC pipeline of its own.
+    #[test]
+    fn cunning_strike_poison_spends_1d6_and_builds_the_con_save_effect() {
+        let full = DamageRider::new(4, 6);
+        let dc = CunningStrikePlugin::new(4, 3).dc();
+        assert_eq!(dc, 15);
+
+        let (reduced, effect) = cunning_strike_poison(full, dc).expect("4 dice afford 1d6");
+        assert_eq!(reduced.dice_count, 3, "1d6 came out of the pool");
+        assert_eq!(
+            effect,
+            Rider::SaveOrCondition {
+                ability: Ability::Con,
+                dc,
+                condition: Condition::Poisoned,
+                duration: Duration::SaveEndTurn {
+                    ability: Ability::Con,
+                    dc,
+                },
+                cost: None,
+                once_per_turn: false,
+            },
+            "cost is None: the price already came out of the Sneak Attack pool above, \
+             not a separate resource"
+        );
+    }
+
+    /// Spending more dice than remain is refused, not silently clamped - the
+    /// same refusal `DamageRider::spend` itself gives, and here it is
+    /// checked at the point Cunning Strike's own options draw from the pool.
+    #[test]
+    fn cunning_strike_poison_refuses_to_overdraw_an_empty_pool() {
+        let empty = DamageRider::new(0, 6);
+        assert_eq!(cunning_strike_poison(empty, 15), None);
+    }
+
+    /// The dice spent on Poison must actually not be thrown for damage, not
+    /// merely be counted out afterwards - the same exact-vs-sampled
+    /// agreement check every other rider in this codebase is held to.
+    #[test]
+    fn cunning_strike_poison_reduced_pool_agrees_with_the_exact_path() {
+        let defense = Defense::new(12, 60);
+        let attack = Attack::new(6, 1, 8, 4)
+            .with_mode(RollMode::Advantage)
+            .with_finesse_or_ranged(true);
+        let full = rider().extra_damage_for(&attack, false).expect("qualifies");
+        let dc = CunningStrikePlugin::new(4, 3).dc();
+
+        let (reduced, effect) = cunning_strike_poison(full, dc).expect("4 dice afford 1d6");
+        assert_eq!(reduced.dice_count, 3);
+        assert_eq!(
+            effect.cunning_strike_dc(),
+            None,
+            "a SaveOrCondition effect, not a new marker"
+        );
+
+        let full_attack = attack.clone().with_damage_rider(full);
+        let reduced_attack = attack.with_damage_rider(reduced);
+        let exact_full = damage_pmf(&full_attack, &defense);
+        let exact_reduced = damage_pmf(&reduced_attack, &defense);
+        assert!(
+            exact_reduced.mean() < exact_full.mean(),
+            "spending a die on Poison must lower expected damage, not just relabel it"
+        );
+
+        let (lo, hi) = (exact_reduced.min(), exact_reduced.max());
+        let mut rng = Rng::new(2100);
+        let n = 100_000;
+        let mut counts = vec![0usize; (hi - lo + 1) as usize];
+        for _ in 0..n {
+            let d = sample_damage(&mut rng, &reduced_attack, &defense);
+            assert!(d >= lo && d <= hi, "sampled {d} outside {lo}..={hi}");
+            counts[(d - lo) as usize] += 1;
+        }
+        for (i, &c) in counts.iter().enumerate() {
+            let value = lo + i as i32;
+            let want = exact_reduced.prob(value);
+            let got = c as f64 / n as f64;
+            let tol = 5.0 * (want * (1.0 - want) / n as f64).sqrt() + 1e-4;
+            assert!(
+                (got - want).abs() < tol,
+                "P(damage = {value}) sampled {got:.5}, exact {want:.5}, tol {tol:.5}"
+            );
+        }
     }
 }

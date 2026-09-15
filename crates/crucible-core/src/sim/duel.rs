@@ -1964,6 +1964,77 @@ mod tests {
         );
     }
 
+    /// Cunning Strike's Poison option (ROG-03) needs no engine changes of its
+    /// own: it is `Rider::SaveOrCondition` plus `Condition::Poisoned` and
+    /// `Duration::SaveEndTurn`, three mechanisms that already exist
+    /// independently of each other and of Cunning Strike. This gives
+    /// Poisoned the same check the test above already gives Paralyzed - the
+    /// repeat-save loop generalizes rather than needing a re-test written
+    /// specifically for it - measured through what Poisoned actually does
+    /// (disadvantage on its own attack rolls) rather than `turns_lost`,
+    /// since unlike Paralyzed, Poisoned never takes the turn away.
+    #[test]
+    fn poison_from_cunning_strike_is_cleared_by_the_existing_repeat_save_loop() {
+        let cost = Cost {
+            resource: 0,
+            amount: 1,
+        };
+        let poisoner = |ability: Ability, dc: i32| {
+            let mut c = puncher("poisoner", 10, 200, 20, 0);
+            c.initiative = 100;
+            // One shot only, so this is about how long a single application
+            // of Poisoned lasts, not how often it lands.
+            c.actions[0].uses = Uses::Limited(1);
+            c.resources.push(Resource {
+                name: "focus".into(),
+                max: 1,
+            });
+            c.actions[0].riders.push(Rider::SaveOrCondition {
+                ability: Ability::Con,
+                dc: 99, // the one hit always lands Poisoned
+                condition: Condition::Poisoned,
+                duration: Duration::SaveEndTurn { ability, dc },
+                cost: Some(cost),
+                once_per_turn: true,
+            });
+            c
+        };
+        // Poisoned's whole effect is disadvantage on its own attack rolls,
+        // so give the victim a strike of its own and measure what it deals
+        // instead of turns lost.
+        let mut victim = puncher("victim", 10, 200, 0, 0);
+        victim.initiative = -100;
+
+        let dealt = |monster: &Creature| {
+            let mut rng = Rng::new(41);
+            let mut total = 0i64;
+            for _ in 0..300 {
+                let mut log = no_log();
+                let o = run(
+                    &mut rng,
+                    [monster, &victim],
+                    [Policy::Greedy; 2],
+                    6,
+                    &mut log,
+                );
+                total += o.damage_dealt[1];
+            }
+            total
+        };
+
+        // Con save DC 99 against Poisoned's repeat: never clears.
+        let unbeatable = dealt(&poisoner(Ability::Con, 99));
+        // Con save DC 1: clears at the end of the very turn it landed.
+        let easy = dealt(&poisoner(Ability::Con, 1));
+
+        assert!(
+            easy > unbeatable,
+            "a near-certain repeat save should clear Poisoned quickly, costing the victim \
+             less accuracy over the fight than a save it can never make: easy {easy} vs \
+             unbeatable {unbeatable}"
+        );
+    }
+
     /// Dodge and a reaction that cuts damage both have to actually reduce what
     /// lands, and the stance has to expire on its own.
     #[test]
