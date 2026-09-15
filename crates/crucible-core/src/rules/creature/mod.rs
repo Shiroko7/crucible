@@ -341,6 +341,31 @@ mod tests {
         assert!(!Condition::Compelled.auto_crits());
     }
 
+    /// Steady Aim grants advantage on the creature's own attacks - the mirror
+    /// of Poisoned/Blinded's self-inflicted disadvantage - and, unlike any
+    /// other condition here, marks the speed-zeroing flag nothing yet reads.
+    #[test]
+    fn steady_aim_grants_advantage_and_flags_zero_speed() {
+        assert!(Condition::SteadyAim.advantage_on_attacks());
+        assert!(Condition::SteadyAim.zeroes_speed());
+        assert!(!Condition::SteadyAim.disadvantage_on_attacks());
+        assert!(!Condition::SteadyAim.incapacitated());
+        assert!(!Condition::SteadyAim.advantage_to_attackers());
+        assert!(!Condition::SteadyAim.auto_crits());
+        // Nothing else grants its own attacks advantage or flags speed.
+        for c in [
+            Condition::Stunned,
+            Condition::Dodging,
+            Condition::Prone,
+            Condition::Poisoned,
+            Condition::Blinded,
+            Condition::Paralyzed,
+        ] {
+            assert!(!c.advantage_on_attacks(), "{c:?} should not");
+            assert!(!c.zeroes_speed(), "{c:?} should not");
+        }
+    }
+
     #[test]
     fn condition_names_round_trip_through_parse() {
         for c in [
@@ -352,10 +377,12 @@ mod tests {
             Condition::Paralyzed,
             Condition::Deafened,
             Condition::Compelled,
+            Condition::SteadyAim,
         ] {
             assert_eq!(Condition::parse(c.name()), Some(c));
         }
         assert_eq!(Condition::parse("paralysed"), Some(Condition::Paralyzed));
+        assert_eq!(Condition::parse("steady aim"), Some(Condition::SteadyAim));
         assert_eq!(Condition::parse("nonsense"), None);
     }
 }

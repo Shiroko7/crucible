@@ -1744,6 +1744,8 @@ fn attack_mode(base: RollMode, attacker: &Fighter<'_>, target: &Fighter<'_>) -> 
     }
     for &(c, _) in &attacker.conditions {
         disadvantage |= c.disadvantage_on_attacks();
+        // Steady Aim: see `Condition::advantage_on_attacks`.
+        advantage |= c.advantage_on_attacks();
     }
     match (advantage, disadvantage) {
         (true, false) => RollMode::Advantage,
@@ -3654,6 +3656,38 @@ mod tests {
         assert!(
             (got - exact).abs() < tol,
             "P(save succeeds) sampled {got:.5}, exact {exact:.5}, tol {tol:.5}"
+        );
+    }
+
+    /// Steady Aim grants advantage on the attacker's own roll (and cancels
+    /// against a source of disadvantage the same as any other), the same
+    /// stacking rule proven above for Poisoned/Blinded's self-inflicted
+    /// disadvantage - `attack_mode` is where both are actually read, so this
+    /// exercises the wiring directly rather than only the flag on `Condition`.
+    #[test]
+    fn steady_aim_grants_advantage_via_attack_mode() {
+        let plain = Creature::new("plain", 10, 10);
+        let mut rogue = Fighter::new(&plain, Side::A, Policy::Greedy, 0);
+        let target = Fighter::new(&plain, Side::B, Policy::Greedy, 0);
+        assert_eq!(
+            attack_mode(RollMode::Normal, &rogue, &target),
+            RollMode::Normal
+        );
+
+        rogue.add_condition(Condition::SteadyAim, Expiry::TurnStart(0));
+        assert_eq!(
+            attack_mode(RollMode::Normal, &rogue, &target),
+            RollMode::Advantage,
+            "Steady Aim should grant advantage on the attacker's own roll"
+        );
+
+        // A separate source of disadvantage on the attacker still cancels it,
+        // the same 5e stacking rule every other pair of conditions follows.
+        rogue.add_condition(Condition::Poisoned, Expiry::TurnStart(0));
+        assert_eq!(
+            attack_mode(RollMode::Normal, &rogue, &target),
+            RollMode::Normal,
+            "advantage and disadvantage from unrelated sources should cancel"
         );
     }
 }

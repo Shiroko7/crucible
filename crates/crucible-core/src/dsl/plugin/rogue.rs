@@ -1,6 +1,6 @@
 //! Rogue class feature plugins.
 
-use crate::rules::creature::{Ability, Move, MoveKind, Rider, SpellCastingProfile};
+use crate::rules::creature::{Ability, Condition, Effect, Move, MoveKind, Rider, SpellCastingProfile};
 
 use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
 
@@ -224,6 +224,107 @@ impl FeaturePlugin for CunningStrikePlugin {
 
     fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
         builder.add_rider(Rider::CunningStrike { dc: self.dc() });
+        Ok(())
+    }
+}
+
+/// Steady Aim (2024 Rogue 2): Bonus Action. Grants advantage on your own next
+/// attack roll before the end of the turn, and your speed becomes 0 until the
+/// end of the turn.
+///
+/// Modelled as a bonus-action [`Move`] whose effect is
+/// [`Effect::Stance { condition: Condition::SteadyAim }`](Effect::Stance) -
+/// exactly the mechanism Dodge already uses for "a condition you apply to
+/// yourself that lasts until the start of your own next turn." Whichever
+/// attack is resolved while [`Condition::SteadyAim`] is active gets
+/// [`RollMode::Advantage`](crate::rules::combat::RollMode::Advantage) from
+/// it - see `sim::duel`'s `attack_mode`, which reads
+/// [`Condition::advantage_on_attacks`] the same way it already read
+/// [`Condition::disadvantage_on_attacks`] for Poisoned and Blinded. The speed
+/// clause is [`Condition::zeroes_speed`]: nothing in this engine has a
+/// position or a speed to zero yet (see `DESIGN.md`'s "Positioning is the gap
+/// that matters"), so that flag is tracked and exposed generically rather
+/// than acted on.
+///
+/// One real gap this leaves: [`crate::sim::duel`] always resolves a turn's
+/// action before its bonus action (`Fight::turn`'s fixed `[Action, Bonus]`
+/// order), while the whole point of Steady Aim is to take it *before* the
+/// attack it is meant to buff. Until the duel engine lets a turn's action and
+/// bonus action be sequenced either way, this condition cannot buff the same
+/// turn's action in a simulated fight - it is still exactly right for a hand
+/// resolved outside the duel loop, and for whatever attack comes next once
+/// that ordering is possible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SteadyAimPlugin;
+
+impl SteadyAimPlugin {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl FeaturePlugin for SteadyAimPlugin {
+    fn id(&self) -> &'static str {
+        "steady_aim"
+    }
+
+    fn name(&self) -> &str {
+        "Steady Aim"
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        builder.add_bonus_action(Move::new(
+            "Steady Aim",
+            Effect::Stance {
+                condition: Condition::SteadyAim,
+            },
+        ));
+        Ok(())
+    }
+}
+
+/// Cunning Action (2024 Rogue 2): Bonus Action. Take the Dash or Disengage
+/// action as a bonus action instead of spending your action on it.
+///
+/// Registered as two separate bonus-action [`Move`]s rather than one, because
+/// a [`crate::sim::duel::Plan`] only ever picks a single bonus action out of
+/// the whole list regardless of how many are on it - offering both is exactly
+/// "either one, never both" with no extra bookkeeping needed.
+///
+/// Neither move does anything mechanically here. Dash (double speed) and
+/// Disengage (moving away provokes no opportunity attacks) are both about
+/// movement and positioning, and this engine has neither (see `DESIGN.md`'s
+/// "Positioning is the gap that matters") - so both are
+/// `Effect::Sequence(Vec::new())`, a legal, zero-damage, zero-rider move a
+/// plan can still select and spend the bonus-action slot on, rather than
+/// invented movement mechanics standing in for rules that do not exist yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CunningActionPlugin;
+
+impl CunningActionPlugin {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl FeaturePlugin for CunningActionPlugin {
+    fn id(&self) -> &'static str {
+        "cunning_action"
+    }
+
+    fn name(&self) -> &str {
+        "Cunning Action"
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        builder.add_bonus_action(Move::new(
+            "Dash (Bonus Action)",
+            Effect::Sequence(Vec::new()),
+        ));
+        builder.add_bonus_action(Move::new(
+            "Disengage (Bonus Action)",
+            Effect::Sequence(Vec::new()),
+        ));
         Ok(())
     }
 }
@@ -611,5 +712,63 @@ mod tests {
         // Spending more than remains is refused rather than silently capped,
         // so a later effect plugin cannot overdraw the pool by accident.
         assert_eq!(after_both_options.spend(3), None);
+    }
+
+    #[test]
+    fn applying_steady_aim_registers_a_bonus_action_that_applies_its_condition() {
+        let builder = CreatureBuilder::new("Rogue", 15, 40);
+        let built = builder
+            .apply_feature(&SteadyAimPlugin::new())
+            .expect("steady aim applies")
+            .build()
+            .expect("builds");
+        assert_eq!(built.bonus_actions.len(), 1);
+        let steady_aim = &built.bonus_actions[0];
+        assert_eq!(steady_aim.name, "Steady Aim");
+        assert_eq!(
+            steady_aim.effect,
+            Effect::Stance {
+                condition: Condition::SteadyAim,
+            }
+        );
+        // Free to take: it costs the bonus action slot, not a resource.
+        assert!(steady_aim.is_free());
+        // Zero damage in its own right - the advantage it grants only shows
+        // up on whatever attack rolls against it, which `sim::duel`'s
+        // `attack_mode` and `Condition::advantage_on_attacks` cover.
+        let dummy = crate::rules::creature::Creature::new("dummy", 10, 10);
+        assert_eq!(steady_aim.effect.mean_damage(&dummy), 0.0);
+        assert_eq!(steady_aim.effect.stance(), Some(Condition::SteadyAim));
+    }
+
+    #[test]
+    fn applying_cunning_action_registers_dash_and_disengage_as_free_bonus_actions() {
+        let builder = CreatureBuilder::new("Rogue", 15, 40);
+        let built = builder
+            .apply_feature(&CunningActionPlugin::new())
+            .expect("cunning action applies")
+            .build()
+            .expect("builds");
+        assert_eq!(built.bonus_actions.len(), 2);
+        let names: Vec<&str> = built
+            .bonus_actions
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Dash (Bonus Action)", "Disengage (Bonus Action)"]
+        );
+
+        let dummy = crate::rules::creature::Creature::new("dummy", 10, 10);
+        for m in &built.bonus_actions {
+            // Both are free to take (no resource cost, unlimited uses) and
+            // have no mechanical effect - there is no movement model for
+            // either to act on yet, but a plan can still legally select them.
+            assert!(m.is_free());
+            assert_eq!(m.effect, Effect::Sequence(Vec::new()));
+            assert_eq!(m.effect.mean_damage(&dummy), 0.0);
+            assert_eq!(m.effect.stance(), None);
+        }
     }
 }
