@@ -70,6 +70,21 @@ pub enum Condition {
     /// [`Condition::auto_crits`]: a hit landed against it is an automatic
     /// critical.
     Paralyzed,
+    /// Cannot cast a spell or activate a magic item
+    /// ([`Condition::blocks_magic`]), has disadvantage on every saving throw
+    /// it makes ([`Condition::disadvantage_on_saves`]), and any damage it
+    /// deals - of any type, to anyone - is halved
+    /// ([`Condition::halves_own_damage`]).
+    ///
+    /// The bundle a limited-use item's forced save applies on a failure (see
+    /// [`crate::dsl::plugin::LimitedUseDebuffItemPlugin`]), kept as one
+    /// condition rather than three separately-tracked effects because all
+    /// three share exactly one applier, one victim and one duration. Unlike
+    /// Stunned or Paralyzed, this does **not** incapacitate: the creature
+    /// still gets its turn, its ordinary attacks, and every move that is not
+    /// tagged [`crate::rules::creature::MoveKind::Spell`] or
+    /// [`crate::rules::creature::MoveKind::MagicItem`].
+    Suppressed,
 }
 
 impl Condition {
@@ -81,6 +96,7 @@ impl Condition {
             "poisoned" => Self::Poisoned,
             "blinded" => Self::Blinded,
             "paralyzed" | "paralysed" => Self::Paralyzed,
+            "suppressed" => Self::Suppressed,
             _ => return None,
         })
     }
@@ -93,6 +109,7 @@ impl Condition {
             Self::Poisoned => "poisoned",
             Self::Blinded => "blinded",
             Self::Paralyzed => "paralyzed",
+            Self::Suppressed => "suppressed",
         }
     }
 
@@ -141,6 +158,33 @@ impl Condition {
     /// enough.
     pub fn auto_crits(self) -> bool {
         matches!(self, Self::Paralyzed)
+    }
+
+    /// Blocks the two RAW action categories a debuff like this one takes
+    /// away: casting a spell
+    /// ([`crate::rules::creature::MoveKind::Spell`]) and activating a magic
+    /// item ([`crate::rules::creature::MoveKind::MagicItem`]). Whoever
+    /// selects a move checks this before taking one of either kind - see
+    /// `sim::duel`'s move gating - this only answers the question.
+    pub fn blocks_magic(self) -> bool {
+        matches!(self, Self::Suppressed)
+    }
+
+    /// Does this creature roll every saving throw it makes at disadvantage?
+    /// Composed with any other source of advantage or disadvantage on a save
+    /// via the usual 5e cancellation rule rather than overriding it - see
+    /// `sim::duel::save_mode`, the same stacking `attack_mode` already
+    /// applies to attack rolls.
+    pub fn disadvantage_on_saves(self) -> bool {
+        matches!(self, Self::Suppressed)
+    }
+
+    /// Halves this creature's own outgoing damage, of any type, against
+    /// anyone it attacks - the attacker-side counterpart to
+    /// [`crate::rules::combat::Reduction`], which only ever halves by the
+    /// *target's* damage type. See `sim::duel::halve_if_suppressed`.
+    pub fn halves_own_damage(self) -> bool {
+        matches!(self, Self::Suppressed)
     }
 }
 
