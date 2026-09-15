@@ -11,7 +11,9 @@ pub use action::{
 };
 pub use combatant::Creature;
 pub use damage::{DamageKind, DamageRoll};
-pub use rider::{AttackTrigger, Rider};
+pub use rider::{
+    save_success_probability, saving_throw_against_condition, AttackTrigger, Rider,
+};
 pub use types::{
     Ability, Condition, Cost, CreatureType, Duration, Resource, Size, SpellCastingProfile,
     SpellSlots, SPELL_LEVELS,

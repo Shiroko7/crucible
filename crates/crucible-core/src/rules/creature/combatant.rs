@@ -5,7 +5,9 @@ use crate::rules::combat::Reduction;
 use super::action::Move;
 use super::damage::DamageKind;
 use super::rider::Rider;
-use super::types::{Ability, CreatureType, Resource, Size, SpellCastingProfile, SpellSlots};
+use super::types::{
+    Ability, Condition, CreatureType, Resource, Size, SpellCastingProfile, SpellSlots,
+};
 
 /// One side of a fight.
 ///
@@ -40,6 +42,13 @@ pub struct Creature {
     pub size: Size,
     pub saves: [i32; 6],
     pub reductions: Vec<(DamageKind, Reduction)>,
+    /// Conditions this creature is flatly immune to - a construct's or an
+    /// undead's usual immunity to Poisoned, say. A flat list rather than a
+    /// taxonomy, the same shape [`Creature::reductions`] already uses for
+    /// damage types: this exists only because [`Rider::DowngradeImmunity`]
+    /// needs a target-side concept of "immune to this condition" to
+    /// downgrade in the first place, so it stays exactly that minimal.
+    pub condition_immunities: Vec<Condition>,
     pub resources: Vec<Resource>,
     /// This creature's spell slot pools, 1st through 9th level. Zeroed out -
     /// and therefore free to ignore - for anything that does not cast spells.
@@ -79,6 +88,7 @@ impl Creature {
             size: Size::default(),
             saves: [0; 6],
             reductions: Vec::new(),
+            condition_immunities: Vec::new(),
             resources: Vec::new(),
             spell_slots: SpellSlots::default(),
             spellcasting: None,
@@ -101,6 +111,38 @@ impl Creature {
             .find(|&&(k, _)| k == kind)
             .map(|&(_, r)| r)
             .unwrap_or_default()
+    }
+
+    /// The [`Reduction`] `attacker` actually inflicts against this creature
+    /// for `kind`.
+    ///
+    /// Ordinarily just [`Creature::reduction`]. The one exception: if this
+    /// creature is [`Reduction::Immune`] to `kind` and `attacker` carries a
+    /// [`Rider::DowngradeImmunity`] naming this exact `kind`, the hit lands
+    /// as merely [`Reduction::Resistant`] instead - half damage rather than
+    /// none.
+    ///
+    /// Scoped to `attacker` alone, never a change to this creature's own
+    /// stat sheet: a different attacker with no such trait, against this
+    /// very same target, still sees `Immune` from [`Creature::reduction`].
+    pub fn reduction_from(&self, kind: DamageKind, attacker: &Creature) -> Reduction {
+        let base = self.reduction(kind);
+        if base == Reduction::Immune
+            && attacker
+                .riders
+                .iter()
+                .any(|r| r.downgrades_damage_immunity(kind))
+        {
+            Reduction::Resistant
+        } else {
+            base
+        }
+    }
+
+    /// Is this creature flatly immune to `condition`? See
+    /// [`Creature::condition_immunities`].
+    pub fn immune_to_condition(&self, condition: Condition) -> bool {
+        self.condition_immunities.contains(&condition)
     }
 
     /// Does this creature turn a successful `ability` save for half into no
@@ -192,6 +234,11 @@ impl Creature {
 
     pub fn with_size(mut self, size: Size) -> Self {
         self.size = size;
+        self
+    }
+
+    pub fn with_condition_immunity(mut self, condition: Condition) -> Self {
+        self.condition_immunities.push(condition);
         self
     }
 }
