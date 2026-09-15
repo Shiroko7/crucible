@@ -177,5 +177,12 @@ pub fn describe_trait(rider: &Rider) -> String {
         Rider::CunningStrike { dc } => {
             format!("cunning strike: spend sneak attack dice dc {dc}")
         }
+        Rider::CunningStrikeTrip => {
+            "cunning strike: trip (1d6, dex save vs cunning strike dc or prone)".to_string()
+        }
+        Rider::CunningStrikeWithdraw => {
+            "cunning strike: withdraw (1d6, move half speed without opportunity attacks)"
+                .to_string()
+        }
     }
 }

@@ -1,7 +1,8 @@
 //! Triggered modifiers and reactions (riders).
 
 use super::damage::{DamageKind, DamageRoll};
-use super::types::{Ability, Condition, Cost, Duration};
+use super::types::{Ability, Condition, Cost, Duration, Size};
+use crate::prob::rng::Rng;
 use crate::rules::combat::{Attack, DamageRider, RollMode};
 
 /// A triggered modifier.
@@ -86,6 +87,27 @@ pub enum Rider {
     ///
     /// [`SpellCastingProfile`]: super::types::SpellCastingProfile
     CunningStrike { dc: i32 },
+    /// The 2024 Rogue's Cunning Strike: Trip option (Rogue 5) is unlocked:
+    /// spend 1d6 of a qualifying Sneak Attack's pool (see
+    /// [`Rider::resolve_cunning_strike_trip`]) to force a Dexterity save,
+    /// against [`Rider::CunningStrike`]'s DC, on a target that is Large size
+    /// or smaller - knocking it [`Condition::Prone`] on a failure.
+    ///
+    /// A pure marker like [`Rider::CunningStrike`] itself: it carries no
+    /// dice or DC of its own, always reading [`Rider::CunningStrike`]'s.
+    CunningStrikeTrip,
+    /// The 2024 Rogue's Cunning Strike: Withdraw option (Rogue 5) is
+    /// unlocked: spend 1d6 of a qualifying Sneak Attack's pool (see
+    /// [`Rider::resolve_cunning_strike_withdraw`]) to move up to half speed
+    /// without provoking opportunity attacks.
+    ///
+    /// There is no movement or opportunity-attack model here for that to
+    /// actually change - see `DESIGN.md` and the README's "Positioning is
+    /// the gap that matters" note - so resolving this spends the die and
+    /// does no more than flag that the rogue withdrew safely, the same shape
+    /// ROG-05's Cunning Action lands on for Dash and Disengage (zero-effect
+    /// moves, because the engine has nothing for them to change either).
+    CunningStrikeWithdraw,
 }
 
 impl Rider {
@@ -152,6 +174,66 @@ impl Rider {
             Rider::CunningStrike { dc } => Some(*dc),
             _ => None,
         }
+    }
+
+    /// Resolve a Cunning Strike: Trip attempt, or `None` if this rider is
+    /// not [`Rider::CunningStrikeTrip`], `target_size` is bigger than Large
+    /// (a Huge or Gargantuan target cannot be tripped at all, so the die is
+    /// never spent - an illegal declaration, the same shape
+    /// [`DamageRider::spend`] already gives an overdrawn pool), or `pool`
+    /// cannot afford the 1d6 cost.
+    ///
+    /// On a legal attempt, spends the die and rolls a Dexterity save
+    /// against `dc` (see [`Rider::cunning_strike_dc`]) at `target_dex_save`,
+    /// returning the reduced pool alongside [`Condition::Prone`] on a
+    /// failed save or `None` on a successful one.
+    ///
+    /// This rolls the save directly with `rng` rather than through
+    /// `sim::duel`'s save handling - which also lets
+    /// [`Rider::AlwaysSucceed`] buy back a failure and auto-fails Strength
+    /// and Dexterity saves for an Incapacitated target - because no policy
+    /// layer yet decides *when* a rogue spends Sneak Attack dice on Trip
+    /// instead of full damage. Wiring that choice into a live fight is
+    /// future work, same as the rest of "which effects a spend buys" per
+    /// [`Rider::CunningStrike`]'s doc comment.
+    pub fn resolve_cunning_strike_trip(
+        &self,
+        pool: DamageRider,
+        target_size: Size,
+        target_dex_save: i32,
+        dc: i32,
+        rng: &mut Rng,
+    ) -> Option<(DamageRider, Option<Condition>)> {
+        if !matches!(self, Rider::CunningStrikeTrip) {
+            return None;
+        }
+        if target_size > Size::Large {
+            return None;
+        }
+        let reduced = pool.spend(1)?;
+        let saved = rng.die(20) + target_dex_save >= dc;
+        Some((reduced, (!saved).then_some(Condition::Prone)))
+    }
+
+    /// Resolve a Cunning Strike: Withdraw attempt, or `None` if this rider
+    /// is not [`Rider::CunningStrikeWithdraw`] or `pool` cannot afford the
+    /// 1d6 cost.
+    ///
+    /// On a legal attempt, spends the die and returns the reduced pool
+    /// alongside `true`: a flag for "the rogue is treated as having safely
+    /// repositioned this turn" and nothing more, per
+    /// [`Rider::CunningStrikeWithdraw`]'s doc comment - there is no
+    /// movement or opportunity-attack model here for it to actually do
+    /// anything to.
+    pub fn resolve_cunning_strike_withdraw(
+        &self,
+        pool: DamageRider,
+    ) -> Option<(DamageRider, bool)> {
+        if !matches!(self, Rider::CunningStrikeWithdraw) {
+            return None;
+        }
+        let reduced = pool.spend(1)?;
+        Some((reduced, true))
     }
 }
 
@@ -298,5 +380,128 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- Cunning Strike: Trip & Withdraw -----------------------------
+
+    fn trip_pool() -> DamageRider {
+        // Stand-in for a qualifying Sneak Attack's pool: 4d6, same as the
+        // rest of this file's Cunning Strike tests.
+        DamageRider::new(4, 6)
+    }
+
+    #[test]
+    fn trip_is_refused_against_a_target_bigger_than_large() {
+        let mut rng = Rng::new(1);
+        for size in [Size::Huge, Size::Gargantuan] {
+            assert_eq!(
+                Rider::CunningStrikeTrip.resolve_cunning_strike_trip(
+                    trip_pool(),
+                    size,
+                    100, // even a save bonus this high must not matter
+                    10,
+                    &mut rng,
+                ),
+                None,
+                "{size:?} is too big to trip; the die must not be spent either"
+            );
+        }
+    }
+
+    #[test]
+    fn trip_is_allowed_against_large_and_everything_smaller() {
+        let mut rng = Rng::new(2);
+        for size in [Size::Tiny, Size::Small, Size::Medium, Size::Large] {
+            let (reduced, _) = Rider::CunningStrikeTrip
+                .resolve_cunning_strike_trip(trip_pool(), size, 0, 10, &mut rng)
+                .unwrap_or_else(|| panic!("{size:?} should be a legal Trip target"));
+            assert_eq!(reduced.dice_count, 3, "1d6 spent on the attempt");
+        }
+    }
+
+    #[test]
+    fn trip_spends_1d6_from_the_sneak_attack_pool() {
+        let mut rng = Rng::new(3);
+        let (reduced, _) = Rider::CunningStrikeTrip
+            .resolve_cunning_strike_trip(trip_pool(), Size::Medium, 0, 10, &mut rng)
+            .expect("a Medium target can be tripped");
+        assert_eq!(reduced, DamageRider::new(3, 6));
+    }
+
+    #[test]
+    fn trip_knocks_a_failed_save_prone_and_leaves_a_successful_one_standing() {
+        let mut rng = Rng::new(4);
+        // A save bonus far below any roll a d20 can produce always fails.
+        let (_, failed) = Rider::CunningStrikeTrip
+            .resolve_cunning_strike_trip(trip_pool(), Size::Medium, -100, 10, &mut rng)
+            .expect("legal attempt");
+        assert_eq!(failed, Some(Condition::Prone));
+
+        // A save bonus far above any DC always succeeds.
+        let (_, succeeded) = Rider::CunningStrikeTrip
+            .resolve_cunning_strike_trip(trip_pool(), Size::Medium, 100, 10, &mut rng)
+            .expect("legal attempt");
+        assert_eq!(succeeded, None);
+    }
+
+    #[test]
+    fn trip_refuses_to_overdraw_the_pool() {
+        let mut rng = Rng::new(5);
+        let empty = DamageRider::new(0, 6);
+        assert_eq!(
+            Rider::CunningStrikeTrip.resolve_cunning_strike_trip(
+                empty,
+                Size::Medium,
+                0,
+                10,
+                &mut rng
+            ),
+            None,
+            "no dice left to spend on the attempt"
+        );
+    }
+
+    #[test]
+    fn trip_resolution_is_gated_on_the_matching_rider_variant() {
+        let mut rng = Rng::new(6);
+        assert_eq!(
+            Rider::CunningStrikeWithdraw.resolve_cunning_strike_trip(
+                trip_pool(),
+                Size::Medium,
+                0,
+                10,
+                &mut rng
+            ),
+            None,
+            "an unrelated rider is not mistaken for the Trip marker"
+        );
+    }
+
+    #[test]
+    fn withdraw_spends_1d6_and_flags_a_safe_reposition() {
+        let pool = DamageRider::new(4, 6);
+        let (reduced, repositioned) = Rider::CunningStrikeWithdraw
+            .resolve_cunning_strike_withdraw(pool)
+            .expect("4 dice can afford the 1d6 cost");
+        assert_eq!(reduced, DamageRider::new(3, 6));
+        assert!(repositioned, "a legal Withdraw always repositions safely");
+    }
+
+    #[test]
+    fn withdraw_refuses_to_overdraw_the_pool() {
+        let empty = DamageRider::new(0, 6);
+        assert_eq!(
+            Rider::CunningStrikeWithdraw.resolve_cunning_strike_withdraw(empty),
+            None
+        );
+    }
+
+    #[test]
+    fn withdraw_resolution_is_gated_on_the_matching_rider_variant() {
+        assert_eq!(
+            Rider::CunningStrikeTrip.resolve_cunning_strike_withdraw(trip_pool()),
+            None,
+            "an unrelated rider is not mistaken for the Withdraw marker"
+        );
     }
 }

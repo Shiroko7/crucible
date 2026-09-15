@@ -39,6 +39,57 @@ impl Ability {
     }
 }
 
+/// A 5e size category, Tiny through Gargantuan.
+///
+/// Ordered smallest to largest - the derived [`Ord`] is the whole reason this
+/// is a type rather than the size word left as a `String` - so a size-gated
+/// effect can compare directly (`target.size <= Size::Large`, Cunning
+/// Strike's Trip) instead of matching every variant that qualifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Size {
+    Tiny,
+    Small,
+    Medium,
+    Large,
+    Huge,
+    Gargantuan,
+}
+
+impl Size {
+    pub fn parse(word: &str) -> Option<Self> {
+        Some(match word.to_ascii_lowercase().as_str() {
+            "tiny" => Self::Tiny,
+            "small" => Self::Small,
+            "medium" => Self::Medium,
+            "large" => Self::Large,
+            "huge" => Self::Huge,
+            "gargantuan" => Self::Gargantuan,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Tiny => "tiny",
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Large => "large",
+            Self::Huge => "huge",
+            Self::Gargantuan => "gargantuan",
+        }
+    }
+}
+
+/// Most statblocks that bother to state a size are Medium, and plenty do not
+/// bother at all - so a creature with nothing declared defaults to Medium
+/// rather than to some third "unknown" state every size comparison would
+/// then have to account for.
+impl Default for Size {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
 /// A condition, in the 5e sense: a named bundle of effects with a lifetime.
 ///
 /// Conditions are a system rather than a set of flags, which `DESIGN.md` calls

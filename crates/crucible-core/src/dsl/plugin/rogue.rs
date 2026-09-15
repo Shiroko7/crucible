@@ -125,6 +125,62 @@ impl FeaturePlugin for CunningStrikePlugin {
     }
 }
 
+/// Cunning Strike: Trip (2024 Rogue 5): forgo 1d6 of a qualifying Sneak
+/// Attack to force a Dexterity save, against the Cunning Strike DC, on a
+/// target that is Large size or smaller - knocking it Prone on a failure.
+///
+/// This plugin only unlocks the option existing at all, registering
+/// [`Rider::CunningStrikeTrip`] - a pure marker, exactly like
+/// [`CunningStrikePlugin`] itself unlocking [`Rider::CunningStrike`]. It
+/// carries no dice or DC of its own: [`Rider::resolve_cunning_strike_trip`]
+/// always reads [`Rider::CunningStrike`]'s DC, the same "framework unlocks
+/// it, the marker rider carries the DC" split [`CunningStrikePlugin`]'s own
+/// doc comment describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CunningStrikeTripPlugin;
+
+impl FeaturePlugin for CunningStrikeTripPlugin {
+    fn id(&self) -> &'static str {
+        "cunning_strike_trip"
+    }
+
+    fn name(&self) -> &str {
+        "Cunning Strike: Trip"
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        builder.add_rider(Rider::CunningStrikeTrip);
+        Ok(())
+    }
+}
+
+/// Cunning Strike: Withdraw (2024 Rogue 5): forgo 1d6 of a qualifying Sneak
+/// Attack to move up to half speed without provoking opportunity attacks.
+///
+/// Registers [`Rider::CunningStrikeWithdraw`]. Resolving it - see
+/// [`Rider::resolve_cunning_strike_withdraw`] - can do no more than flag
+/// that the rogue withdrew safely: there is no movement or
+/// opportunity-attack model here for it to actually change anything
+/// against, the same gap ROG-05's Cunning Action (Dash and Disengage,
+/// registered as zero-effect moves) already hits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CunningStrikeWithdrawPlugin;
+
+impl FeaturePlugin for CunningStrikeWithdrawPlugin {
+    fn id(&self) -> &'static str {
+        "cunning_strike_withdraw"
+    }
+
+    fn name(&self) -> &str {
+        "Cunning Strike: Withdraw"
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        builder.add_rider(Rider::CunningStrikeWithdraw);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +447,112 @@ mod tests {
         // Spending more than remains is refused rather than silently capped,
         // so a later effect plugin cannot overdraw the pool by accident.
         assert_eq!(after_both_options.spend(3), None);
+    }
+
+    #[test]
+    fn applying_the_trip_plugin_registers_its_marker_rider() {
+        let builder = CreatureBuilder::new("Rogue", 15, 40);
+        let built = builder
+            .apply_feature(&CunningStrikeTripPlugin)
+            .expect("cunning strike trip applies")
+            .build()
+            .expect("builds");
+        assert_eq!(built.riders, vec![Rider::CunningStrikeTrip]);
+    }
+
+    #[test]
+    fn applying_the_withdraw_plugin_registers_its_marker_rider() {
+        let builder = CreatureBuilder::new("Rogue", 15, 40);
+        let built = builder
+            .apply_feature(&CunningStrikeWithdrawPlugin)
+            .expect("cunning strike withdraw applies")
+            .build()
+            .expect("builds");
+        assert_eq!(built.riders, vec![Rider::CunningStrikeWithdraw]);
+    }
+
+    /// End to end: a level-5 Rogue built from Sneak Attack, Cunning Strike,
+    /// and both new option plugins can fund a real Trip attempt (against a
+    /// legal, Large-or-smaller target) and a real Withdraw from the exact
+    /// pool a qualifying Sneak Attack would otherwise roll whole - the same
+    /// framework the stand-in test above exercises, now with the actual
+    /// effects instead of "does nothing" placeholders.
+    #[test]
+    fn a_level_five_rogue_can_trip_and_withdraw_from_one_sneak_attack() {
+        use crate::rules::creature::{Condition, Size};
+
+        let builder = CreatureBuilder::new("Rogue", 15, 40);
+        let creature = builder
+            .apply_feature(&SneakAttackPlugin::new(4))
+            .expect("sneak attack applies")
+            .apply_feature(&CunningStrikePlugin::new(4, 3))
+            .expect("cunning strike applies")
+            .apply_feature(&CunningStrikeTripPlugin)
+            .expect("trip applies")
+            .apply_feature(&CunningStrikeWithdrawPlugin)
+            .expect("withdraw applies")
+            .build()
+            .expect("builds");
+
+        let dc = creature
+            .riders
+            .iter()
+            .find_map(Rider::cunning_strike_dc)
+            .expect("cunning strike is unlocked");
+        assert_eq!(dc, 15);
+
+        let attack = Attack::new(7, 1, 6, 4)
+            .with_mode(RollMode::Advantage)
+            .with_finesse_or_ranged(true);
+        let sneak_attack_rider = creature
+            .riders
+            .iter()
+            .find(|r| matches!(r, Rider::ConditionalExtraDamage { .. }))
+            .expect("the sneak attack rider is present");
+        let full = sneak_attack_rider
+            .extra_damage_for(&attack, false)
+            .expect("qualifies");
+        assert_eq!(full, DamageRider::new(4, 6));
+
+        // Trip a Large ogre-sized target: a save bonus far below any d20
+        // roll always fails, so it goes down Prone.
+        let trip_rider = creature
+            .riders
+            .iter()
+            .find(|r| matches!(r, Rider::CunningStrikeTrip))
+            .expect("trip is unlocked");
+        let mut rng = Rng::new(42);
+        let (after_trip, prone) = trip_rider
+            .resolve_cunning_strike_trip(full, Size::Large, -100, dc, &mut rng)
+            .expect("a Large target is a legal Trip target");
+        assert_eq!(after_trip.dice_count, 3, "1d6 spent on the Trip attempt");
+        assert_eq!(prone, Some(Condition::Prone));
+
+        // Fund a Withdraw from what is left of the same pool.
+        let withdraw_rider = creature
+            .riders
+            .iter()
+            .find(|r| matches!(r, Rider::CunningStrikeWithdraw))
+            .expect("withdraw is unlocked");
+        let (after_both, repositioned) = withdraw_rider
+            .resolve_cunning_strike_withdraw(after_trip)
+            .expect("2 dice can afford the 1d6 Withdraw cost");
+        assert_eq!(after_both.dice_count, 2, "two combined 1d6 spends");
+        assert!(repositioned);
+
+        // What actually gets rolled for damage is the twice-reduced pool -
+        // checked against the exact distribution, the same way ROG-02's own
+        // framework test holds itself to.
+        let defense = Defense::new(1, 60); // AC 1: every non-fumble roll hits
+        let reduced = damage_pmf(&attack.clone().with_damage_rider(after_both), &defense);
+        let unspent = damage_pmf(&attack.with_damage_rider(full), &defense);
+        assert!(reduced.mean() < unspent.mean());
+
+        // A Gargantuan target cannot be Tripped at all: the attempt is
+        // refused and the die is never spent.
+        assert_eq!(
+            trip_rider.resolve_cunning_strike_trip(full, Size::Gargantuan, -100, dc, &mut rng),
+            None
+        );
     }
 }

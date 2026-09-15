@@ -211,6 +211,7 @@ mod tests {
         assert_eq!(dragon.legendary_uses, 3);
         assert_eq!(dragon.legendary.len(), 3);
         assert_eq!(dragon.riders.len(), 1);
+        assert_eq!(dragon.size, crate::rules::creature::Size::Huge);
     }
 
     #[test]
@@ -223,6 +224,36 @@ mod tests {
         assert_eq!(ogre.hp, 68);
         assert_eq!(ogre.initiative, -1);
         assert_eq!(ogre.actions.len(), 2);
+        assert_eq!(ogre.size, crate::rules::creature::Size::Large);
+    }
+
+    #[test]
+    fn a_monster_with_no_declared_size_defaults_to_medium() {
+        let registry = FeatureRegistry::new();
+        let toml = r#"
+            [monster]
+            name = "Bandit"
+            ac = 12
+            hp = 11
+        "#;
+        let bandit =
+            load_creature_from_str(toml, &registry).expect("a monster with no size parses");
+        assert_eq!(bandit.size, crate::rules::creature::Size::Medium);
+    }
+
+    #[test]
+    fn an_unknown_size_is_rejected() {
+        let registry = FeatureRegistry::new();
+        let toml = r#"
+            [monster]
+            name = "Mystery"
+            ac = 10
+            hp = 10
+            size = "Colossal"
+        "#;
+        let err = load_creature_from_str(toml, &registry)
+            .expect_err("an unrecognised size must be rejected, not silently dropped");
+        assert!(matches!(err, FeatureError::UnknownSize(_)));
     }
 
     /// `[pc.resources.slots]` mirrors the existing `[pc.resources]`

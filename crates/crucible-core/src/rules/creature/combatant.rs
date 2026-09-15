@@ -5,7 +5,7 @@ use crate::rules::combat::Reduction;
 use super::action::Move;
 use super::damage::DamageKind;
 use super::rider::Rider;
-use super::types::{Ability, Resource, SpellCastingProfile, SpellSlots};
+use super::types::{Ability, Resource, Size, SpellCastingProfile, SpellSlots};
 
 /// One side of a fight.
 ///
@@ -24,6 +24,12 @@ pub struct Creature {
     pub ac: i32,
     pub hp: i32,
     pub initiative: i32,
+    /// This creature's 5e size category. Defaults to Medium - see
+    /// [`Size`]'s `Default` impl - for a statblock that never declares one,
+    /// the same "silent common case" default weapon and monster stats
+    /// already get elsewhere. The gate for Cunning Strike's Trip option:
+    /// [`Rider::resolve_cunning_strike_trip`].
+    pub size: Size,
     pub saves: [i32; 6],
     pub reductions: Vec<(DamageKind, Reduction)>,
     pub resources: Vec<Resource>,
@@ -54,6 +60,7 @@ impl Creature {
             ac,
             hp,
             initiative: 0,
+            size: Size::default(),
             saves: [0; 6],
             reductions: Vec::new(),
             resources: Vec::new(),
@@ -125,6 +132,11 @@ impl Creature {
 
     pub fn with_rider(mut self, rider: Rider) -> Self {
         self.riders.push(rider);
+        self
+    }
+
+    pub fn with_size(mut self, size: Size) -> Self {
+        self.size = size;
         self
     }
 }
