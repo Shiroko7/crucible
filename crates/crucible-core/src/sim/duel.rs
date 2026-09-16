@@ -2961,7 +2961,16 @@ mod tests {
         // the revive is deterministic without pinning the roll.
         let heal = Effect::Heal(HealRoll::new(1, 4, 3));
         let mut notes = Vec::new();
-        fight.resolve(&heal, &mut rng, 0, 1, &[], true, &mut notes);
+        fight.resolve(
+            &heal,
+            &mut rng,
+            0,
+            1,
+            &[],
+            true,
+            &mut notes,
+            &mut Vec::new(),
+        );
 
         assert!((4..=7).contains(&fight.fighters[1].hp));
         assert!(
@@ -2990,7 +2999,16 @@ mod tests {
 
         let heal = Effect::Heal(HealRoll::new(1, 4, 3));
         let mut notes = Vec::new();
-        fight.resolve(&heal, &mut rng, 0, 1, &[], true, &mut notes);
+        fight.resolve(
+            &heal,
+            &mut rng,
+            0,
+            1,
+            &[],
+            true,
+            &mut notes,
+            &mut Vec::new(),
+        );
 
         assert_eq!(
             fight.fighters[1].hp, 10,
