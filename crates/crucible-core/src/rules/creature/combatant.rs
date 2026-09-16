@@ -100,6 +100,16 @@ impl Creature {
             .any(|r| matches!(r, Rider::NothingOnSuccess { ability: a } if *a == ability))
     }
 
+    /// Does this creature's [`Rider::ConditionalExtraDamage`] also accept a
+    /// qualifying spell attack roll, not only a finesse-or-ranged weapon
+    /// attack? See [`Rider::ExtraDamageAppliesToSpellAttacks`] and
+    /// [`Rider::extra_damage_for_with_spell_attack_extension`].
+    pub fn extra_damage_applies_to_spell_attacks(&self) -> bool {
+        self.riders
+            .iter()
+            .any(|r| matches!(r, Rider::ExtraDamageAppliesToSpellAttacks))
+    }
+
     pub fn resource_index(&self, name: &str) -> Option<usize> {
         self.resources
             .iter()
