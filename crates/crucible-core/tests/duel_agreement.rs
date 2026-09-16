@@ -22,7 +22,7 @@ use crucible_core::creature::Rider;
 use crucible_core::creature::{
     Ability, Creature, DamageKind, DamageRoll, Effect, SaveEffect, Strike,
 };
-use crucible_core::{Reduction, Rng};
+use crucible_core::{AttackModifier, Reduction, Rng, RollMode};
 
 const SAMPLES: usize = 200_000;
 
@@ -245,4 +245,58 @@ fn mean_damage_matches_a_hand_calculation() {
         (got - expected).abs() < 1e-9,
         "mean rend damage {got:.6}, hand-computed {expected:.6}"
     );
+}
+
+/// The same `AttackModifier`/damage-rider hook `exact_vs_sampled.rs` checks
+/// against the single-pool [`crucible_core::Attack`], checked again here
+/// against a multi-type [`Strike`] - Bless on the roll, Sneak Attack's dice on
+/// the damage - since that is the type `sim::duel` actually resolves against,
+/// and a hook that only worked on the standalone test fixture would not be a
+/// hook at all.
+#[test]
+fn attack_modifiers_and_damage_riders_agree_on_a_multi_type_strike() {
+    let cases: Vec<(&str, Vec<AttackModifier>, Vec<DamageRoll>, Creature)> = vec![
+        (
+            "bless on a rend",
+            vec![AttackModifier::BonusDice { count: 1, sides: 4 }],
+            vec![],
+            target(20, 0, &[]),
+        ),
+        (
+            "bane on a rend",
+            vec![AttackModifier::PenaltyDice { count: 1, sides: 4 }],
+            vec![],
+            target(18, 0, &[]),
+        ),
+        (
+            "sneak attack dice, conditionally appended on a hit",
+            vec![],
+            vec![DamageRoll::new(3, 6, 0, DamageKind::Piercing)],
+            target(16, 0, &[]),
+        ),
+        (
+            "bless and sneak attack together, against resistance",
+            vec![AttackModifier::BonusDice { count: 1, sides: 4 }],
+            vec![DamageRoll::new(3, 6, 0, DamageKind::Piercing)],
+            target(17, 0, &[(DamageKind::Slashing, Reduction::Resistant)]),
+        ),
+    ];
+
+    for (seed, (name, modifiers, extra, defender)) in cases.into_iter().enumerate() {
+        let strike = rend();
+        let exact =
+            strike.damage_pmf_with_modifiers(&defender, RollMode::Normal, &modifiers, &extra);
+        agree(name, seed as u64 + 900, &exact, |rng| {
+            strike
+                .sample_forcing_crit_with_modifiers(
+                    rng,
+                    &defender,
+                    RollMode::Normal,
+                    false,
+                    &modifiers,
+                    &extra,
+                )
+                .0
+        });
+    }
 }

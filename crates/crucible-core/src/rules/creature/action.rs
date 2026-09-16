@@ -2,7 +2,7 @@
 
 use crate::prob::dice::Pmf;
 use crate::prob::rng::Rng;
-use crate::rules::combat::{hit_outcomes, sample_hit, Landed, RollMode};
+use crate::rules::combat::{hit_outcomes_with, sample_hit_with, AttackModifier, Landed, RollMode};
 
 use super::combatant::Creature;
 use super::damage::{DamageKind, DamageRoll};
@@ -26,10 +26,18 @@ impl Strike {
         }
     }
 
-    fn landed_pmf(&self, target: &Creature, crit: bool) -> Pmf {
-        self.damage.iter().fold(Pmf::constant(0), |acc, roll| {
-            acc.convolve(&roll.pmf(crit, target.reduction(roll.kind)))
-        })
+    /// `extra` is what [`Strike::damage_pmf_with_modifiers`] and
+    /// [`Strike::sample_forcing_crit_with_modifiers`] append for a
+    /// [`super::rider::Rider`]-style bonus - Sneak Attack's dice, a
+    /// dragonslaying weapon's bonus - which is exactly [`DamageRoll`] since a
+    /// multi-typed strike already carries its own damage as a `Vec` of them.
+    fn landed_pmf(&self, target: &Creature, crit: bool, extra: &[DamageRoll]) -> Pmf {
+        self.damage
+            .iter()
+            .chain(extra)
+            .fold(Pmf::constant(0), |acc, roll| {
+                acc.convolve(&roll.pmf(crit, target.reduction(roll.kind)))
+            })
     }
 
     /// Exact distribution of the damage this strike deals to `target`,
@@ -39,11 +47,29 @@ impl Strike {
     /// is mostly a property of the *situation* - who is prone, who is dodging -
     /// and only sometimes of the weapon.
     pub fn damage_pmf_with(&self, target: &Creature, mode: RollMode) -> Pmf {
-        let o = hit_outcomes(self.to_hit, mode, target.ac);
+        self.damage_pmf_with_modifiers(target, mode, &[], &[])
+    }
+
+    /// As [`Strike::damage_pmf_with`], with an [`AttackModifier`] list applied
+    /// to the roll (Bless, Bane, a flat bonus, forced advantage) and extra
+    /// [`DamageRoll`]s appended on a hit (a damage rider).
+    ///
+    /// Both lists are decided by the caller for this one attack - see the
+    /// module docs on [`crate::rules::combat::AttackModifier`] - so many
+    /// unrelated sources can be active on the same strike without this
+    /// function, or `sim::duel`, growing a branch per source.
+    pub fn damage_pmf_with_modifiers(
+        &self,
+        target: &Creature,
+        mode: RollMode,
+        modifiers: &[AttackModifier],
+        extra_damage: &[DamageRoll],
+    ) -> Pmf {
+        let o = hit_outcomes_with(self.to_hit, mode, target.ac, modifiers);
         Pmf::mixture(&[
             (o.miss, Pmf::constant(0)),
-            (o.hit, self.landed_pmf(target, false)),
-            (o.crit, self.landed_pmf(target, true)),
+            (o.hit, self.landed_pmf(target, false, extra_damage)),
+            (o.crit, self.landed_pmf(target, true, extra_damage)),
         ])
     }
 
@@ -72,7 +98,24 @@ impl Strike {
         mode: RollMode,
         force_crit: bool,
     ) -> (i32, Landed) {
-        let landed = sample_hit(rng, self.to_hit, mode, target.ac);
+        self.sample_forcing_crit_with_modifiers(rng, target, mode, force_crit, &[], &[])
+    }
+
+    /// As [`Strike::sample_forcing_crit`], with the same [`AttackModifier`]
+    /// list and extra [`DamageRoll`]s as [`Strike::damage_pmf_with_modifiers`].
+    /// Must be distributed according to it; `tests/duel_agreement.rs` requires
+    /// that agreement the same way it does for the unmodified strike.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_forcing_crit_with_modifiers(
+        &self,
+        rng: &mut Rng,
+        target: &Creature,
+        mode: RollMode,
+        force_crit: bool,
+        modifiers: &[AttackModifier],
+        extra_damage: &[DamageRoll],
+    ) -> (i32, Landed) {
+        let landed = sample_hit_with(rng, self.to_hit, mode, target.ac, modifiers);
         let landed = if force_crit && landed == Landed::Hit {
             Landed::Crit
         } else {
@@ -86,6 +129,7 @@ impl Strike {
         let total = self
             .damage
             .iter()
+            .chain(extra_damage)
             .map(|roll| roll.sample(rng, crit, target.reduction(roll.kind)))
             .sum();
         (total, landed)

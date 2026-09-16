@@ -21,7 +21,7 @@
 
 use crucible_core::{
     damage_pmf, expected_attacks_to_kill, kill_curve, sample_attacks_to_kill, sample_damage,
-    Attack, Defense, Reduction, Rng, RollMode,
+    Attack, AttackModifier, DamageRider, Defense, Reduction, Rng, RollMode,
 };
 
 const DAMAGE_SAMPLES: usize = 200_000;
@@ -71,6 +71,31 @@ fn cases() -> Vec<(&'static str, Attack, Defense)> {
             "a penalty large enough to floor ordinary hits at zero",
             Attack::new(10, 1, 4, -3),
             Defense::new(12, 15),
+        ),
+        (
+            "bless: +1d4 to the attack roll",
+            Attack::new(5, 1, 8, 3)
+                .with_attack_modifier(AttackModifier::BonusDice { count: 1, sides: 4 }),
+            Defense::new(15, 30),
+        ),
+        (
+            "bane: -1d4 to the attack roll",
+            Attack::new(7, 2, 6, 4)
+                .with_attack_modifier(AttackModifier::PenaltyDice { count: 1, sides: 4 }),
+            Defense::new(16, 40),
+        ),
+        (
+            "a damage rider's extra dice, conditionally appended on a hit",
+            Attack::new(6, 1, 6, 2).with_damage_rider(DamageRider::new(2, 6)),
+            Defense::new(14, 30),
+        ),
+        (
+            "bless, a magic weapon's flat bonus, and a damage rider all active at once",
+            Attack::new(4, 1, 8, 2)
+                .with_attack_modifier(AttackModifier::BonusDice { count: 1, sides: 4 })
+                .with_attack_modifier(AttackModifier::Flat(1))
+                .with_damage_rider(DamageRider::new(3, 6).with_bonus(2)),
+            Defense::new(15, 40).with_reduction(Reduction::Resistant),
         ),
     ]
 }

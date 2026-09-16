@@ -30,8 +30,9 @@ pub use sim::duel;
 // Top-level re-exports (backward compatibility)
 pub use analysis::{evaluate, sustained_rounds_to_kill, Summary};
 pub use combat::{
-    damage_pmf, hit_outcomes, outcomes, sample_attacks_to_kill, sample_damage, sample_hit, Attack,
-    Defense, Landed, Outcomes, Reduction, RollMode,
+    damage_pmf, hit_outcomes, hit_outcomes_with, outcomes, resolve_mode, sample_attacks_to_kill,
+    sample_damage, sample_hit, sample_hit_with, Attack, AttackModifier, DamageRider, Defense,
+    Landed, Outcomes, Reduction, RollMode,
 };
 pub use creature::{
     Ability, Condition, Cost, Creature, DamageKind, DamageRoll, Duration, Effect, Move, Resource,

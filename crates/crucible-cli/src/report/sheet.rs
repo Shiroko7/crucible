@@ -166,5 +166,13 @@ pub fn describe_trait(rider: &Rider) -> String {
             condition.name(),
             ability.name()
         ),
+        Rider::ConditionalExtraDamage {
+            dice_count,
+            dice_sides,
+            once_per_turn,
+        } => format!(
+            "+{dice_count}d{dice_sides} on advantage or an adjacent ally, not disadvantage{}",
+            if *once_per_turn { " (once/turn)" } else { "" }
+        ),
     }
 }
