@@ -94,6 +94,24 @@ pub enum Rider {
         dice_sides: u32,
         once_per_turn: bool,
     },
+    /// Marks a creature whose [`Rider::ConditionalExtraDamage`] also accepts
+    /// a qualifying spell attack roll
+    /// ([`crate::rules::combat::Attack::is_spell_attack`]), not only a
+    /// finesse-or-ranged weapon attack
+    /// ([`crate::rules::combat::Attack::finesse_or_ranged`]).
+    ///
+    /// Most creatures with `ConditionalExtraDamage` do not carry this - it
+    /// is the "some builds grant a feature that lets a non-weapon spell
+    /// attack also qualify" extension, gated the same way
+    /// [`Rider::NothingOnSuccess`]'s evasion check is: a second rider in the
+    /// same list, queried by [`crate::rules::creature::Creature::extra_damage_applies_to_spell_attacks`]
+    /// rather than a field added to `ConditionalExtraDamage` itself, so a
+    /// creature can carry the extension without every existing
+    /// `ConditionalExtraDamage` construction site needing to know about it.
+    /// A no-op on its own; it only changes what
+    /// [`Rider::extra_damage_for_with_spell_attack_extension`] does with a
+    /// sibling `ConditionalExtraDamage` rider.
+    ExtraDamageAppliesToSpellAttacks,
 }
 
 impl Rider {
@@ -124,7 +142,35 @@ impl Rider {
     /// `dice_count` on the result before handing it to
     /// [`Attack::with_damage_rider`] - [`DamageRider`] is a plain count of
     /// dice, so rolling fewer of them is not a special case.
+    ///
+    /// This is the plain weapon-only gate - equivalent to calling
+    /// [`Rider::extra_damage_for_with_spell_attack_extension`] with
+    /// `spell_attacks_extended: false`, kept as its own method so the common
+    /// case (a creature with no spell-attack extension) reads without an
+    /// extra argument that would always be `false` for it.
     pub fn extra_damage_for(&self, attack: &Attack, used_this_turn: bool) -> Option<DamageRider> {
+        self.extra_damage_for_with_spell_attack_extension(attack, used_this_turn, false)
+    }
+
+    /// As [`Rider::extra_damage_for`], but also accepts a spell attack roll
+    /// ([`Attack::is_spell_attack`]) when `spell_attacks_extended` is `true`.
+    /// That flag is what a creature carrying
+    /// [`Rider::ExtraDamageAppliesToSpellAttacks`] passes in, via
+    /// [`crate::rules::creature::Creature::extra_damage_applies_to_spell_attacks`].
+    ///
+    /// The gate: a finesse-or-ranged weapon attack always qualifies; a spell
+    /// attack qualifies only when the extension is present; either way, the
+    /// roll still needs advantage or an ally adjacent, and disadvantage
+    /// still overrides both. Saving-throw spells never reach this check at
+    /// all - they are resolved via `SaveEffect`, not an [`Attack`], so there
+    /// is no hit roll and no [`Rider::extra_damage_for`] call in the first
+    /// place; this only ever fires from attack-roll resolution.
+    pub fn extra_damage_for_with_spell_attack_extension(
+        &self,
+        attack: &Attack,
+        used_this_turn: bool,
+        spell_attacks_extended: bool,
+    ) -> Option<DamageRider> {
         let Rider::ConditionalExtraDamage {
             dice_count,
             dice_sides,
@@ -136,7 +182,9 @@ impl Rider {
         if *once_per_turn && used_this_turn {
             return None;
         }
-        if !attack.finesse_or_ranged || attack.mode == RollMode::Disadvantage {
+        let qualifying_attack =
+            attack.finesse_or_ranged || (attack.is_spell_attack && spell_attacks_extended);
+        if !qualifying_attack || attack.mode == RollMode::Disadvantage {
             return None;
         }
         if attack.mode == RollMode::Advantage || attack.ally_adjacent {
@@ -144,5 +192,188 @@ impl Rider {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prob::rng::Rng;
+    use crate::rules::combat::{damage_pmf, sample_damage, Defense};
+    use crate::rules::creature::Creature;
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-12
+    }
+
+    fn rider() -> Rider {
+        Rider::ConditionalExtraDamage {
+            dice_count: 4,
+            dice_sides: 6,
+            once_per_turn: true,
+        }
+    }
+
+    /// A weapon attack triggers through the extended gate exactly like it
+    /// does through the plain one - the extension flag never widens or
+    /// narrows the weapon path, regardless of which way it is set.
+    #[test]
+    fn a_weapon_attack_is_unaffected_by_the_spell_attack_extension_either_way() {
+        let attack = Attack::new(7, 1, 4, 3)
+            .with_mode(RollMode::Advantage)
+            .with_finesse_or_ranged(true);
+        assert_eq!(
+            rider().extra_damage_for_with_spell_attack_extension(&attack, false, false),
+            Some(DamageRider::new(4, 6))
+        );
+        assert_eq!(
+            rider().extra_damage_for_with_spell_attack_extension(&attack, false, true),
+            Some(DamageRider::new(4, 6)),
+            "the extension is additive, never a restriction on the weapon path"
+        );
+    }
+
+    /// A spell attack qualifies only when the creature carries the
+    /// extension - the "some builds have this, most don't" gate the marker
+    /// rider exists for.
+    #[test]
+    fn a_spell_attack_triggers_only_with_the_extension() {
+        let attack = Attack::new(7, 1, 4, 3)
+            .with_mode(RollMode::Advantage)
+            .with_is_spell_attack(true);
+        assert_eq!(
+            rider().extra_damage_for_with_spell_attack_extension(&attack, false, true),
+            Some(DamageRider::new(4, 6)),
+            "a spell attack should qualify once the extension is present"
+        );
+        assert_eq!(
+            rider().extra_damage_for_with_spell_attack_extension(&attack, false, false),
+            None,
+            "a spell attack must not qualify without the extension"
+        );
+    }
+
+    /// The plain two-argument [`Rider::extra_damage_for`] never grants the
+    /// extension - a spell attack never triggers through it, which is
+    /// exactly the "no argument means `false`" contract
+    /// [`Rider::extra_damage_for_with_spell_attack_extension`]'s doc comment
+    /// promises.
+    #[test]
+    fn the_plain_gate_never_extends_to_spell_attacks() {
+        let attack = Attack::new(7, 1, 4, 3)
+            .with_mode(RollMode::Advantage)
+            .with_is_spell_attack(true);
+        assert_eq!(rider().extra_damage_for(&attack, false), None);
+    }
+
+    /// Disadvantage still overrides everything, spell attack or not.
+    #[test]
+    fn disadvantage_still_overrides_a_spell_attack_with_the_extension() {
+        let attack = Attack::new(7, 1, 4, 3)
+            .with_mode(RollMode::Disadvantage)
+            .with_is_spell_attack(true)
+            .with_ally_adjacent(true);
+        assert_eq!(
+            rider().extra_damage_for_with_spell_attack_extension(&attack, false, true),
+            None
+        );
+    }
+
+    /// [`Creature::extra_damage_applies_to_spell_attacks`] reads the marker
+    /// straight off the creature's own rider list, the same way
+    /// [`Creature::has_evasion`] reads [`Rider::NothingOnSuccess`].
+    #[test]
+    fn a_creature_reports_the_extension_only_when_it_carries_the_marker_rider() {
+        let plain = Creature::new("Plain Rogue", 15, 40).with_rider(rider());
+        assert!(!plain.extra_damage_applies_to_spell_attacks());
+
+        let extended = Creature::new("Extended Build", 15, 40)
+            .with_rider(rider())
+            .with_rider(Rider::ExtraDamageAppliesToSpellAttacks);
+        assert!(extended.extra_damage_applies_to_spell_attacks());
+    }
+
+    /// The exact and sampled paths agree across the weapon-attack, extended
+    /// spell-attack, and unextended spell-attack cases - the same kind of
+    /// trigger matrix `dsl::plugin::rogue`'s sneak attack test covers for
+    /// the plain weapon-only gate, extended here to the new spell-attack
+    /// cases.
+    #[test]
+    fn sampled_extra_damage_agrees_with_the_exact_path_across_spell_attack_cases() {
+        let defense = Defense::new(14, 60);
+        let cases = [
+            (
+                "weapon attack, advantage: triggers regardless of the extension",
+                Attack::new(6, 1, 8, 4)
+                    .with_mode(RollMode::Advantage)
+                    .with_finesse_or_ranged(true),
+                false,
+            ),
+            (
+                "spell attack, advantage, with the extension: triggers",
+                Attack::new(6, 1, 8, 4)
+                    .with_mode(RollMode::Advantage)
+                    .with_is_spell_attack(true),
+                true,
+            ),
+            (
+                "spell attack, advantage, without the extension: does not trigger",
+                Attack::new(6, 1, 8, 4)
+                    .with_mode(RollMode::Advantage)
+                    .with_is_spell_attack(true),
+                false,
+            ),
+        ];
+        for (seed, (name, attack, spell_attacks_extended)) in cases.into_iter().enumerate() {
+            let attack = match rider().extra_damage_for_with_spell_attack_extension(
+                &attack,
+                false,
+                spell_attacks_extended,
+            ) {
+                Some(extra) => attack.with_damage_rider(extra),
+                None => attack,
+            };
+            let exact = damage_pmf(&attack, &defense);
+            let (lo, hi) = (exact.min(), exact.max());
+            let mut rng = Rng::new(seed as u64 + 1_300);
+            let n = 100_000;
+            let mut counts = vec![0usize; (hi - lo + 1) as usize];
+            for _ in 0..n {
+                let d = sample_damage(&mut rng, &attack, &defense);
+                assert!(
+                    d >= lo && d <= hi,
+                    "{name}: sampled {d} outside {lo}..={hi}"
+                );
+                counts[(d - lo) as usize] += 1;
+            }
+            for (i, &c) in counts.iter().enumerate() {
+                let value = lo + i as i32;
+                let want = exact.prob(value);
+                let got = c as f64 / n as f64;
+                let tol = 5.0 * (want * (1.0 - want) / n as f64).sqrt() + 1e-4;
+                assert!(
+                    (got - want).abs() < tol,
+                    "{name}: P(damage = {value}) sampled {got:.5}, exact {want:.5}, tol {tol:.5}"
+                );
+            }
+        }
+        // The weapon path and the extended spell-attack path should agree
+        // exactly once both qualify: the gate is an OR over roll type, not
+        // a different amount of damage for one kind or the other.
+        let weapon = damage_pmf(
+            &Attack::new(6, 1, 8, 4)
+                .with_mode(RollMode::Advantage)
+                .with_finesse_or_ranged(true)
+                .with_damage_rider(DamageRider::new(4, 6)),
+            &defense,
+        );
+        let spell = damage_pmf(
+            &Attack::new(6, 1, 8, 4)
+                .with_mode(RollMode::Advantage)
+                .with_is_spell_attack(true)
+                .with_damage_rider(DamageRider::new(4, 6)),
+            &defense,
+        );
+        assert!(close(weapon.mean(), spell.mean()));
     }
 }
