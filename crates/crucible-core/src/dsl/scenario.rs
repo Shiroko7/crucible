@@ -369,9 +369,11 @@ fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> {
         } else {
             Effect::Sequence(effects)
         },
-        // The DSL has no clause for it yet; a scenario that needs
-        // concentration waits on that syntax, not on the engine.
+        // The DSL has no clause for either yet; a scenario that needs
+        // concentration, or the casting-restriction exemption, waits on that
+        // syntax, not on the engine.
         concentration: false,
+        bypasses_casting_restrictions: false,
     })
 }
 

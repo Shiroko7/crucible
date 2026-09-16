@@ -459,6 +459,22 @@ pub struct Move {
     /// down. `false` for every ordinary move, which is why this defaults with
     /// the rest of [`Move::new`] rather than needing its own builder call.
     pub concentration: bool,
+    /// Set on a move-taking that spent a limited-use charge to be exempt from
+    /// whatever casting-restriction mechanism might apply to it elsewhere -
+    /// being silenced, unable to speak or gesture, and so on. `false` for
+    /// every ordinary move.
+    ///
+    /// This engine has no restriction-checking condition to consult the flag
+    /// against yet - that is a separate, independent mechanism's concern -
+    /// so it exists here as a standalone primitive: whichever mechanism
+    /// checks "can this creature cast right now" can read it once it exists,
+    /// the same way a new [`Condition`] variant is added once and every call
+    /// site the compiler can find is updated to consult it. See
+    /// [`crate::dsl::plugin::casting::BypassCastingRestrictionsPlugin`] for
+    /// how a build grants a charge-gated option to set it, reusing
+    /// [`Uses::Limited`] for the charge budget rather than inventing a
+    /// parallel resource mechanism.
+    pub bypasses_casting_restrictions: bool,
 }
 
 impl Move {
@@ -470,6 +486,7 @@ impl Move {
             riders: Vec::new(),
             effect,
             concentration: false,
+            bypasses_casting_restrictions: false,
         }
     }
 
@@ -490,6 +507,14 @@ impl Move {
 
     pub fn with_concentration(mut self) -> Self {
         self.concentration = true;
+        self
+    }
+
+    /// Marks this specific move-taking as exempt from whatever
+    /// casting-restriction mechanism might apply to it - see
+    /// [`Move::bypasses_casting_restrictions`].
+    pub fn with_bypasses_casting_restrictions(mut self) -> Self {
+        self.bypasses_casting_restrictions = true;
         self
     }
 
