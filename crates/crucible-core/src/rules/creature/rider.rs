@@ -4,6 +4,20 @@ use super::damage::{DamageKind, DamageRoll};
 use super::types::{Ability, Condition, Cost, Duration};
 use crate::rules::combat::{Attack, DamageRider, RollMode};
 
+/// What kind of incoming attack a [`Rider::ReactionOnTargeted`] answers.
+///
+/// One variant today, because nothing in the engine yet distinguishes a
+/// melee attack roll from a ranged or spell one the way
+/// [`Attack::finesse_or_ranged`] distinguishes weapon properties. The field
+/// exists anyway so a future distinction - a reaction that only answers a
+/// melee attack, say - is a new variant matched at the same call site, not a
+/// new field threaded through every caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttackTrigger {
+    /// Any attack roll made against this creature.
+    AnyAttack,
+}
+
 /// A triggered modifier.
 ///
 /// Each variant is a mechanism, not a feature. The comments name the features
@@ -45,6 +59,24 @@ pub enum Rider {
         /// Reactions refresh at the start of the creature's turn.
         per_round: u32,
     },
+    /// A reaction spent on being *targeted* by an attack, before its hit or
+    /// miss is finalized, that adds `ac_bonus` to this creature's AC against
+    /// that one attack - capable of turning what would have been a hit into
+    /// a miss.
+    ///
+    /// The mirror of [`Rider::ReduceDamage`]: that one reacts to an attack
+    /// that already hit, on its damage; this one reacts to being targeted,
+    /// before the roll against AC is decided. A reaction that boosts AC
+    /// against a targeting attack - the Shield spell, a Ring of Protection's
+    /// reactive bonus, and any homebrew item shaped the same way - is this
+    /// mechanism; nothing here is specific to any one of them.
+    ReactionOnTargeted {
+        trigger: AttackTrigger,
+        ac_bonus: i32,
+        /// Reactions refresh at the start of the creature's turn, the same
+        /// as [`Rider::ReduceDamage::per_round`].
+        per_round: u32,
+    },
     /// Extra damage dice on a hit, gated on the attack roll having advantage
     /// or an ally next to the target - and never at all if the attacker also
     /// has disadvantage, which overrides an ally in place. Spendable once per
@@ -70,6 +102,7 @@ impl Rider {
         match self {
             Rider::AlwaysSucceed { uses } => *uses,
             Rider::ReduceDamage { per_round, .. } => *per_round,
+            Rider::ReactionOnTargeted { per_round, .. } => *per_round,
             _ => 0,
         }
     }

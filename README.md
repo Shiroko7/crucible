@@ -46,7 +46,7 @@ times, reported.
 | `scenario` | `dsl::scenario` | scenario parser supporting both external creature configs (`source:`) and inline declarations |
 | `duel` | `sim::duel` | team combat rounds: initiative, action economy, reactions, condition lifetimes, legendary actions between turns |
 | `analysis` | `sim::analysis` | win and death probability, CVaR of the bad tail, exact pacing check |
-| riders | `rules::creature::rider` | Evasion, Legendary Resistance, Stunning Strike, Deflect Attacks - as general mechanisms |
+| riders | `rules::creature::rider` | Evasion, Legendary Resistance, Stunning Strike, Deflect Attacks, a reaction that boosts AC against a targeting attack - as general mechanisms |
 | policies | `sim::duel::policy` | eight of the nine from `DESIGN.md`: `solver`, `nova`, `greedy`, `focus-fire`, `scattered`, `in-order`, `defensive`, `attrition`, `thrifty` |
 | search | `sim::duel` | flat Monte Carlo over one turn, to a depth budget |
 | content | `content/` | data-driven PC (`content/characters/`) and Monster (`content/monsters/`) formatted configurations |

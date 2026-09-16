@@ -388,6 +388,75 @@ pub fn hit_outcomes_with(
     }
 }
 
+/// As [`hit_outcomes_with`], but the defender may spend a reaction to add
+/// `ac_bonus` to its AC against this one attack before hit or miss is
+/// finalized - [`crate::rules::creature::Rider::ReactionOnTargeted`], a
+/// reaction that boosts AC against a targeting attack (the Shield spell, or a
+/// magic item shaped the same way), rather than reducing damage after a hit
+/// already landed like [`crate::rules::creature::Rider::ReduceDamage`].
+///
+/// Spending it is never worse than not: raising the AC needed to clear this
+/// roll can only turn a hit into a miss, never a miss into a hit, and it
+/// cannot touch a natural 20 - that always crits regardless of AC, same as
+/// [`hit_outcomes_with`]. So whenever `available` is true, the whole
+/// distribution is exactly what fighting against `ac + ac_bonus` would give;
+/// `available` is decided by the caller - `sim::duel`, which tracks the
+/// per-round budget - and is `false` once the reaction is already spent this
+/// round.
+pub fn hit_outcomes_with_reaction(
+    to_hit: i32,
+    mode: RollMode,
+    ac: i32,
+    modifiers: &[AttackModifier],
+    ac_bonus: i32,
+    available: bool,
+) -> Outcomes {
+    let effective_ac = if available { ac + ac_bonus } else { ac };
+    hit_outcomes_with(to_hit, mode, effective_ac, modifiers)
+}
+
+/// The sampled counterpart of [`hit_outcomes_with_reaction`].
+///
+/// The d20 (and any modifier dice) is rolled exactly once - the reaction is
+/// decided from that same roll rather than by rolling again, the same way
+/// [`sample_hit_with`] never rolls twice for one attack. Returns whether the
+/// reaction was actually spent alongside how the attack landed, so a caller
+/// tracking a limited budget only debits it when it fired: never against a
+/// miss (nothing to gain) or a natural-20 crit (nothing it can do), and
+/// always against an attack that would otherwise land as an ordinary hit -
+/// even when `ac_bonus` turns out not to be enough to save it, the same way
+/// spending a reaction at the table does not refund it just because the
+/// attack still connects.
+pub fn sample_hit_with_reaction(
+    rng: &mut Rng,
+    to_hit: i32,
+    mode: RollMode,
+    ac: i32,
+    modifiers: &[AttackModifier],
+    ac_bonus: i32,
+    available: bool,
+) -> (Landed, bool) {
+    let mode = resolve_mode(mode, modifiers);
+    let roll = mode.roll(rng);
+    let bonus = sample_modifier_bonus(rng, modifiers);
+    if roll == 20 {
+        return (Landed::Crit, false);
+    }
+    if roll == 1 || roll + to_hit + bonus < ac {
+        return (Landed::Miss, false);
+    }
+    // An ordinary hit against the base AC: the reaction fires whenever it is
+    // available, whether or not the boost ends up being enough.
+    if !available {
+        return (Landed::Hit, false);
+    }
+    if roll + to_hit + bonus < ac + ac_bonus {
+        (Landed::Miss, true)
+    } else {
+        (Landed::Hit, true)
+    }
+}
+
 /// The sampled counterpart of [`hit_outcomes`].
 pub fn sample_hit(rng: &mut Rng, to_hit: i32, mode: RollMode, ac: i32) -> Landed {
     sample_hit_with(rng, to_hit, mode, ac, &[])
@@ -816,5 +885,116 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// +5 against AC 15 needs a 10 (see `hit_chance_matches_a_hand_count`).
+    /// A +5 reactive AC boost raises that to needing a 15, so rolls 10..14
+    /// move from the hit band into the miss band while the crit chance -
+    /// pinned to the natural 20 - does not move at all.
+    #[test]
+    fn a_reactive_ac_boost_can_turn_some_hits_into_misses() {
+        let plain = hit_outcomes_with_reaction(5, RollMode::Normal, 15, &[], 5, false);
+        let boosted = hit_outcomes_with_reaction(5, RollMode::Normal, 15, &[], 5, true);
+        assert!(close(plain.miss + plain.hit + plain.crit, 1.0));
+        assert!(close(boosted.miss + boosted.hit + boosted.crit, 1.0));
+        assert!(
+            boosted.hit < plain.hit,
+            "an available boost should convert some hits to misses"
+        );
+        assert!(
+            close(boosted.crit, plain.crit),
+            "a natural 20 crits regardless of the boost"
+        );
+        assert!(
+            close(boosted.hit, 5.0 / 20.0),
+            "needing a 15 instead of a 10 should leave exactly rolls 15..19 as hits"
+        );
+    }
+
+    /// An unavailable reaction changes nothing: the boosted call has to fall
+    /// back to exactly [`hit_outcomes_with`].
+    #[test]
+    fn an_unavailable_reaction_leaves_outcomes_unchanged() {
+        let plain = outcomes(&Attack::new(5, 1, 8, 3), &Defense::new(15, 20));
+        let unavailable = hit_outcomes_with_reaction(5, RollMode::Normal, 15, &[], 5, false);
+        assert!(close(plain.miss, unavailable.miss));
+        assert!(close(plain.hit, unavailable.hit));
+        assert!(close(plain.crit, unavailable.crit));
+    }
+
+    #[test]
+    fn sampled_reactive_ac_boost_agrees_with_the_exact_path() {
+        for (seed, available) in [(0u64, false), (1u64, true)] {
+            let exact = hit_outcomes_with_reaction(5, RollMode::Normal, 15, &[], 5, available);
+            let mut rng = Rng::new(seed + 700);
+            let n = 200_000;
+            let (mut miss, mut hit, mut crit) = (0usize, 0usize, 0usize);
+            for _ in 0..n {
+                match sample_hit_with_reaction(&mut rng, 5, RollMode::Normal, 15, &[], 5, available)
+                    .0
+                {
+                    Landed::Miss => miss += 1,
+                    Landed::Hit => hit += 1,
+                    Landed::Crit => crit += 1,
+                }
+            }
+            let tol = |p: f64| 5.0 * (p * (1.0 - p) / n as f64).sqrt() + 1e-4;
+            let check = |name: &str, want: f64, got_count: usize| {
+                let got = got_count as f64 / n as f64;
+                assert!(
+                    (got - want).abs() < tol(want),
+                    "available={available} {name}: sampled {got:.5}, exact {want:.5}"
+                );
+            };
+            check("miss", exact.miss, miss);
+            check("hit", exact.hit, hit);
+            check("crit", exact.crit, crit);
+        }
+    }
+
+    /// The reaction is only ever spent against a roll that would otherwise
+    /// land as an ordinary hit against the *base* AC: never on a roll that
+    /// was already going to miss (nothing to gain) and never on a natural 20
+    /// (nothing the boost can do about it) - even though a converted roll
+    /// still reports [`Landed::Miss`], the same as a roll that missed on its
+    /// own. Two independently-seeded but identical RNG streams isolate the
+    /// question: one decides the base outcome with no reaction in play at
+    /// all, the other decides it with the reaction available, and both draw
+    /// from the same die roll because [`sample_hit_with_reaction`] never
+    /// rolls more than [`sample_hit_with`] does.
+    #[test]
+    fn the_reaction_only_fires_on_a_would_be_ordinary_hit() {
+        let mut saw_a_consumed_hit = false;
+        for seed in 0..2_000u64 {
+            let mut base_rng = Rng::new(seed);
+            let mut reaction_rng = Rng::new(seed);
+            let base_landed = sample_hit_with(&mut base_rng, 5, RollMode::Normal, 15, &[]);
+            let (landed, consumed) =
+                sample_hit_with_reaction(&mut reaction_rng, 5, RollMode::Normal, 15, &[], 5, true);
+            match base_landed {
+                Landed::Miss => {
+                    assert!(
+                        !consumed,
+                        "a roll that would already miss should not spend the reaction"
+                    );
+                    assert_eq!(landed, Landed::Miss);
+                }
+                Landed::Crit => {
+                    assert!(!consumed, "a natural 20 should never spend the reaction");
+                    assert_eq!(landed, Landed::Crit);
+                }
+                Landed::Hit => {
+                    assert!(
+                        consumed,
+                        "an available reaction should always fire on a would-be ordinary hit"
+                    );
+                    saw_a_consumed_hit = true;
+                }
+            }
+        }
+        assert!(
+            saw_a_consumed_hit,
+            "an ordinary hit should have spent the reaction at least once in 2000 rolls"
+        );
     }
 }

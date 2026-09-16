@@ -300,3 +300,58 @@ fn attack_modifiers_and_damage_riders_agree_on_a_multi_type_strike() {
         });
     }
 }
+
+/// [`Rider::ReactionOnTargeted`] is a reaction spent before hit or miss is
+/// finalized rather than a modifier folded into the roll like
+/// [`AttackModifier`] or a rider appended to the damage like the sneak
+/// attack case above, so it gets its own agreement check - on the same
+/// multi-type [`Strike`] `sim::duel` actually resolves against, the same way
+/// the case above does for `AttackModifier`/`DamageRider`.
+#[test]
+fn a_reactive_ac_boost_agrees_with_the_exact_path_on_a_multi_type_strike() {
+    let cases: Vec<(&str, i32, bool, Creature)> = vec![
+        (
+            "available, and large enough to matter",
+            5,
+            true,
+            target(15, 0, &[]),
+        ),
+        (
+            "unavailable: no change from the plain strike",
+            5,
+            false,
+            target(15, 0, &[]),
+        ),
+        (
+            "available, against resistance on both damage types too",
+            5,
+            true,
+            target(
+                15,
+                0,
+                &[
+                    (DamageKind::Slashing, Reduction::Resistant),
+                    (DamageKind::Fire, Reduction::Resistant),
+                ],
+            ),
+        ),
+    ];
+
+    for (seed, (name, ac_bonus, available, defender)) in cases.into_iter().enumerate() {
+        let strike = rend();
+        let exact =
+            strike.damage_pmf_with_reaction(&defender, RollMode::Normal, ac_bonus, available);
+        agree(name, seed as u64 + 950, &exact, |rng| {
+            strike
+                .sample_forcing_crit_with_reaction(
+                    rng,
+                    &defender,
+                    RollMode::Normal,
+                    false,
+                    ac_bonus,
+                    available,
+                )
+                .0
+        });
+    }
+}
