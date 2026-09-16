@@ -7,11 +7,13 @@
 pub mod prestige_spellcasting;
 pub mod registry;
 pub mod rogue;
+pub mod spells;
 pub mod standard;
 pub mod traits;
 
 pub use prestige_spellcasting::*;
 pub use registry::FeatureRegistry;
 pub use rogue::*;
+pub use spells::*;
 pub use standard::*;
 pub use traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
