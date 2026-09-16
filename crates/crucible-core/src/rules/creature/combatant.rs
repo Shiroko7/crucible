@@ -25,6 +25,12 @@ pub struct Creature {
     pub hp: i32,
     pub initiative: i32,
     pub saves: [i32; 6],
+    /// Raw ability scores (Strength through Charisma), not save or check
+    /// bonuses - those live in `saves`. Zeroed for a creature that never
+    /// declares any, which is fine for anything that only ever needs the
+    /// bonuses; a prerequisite check gated on a raw score (a prestige
+    /// feature's ability minimums, say) is the reason this exists at all.
+    pub abilities: [i32; 6],
     pub reductions: Vec<(DamageKind, Reduction)>,
     pub resources: Vec<Resource>,
     /// This creature's spell slot pools, 1st through 9th level. Zeroed out -
@@ -55,6 +61,7 @@ impl Creature {
             hp,
             initiative: 0,
             saves: [0; 6],
+            abilities: [0; 6],
             reductions: Vec::new(),
             resources: Vec::new(),
             spell_slots: SpellSlots::default(),
@@ -69,6 +76,12 @@ impl Creature {
 
     pub fn save(&self, ability: Ability) -> i32 {
         self.saves[ability.index()]
+    }
+
+    /// This creature's raw ability score, as opposed to [`Creature::save`]'s
+    /// bonus.
+    pub fn ability_score(&self, ability: Ability) -> i32 {
+        self.abilities[ability.index()]
     }
 
     pub fn reduction(&self, kind: DamageKind) -> Reduction {
