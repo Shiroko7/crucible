@@ -8,7 +8,8 @@ use std::path::Path;
 use super::monster::MonsterDefinition;
 use super::pc::PlayerCharacter;
 use super::plugin::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
-use crate::rules::creature::{Ability, Creature, Move, Rider, SpellCastingProfile};
+use super::scenario::TraitEffect;
+use crate::rules::creature::{Ability, Creature, Move, SpellCastingProfile};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MoveEntry {
@@ -90,8 +91,9 @@ struct RootDocument {
     pub monster: Option<MonsterDefinition>,
 }
 
-/// Parse a trait definition string (e.g. "evasion dex", "legendary resistance 3").
-pub fn parse_trait_str(value: &str) -> FeatureResult<Rider> {
+/// Parse a trait definition string (e.g. "evasion dex", "legendary resistance 3",
+/// "ac 2").
+pub fn parse_trait_str(value: &str) -> FeatureResult<TraitEffect> {
     crate::dsl::scenario::parse_trait_external(value).map_err(FeatureError::InvalidConfiguration)
 }
 
@@ -269,6 +271,75 @@ mod tests {
         // 4 (INT mod) + 3 (proficiency) + 1 (item) = 8; DC is 8 + that.
         assert_eq!(wizard.spell_attack_bonus(), Some(8));
         assert_eq!(wizard.spell_save_dc(), Some(16));
+    }
+
+    /// Real items grant different subsets of AC, saves, spellcasting and
+    /// resistance - one bundle might only grant two of the four - so a PC has
+    /// to be able to carry several such items (here folded into one `traits`
+    /// list, the way several equipped items would each contribute their own
+    /// line) and have every one of them apply at once.
+    #[test]
+    fn a_pc_can_carry_every_stat_boost_trait_at_once() {
+        let registry = FeatureRegistry::new();
+        let toml = r#"
+            [pc]
+            name = "Test Caster"
+            ac = 12
+            hp = 30
+            resist = ["cold"]
+            traits = ["ac 2", "saves 1", "spell 2", "resistance fire, necrotic"]
+
+            [pc.spellcasting]
+            ability = "int"
+            ability_modifier = 4
+            proficiency_bonus = 3
+        "#;
+
+        let caster =
+            load_creature_from_str(toml, &registry).expect("every stat-boost trait applies");
+
+        assert_eq!(caster.ac, 14, "12 base + a 2-point item bonus");
+        for ability in [
+            crate::rules::creature::Ability::Str,
+            crate::rules::creature::Ability::Dex,
+            crate::rules::creature::Ability::Con,
+            crate::rules::creature::Ability::Int,
+            crate::rules::creature::Ability::Wis,
+            crate::rules::creature::Ability::Cha,
+        ] {
+            assert_eq!(caster.save(ability), 1, "every save gets the flat +1");
+        }
+        // 4 (INT mod) + 3 (proficiency) + 2 (item, from the trait rather than
+        // an inline `item_bonus`) = 9; DC is 8 + that.
+        assert_eq!(caster.spell_attack_bonus(), Some(9));
+        assert_eq!(caster.spell_save_dc(), Some(17));
+        // The item-granted resistances sit alongside `resist = ["cold"]`
+        // rather than replacing it.
+        use crate::rules::combat::Reduction;
+        use crate::rules::creature::DamageKind;
+        assert_eq!(caster.reduction(DamageKind::Cold), Reduction::Resistant);
+        assert_eq!(caster.reduction(DamageKind::Fire), Reduction::Resistant);
+        assert_eq!(caster.reduction(DamageKind::Necrotic), Reduction::Resistant);
+        assert_eq!(caster.reduction(DamageKind::Acid), Reduction::Normal);
+    }
+
+    /// The same guard as the scenario-format DSL: an item's spell attack/DC
+    /// bonus has nothing to add itself to on a creature with no
+    /// `[pc.spellcasting]` table at all.
+    #[test]
+    fn a_spell_bonus_trait_without_spellcasting_is_rejected() {
+        let registry = FeatureRegistry::new();
+        let toml = r#"
+            [pc]
+            name = "Not A Caster"
+            ac = 12
+            hp = 30
+            traits = ["spell 2"]
+        "#;
+
+        let err = load_creature_from_str(toml, &registry)
+            .expect_err("no spellcasting profile to add the bonus to");
+        assert!(matches!(err, FeatureError::InvalidConfiguration(_)));
     }
 
     #[test]
