@@ -38,7 +38,8 @@
 use crate::prob::rng::Rng;
 use crate::rules::combat::{Landed, RollMode};
 use crate::rules::creature::{
-    Ability, AttackTrigger, Condition, Cost, Creature, Duration, Effect, Move, Rider, Uses,
+    apply_healing, Ability, AttackTrigger, Condition, Cost, Creature, Duration, Effect, Move,
+    Rider, Uses,
 };
 
 /// Which side of the fight. A side is a team, of any size.
@@ -1219,6 +1220,27 @@ impl<'a> Fight<'a> {
                     notes.push(condition.name().to_string());
                 }
             }
+            Effect::Heal(roll) => {
+                // Healing Word, Cure Wounds. `target` is whoever this move was
+                // aimed at, exactly like a strike or a save - the engine only
+                // ever targets the opposing side today (see
+                // `dsl::plugin::spells`'s module doc), so in the current duel
+                // loop this only ever fires on an enemy. The math is written
+                // to be right regardless of who it lands on, ready for the
+                // day a policy can aim it at a downed ally instead.
+                let healed = roll.sample(rng);
+                let current_hp = self.fighters[target].hp;
+                let max_hp = self.fighters[target].creature.hp;
+                let (new_hp, revived) = apply_healing(current_hp, max_hp, healed);
+                self.fighters[target].hp = new_hp;
+                if record {
+                    notes.push(if revived {
+                        format!("heals {healed} (revives)")
+                    } else {
+                        format!("heals {healed}")
+                    });
+                }
+            }
             Effect::Sequence(parts) => {
                 for part in parts {
                     self.resolve(
@@ -1657,7 +1679,9 @@ pub fn run_teams(
 mod tests {
     use super::*;
     use crate::rules::combat::Reduction;
-    use crate::rules::creature::{Ability, DamageKind, DamageRoll, Resource, SaveEffect, Strike};
+    use crate::rules::creature::{
+        Ability, DamageKind, DamageRoll, HealRoll, Resource, SaveEffect, Strike,
+    };
 
     fn puncher(name: &str, ac: i32, hp: i32, to_hit: i32, bonus: i32) -> Creature {
         Creature::new(name, ac, hp).with_action(Move::new(
@@ -2909,5 +2933,90 @@ mod tests {
         fight.apply_condition(0, Condition::Stunned, Expiry::TurnStart(0));
         assert!(fight.fighters[0].concentration.is_none());
         assert!(!fight.fighters[1].has(|c| c == Condition::Poisoned));
+    }
+
+    /// `Fight::resolve` is exercised directly rather than through a whole
+    /// `run`: the duel engine has no ally targeting yet (see
+    /// `dsl::plugin::spells`'s module doc), so there is no scenario today
+    /// where a policy actually aims Healing Word or Cure Wounds at a downed
+    /// friendly. This pins the mechanical half - the HP math and the revive -
+    /// so it is right once targeting catches up.
+    #[test]
+    fn heal_effect_revives_a_downed_target() {
+        let healer = puncher("healer", 10, 20, 5, 2);
+        let downed = puncher("downed", 10, 30, 5, 2);
+        let roster = [(&healer, Side::A), (&downed, Side::B)];
+        let mut rng = Rng::new(1);
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            1,
+            Budget::default(),
+            &mut None,
+        );
+        fight.fighters[1].hp = 0;
+
+        // 1d4+3 is 4..=7: always enough to clear zero against a 30 hp max, so
+        // the revive is deterministic without pinning the roll.
+        let heal = Effect::Heal(HealRoll::new(1, 4, 3));
+        let mut notes = Vec::new();
+        fight.resolve(
+            &heal,
+            &mut rng,
+            0,
+            1,
+            &[],
+            true,
+            &mut notes,
+            &mut Vec::new(),
+        );
+
+        assert!((4..=7).contains(&fight.fighters[1].hp));
+        assert!(
+            notes.iter().any(|n| n.contains("revives")),
+            "regaining hp from 0 should revive: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn heal_effect_clamps_at_max_hp_and_does_not_revive_the_merely_wounded() {
+        let healer = puncher("healer", 10, 20, 5, 2);
+        let wounded = puncher("wounded", 10, 10, 5, 2);
+        let roster = [(&healer, Side::A), (&wounded, Side::B)];
+        let mut rng = Rng::new(1);
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            1,
+            Budget::default(),
+            &mut None,
+        );
+        // Already above zero, and close enough to its own 10 hp max that
+        // even the smallest roll (4) would overshoot it.
+        fight.fighters[1].hp = 8;
+
+        let heal = Effect::Heal(HealRoll::new(1, 4, 3));
+        let mut notes = Vec::new();
+        fight.resolve(
+            &heal,
+            &mut rng,
+            0,
+            1,
+            &[],
+            true,
+            &mut notes,
+            &mut Vec::new(),
+        );
+
+        assert_eq!(
+            fight.fighters[1].hp, 10,
+            "healing cannot push a creature past its own max hp"
+        );
+        assert!(
+            notes.iter().all(|n| !n.contains("revives")),
+            "was never down, so nothing to revive: {notes:?}"
+        );
     }
 }

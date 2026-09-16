@@ -363,6 +363,76 @@ enum Share {
     Full,
 }
 
+/// A healing roll: dice plus a flat modifier, restoring hit points instead of
+/// removing them.
+///
+/// Deliberately not a [`DamageRoll`] wearing a different sign: there is no
+/// damage type to resist, no crit to double the dice, and nothing reduces it.
+/// Keeping it a separate, smaller type means `Effect::Heal` cannot
+/// accidentally inherit any of that machinery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HealRoll {
+    pub count: u32,
+    pub sides: u32,
+    /// Baked in at construction time from whichever ability score fuels the
+    /// cast - the caster's [`crate::rules::creature::SpellCastingProfile`]
+    /// modifier, not a hardcoded number. See the plugins in
+    /// `dsl::plugin::spells`.
+    pub bonus: i32,
+}
+
+impl HealRoll {
+    pub fn new(count: u32, sides: u32, bonus: i32) -> Self {
+        assert!(sides > 0, "a d0 has no faces");
+        Self {
+            count,
+            sides,
+            bonus,
+        }
+    }
+
+    /// Exact distribution of the amount healed, floored at zero: a roll with
+    /// a very negative modifier cannot make a healing spell drain HP.
+    pub fn pmf(&self) -> Pmf {
+        Pmf::pool(self.count, self.sides)
+            .offset(self.bonus)
+            .floor_at(0)
+    }
+
+    /// The sampled counterpart of [`HealRoll::pmf`]; `tests/duel_agreement.rs`-style
+    /// agreement is asserted in this module's own tests.
+    pub fn sample(&self, rng: &mut Rng) -> i32 {
+        let raw: i32 = (0..self.count).map(|_| rng.die(self.sides)).sum();
+        (raw + self.bonus).max(0)
+    }
+
+    pub fn mean(&self) -> f64 {
+        f64::from(self.count) * (f64::from(self.sides) + 1.0) / 2.0 + f64::from(self.bonus)
+    }
+}
+
+/// Is a creature at this HP down - unconscious, in 5e terms?
+///
+/// There is no death-save subsystem here, so "down" is exactly "at zero HP or
+/// below": the minimal state a healing spell needs to know whether it is
+/// reviving someone or merely topping them up. Named rather than repeating
+/// `hp <= 0` at each call site, the same reasoning `Condition` gets.
+pub fn is_down(hp: i32) -> bool {
+    hp <= 0
+}
+
+/// Apply `amount` of healing to `current_hp`, capped at `max_hp`.
+///
+/// Returns the new HP and whether this revived the target: 5e's general
+/// "regaining hit points" rule is that any creature at 0 HP that regains any
+/// HP becomes conscious again, which is not specific to any one spell - both
+/// Healing Word and Cure Wounds get it for free by going through this.
+pub fn apply_healing(current_hp: i32, max_hp: i32, amount: i32) -> (i32, bool) {
+    let was_down = is_down(current_hp);
+    let new_hp = (current_hp + amount.max(0)).min(max_hp);
+    (new_hp, was_down && !is_down(new_hp))
+}
+
 /// What a move does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
@@ -378,6 +448,11 @@ pub enum Effect {
     Stance {
         condition: Condition,
     },
+    /// Restores hit points to whoever it targets - Healing Word, Cure Wounds.
+    /// The only effect that makes HP go up instead of down, which is why it
+    /// contributes nothing to `mean_damage`/`damage_pmf` and gets its own
+    /// `heal_pmf` instead.
+    Heal(HealRoll),
     /// Several effects in one move. A Multiattack of two claws and a bite, or
     /// a monk replacing one of its attacks with a breath weapon.
     Sequence(Vec<Effect>),
@@ -394,6 +469,8 @@ impl Effect {
             Effect::Strikes { strike, count } => strike.mean_damage(target) * f64::from(*count),
             Effect::Save(save) => save.damage_pmf(target).mean(),
             Effect::Stance { .. } => 0.0,
+            // Heals nothing, damages nothing: it has its own accounting.
+            Effect::Heal(_) => 0.0,
             Effect::Sequence(parts) => parts.iter().map(|p| p.mean_damage(target)).sum(),
         }
     }
@@ -411,10 +488,28 @@ impl Effect {
             }
             Effect::Save(save) => save.damage_pmf(target),
             Effect::Stance { .. } => Pmf::constant(0),
+            Effect::Heal(_) => Pmf::constant(0),
             Effect::Sequence(parts) => parts.iter().fold(Pmf::constant(0), |acc, p| {
                 acc.convolve(&p.damage_pmf(target))
             }),
         }
+    }
+
+    /// Exact distribution of the HP this effect restores in one use - the
+    /// mirror of [`Effect::damage_pmf`] for the one effect that heals rather
+    /// than harms.
+    pub fn heal_pmf(&self) -> Pmf {
+        match self {
+            Effect::Heal(roll) => roll.pmf(),
+            Effect::Sequence(parts) => parts
+                .iter()
+                .fold(Pmf::constant(0), |acc, p| acc.convolve(&p.heal_pmf())),
+            _ => Pmf::constant(0),
+        }
+    }
+
+    pub fn mean_heal(&self) -> f64 {
+        self.heal_pmf().mean()
     }
 
     /// Does any part of this apply a condition to the user?
@@ -448,6 +543,12 @@ pub struct Move {
     pub uses: Uses,
     /// Paid from a shared pool, on top of `uses`.
     pub cost: Option<Cost>,
+    /// A spell slot level this move spends from the caster's own
+    /// [`crate::rules::creature::SpellSlots`], separate from `cost`: a
+    /// caster's slots are nine independent counters rather than one named
+    /// pool, so they are not representable as a [`Cost`]. `None` for
+    /// anything that is not a spell.
+    pub spell_slot_level: Option<u32>,
     /// Fire when this move hits.
     pub riders: Vec<Rider>,
     pub effect: Effect,
@@ -467,6 +568,7 @@ impl Move {
             name: name.into(),
             uses: Uses::Unlimited,
             cost: None,
+            spell_slot_level: None,
             riders: Vec::new(),
             effect,
             concentration: false,
@@ -483,6 +585,13 @@ impl Move {
         self
     }
 
+    /// Mark this move as spending one spell slot of `level` when cast. See
+    /// [`Move::pay_spell_cost`].
+    pub fn with_spell_slot(mut self, level: u32) -> Self {
+        self.spell_slot_level = Some(level);
+        self
+    }
+
     pub fn with_rider(mut self, rider: Rider) -> Self {
         self.riders.push(rider);
         self
@@ -495,6 +604,19 @@ impl Move {
 
     /// A move that spends nothing is one a hoarding policy will still take.
     pub fn is_free(&self) -> bool {
-        matches!(self.uses, Uses::Unlimited) && self.cost.is_none()
+        matches!(self.uses, Uses::Unlimited)
+            && self.cost.is_none()
+            && self.spell_slot_level.is_none()
+    }
+
+    /// Spend this move's spell slot, if it has one, from `caster`'s own
+    /// pool. `true` and no change for a move that costs no slot; `false` and
+    /// no change if the slot it needs is not available - the same shape as
+    /// [`crate::rules::creature::SpellSlots::cast`], which this calls.
+    pub fn pay_spell_cost(&self, caster: &mut Creature) -> bool {
+        match self.spell_slot_level {
+            None => true,
+            Some(level) => caster.cast_spell(level),
+        }
     }
 }
