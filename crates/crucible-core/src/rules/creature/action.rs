@@ -381,6 +381,14 @@ pub struct Move {
     /// Fire when this move hits.
     pub riders: Vec<Rider>,
     pub effect: Effect,
+    /// Requires concentration: taking this move ends whatever the user was
+    /// already concentrating on, before anything else happens - even if this
+    /// cast goes on to land nothing. Whatever condition it then applies, on
+    /// whichever targets, becomes the new thing concentration is
+    /// maintaining; see [`crate::sim::duel`] for how that is tracked and torn
+    /// down. `false` for every ordinary move, which is why this defaults with
+    /// the rest of [`Move::new`] rather than needing its own builder call.
+    pub concentration: bool,
 }
 
 impl Move {
@@ -391,6 +399,7 @@ impl Move {
             cost: None,
             riders: Vec::new(),
             effect,
+            concentration: false,
         }
     }
 
@@ -406,6 +415,11 @@ impl Move {
 
     pub fn with_rider(mut self, rider: Rider) -> Self {
         self.riders.push(rider);
+        self
+    }
+
+    pub fn with_concentration(mut self) -> Self {
+        self.concentration = true;
         self
     }
 
