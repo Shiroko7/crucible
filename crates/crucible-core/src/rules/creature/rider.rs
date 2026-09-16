@@ -146,6 +146,66 @@ pub enum Rider {
         damage: Option<DamageKind>,
         condition: Option<Condition>,
     },
+    /// An attacker-side buff, dormant until this creature inflicts `trigger`
+    /// on a target via a weapon attack - after which its weapon attacks
+    /// carry `dice_count`d`dice_sides` (plus `bonus`) extra `damage_kind`
+    /// damage for the rest of the encounter.
+    ///
+    /// Generic over which condition arms it: a weapon that empowers itself
+    /// after poisoning something is the flavour ITM-06 names, but nothing
+    /// here reads [`Condition::Poisoned`] specifically, and the same shape
+    /// covers "hits harder after landing a knockdown" or any other
+    /// "inflict X, then hit harder" item.
+    ///
+    /// A pure marker, deliberately carrying no notion of whether it has
+    /// fired yet - that is per-fight state, not a creature's static kit, the
+    /// same split [`Rider::AlwaysSucceed`]'s remaining uses and
+    /// [`Rider::ReduceDamage`]'s per-round budget already draw between the
+    /// rider's fixed parameters and `sim::duel`'s own bookkeeping. See
+    /// [`Rider::arms_on_condition`] and [`Rider::weapon_damage_if_armed`],
+    /// which take that armed/not-armed flag as a plain `bool` rather than
+    /// storing it here.
+    ///
+    /// `damage_kind` is recorded and validated like any other damage
+    /// component in this DSL, but - like [`Rider::ConditionalExtraDamage`]'s
+    /// dice - the [`DamageRider`] this contributes has no type of its own to
+    /// compose with `combat::damage_pmf`'s single
+    /// [`crate::rules::combat::Reduction`]; a future type-aware resistance
+    /// path on the exact/sampled attack model would read it from here.
+    ConditionTriggeredWeaponDamage {
+        trigger: Condition,
+        dice_count: u32,
+        dice_sides: u32,
+        bonus: i32,
+        damage_kind: DamageKind,
+    },
+    /// A consumable injury poison coating a weapon: the next hit forces
+    /// `ability`/`dc` as a saving throw, and a failure burdens the target's
+    /// own future `debuffed_ability` saving throws with
+    /// [`RollMode::Disadvantage`] for `duration`.
+    ///
+    /// Not a [`Condition`] at all - 5e's condition list has nothing this
+    /// general ("disadvantage on one specific kind of saving throw"), so this
+    /// is a dedicated variant rather than stretching
+    /// [`Rider::SaveOrCondition`] to cover a debuff it cannot express. See
+    /// [`injury_poison_forcing_save`] for the forcing save, and
+    /// [`save_with_mode`] for the generic "roll a save under a [`RollMode`]"
+    /// mechanism the resulting debuff itself uses once applied - the same
+    /// [`RollMode`] an attack roll already rolls under, generalised to saves.
+    ///
+    /// Generic over both abilities and never named after a specific poison:
+    /// `ability`/`dc` is typically a Constitution save against a poison, and
+    /// `debuffed_ability` is whichever save the poison burdens, but nothing
+    /// here reads either as such. Using up the coating itself - "the next
+    /// hit" - is the caller's business: a single-use item is a rider with no
+    /// [`Rider::initial_uses`] budget of its own, present on the wielder only
+    /// while the coating lasts.
+    InjuryPoison {
+        ability: Ability,
+        dc: i32,
+        debuffed_ability: Ability,
+        duration: Duration,
+    },
 }
 
 impl Rider {
@@ -240,6 +300,99 @@ impl Rider {
             _ => false,
         }
     }
+
+    /// Does inflicting `condition` on a target via a weapon attack arm this
+    /// rider's buff? `false` for every rider variant except
+    /// [`Rider::ConditionTriggeredWeaponDamage`], and for that variant unless
+    /// `condition` is exactly its `trigger`.
+    pub fn arms_on_condition(&self, condition: Condition) -> bool {
+        matches!(
+            self,
+            Rider::ConditionTriggeredWeaponDamage { trigger, .. } if *trigger == condition
+        )
+    }
+
+    /// The [`DamageRider`] this rider contributes to a weapon attack once its
+    /// buff has fired, or `None` if this is not
+    /// [`Rider::ConditionTriggeredWeaponDamage`] or `armed` is `false`.
+    ///
+    /// `armed` is per-fight state the caller tracks - see
+    /// [`Rider::arms_on_condition`] - the same shape
+    /// [`Rider::extra_damage_for`] already takes `used_this_turn` as an
+    /// external gate rather than deciding it from data stored on the rider
+    /// itself.
+    pub fn weapon_damage_if_armed(&self, armed: bool) -> Option<DamageRider> {
+        let Rider::ConditionTriggeredWeaponDamage {
+            dice_count,
+            dice_sides,
+            bonus,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if !armed {
+            return None;
+        }
+        Some(DamageRider::new(*dice_count, *dice_sides).with_bonus(*bonus))
+    }
+
+    /// The `(ability, dc, debuffed_ability, duration)` this rider carries, or
+    /// `None` if it is not [`Rider::InjuryPoison`].
+    pub fn injury_poison(&self) -> Option<(Ability, i32, Ability, Duration)> {
+        match self {
+            Rider::InjuryPoison {
+                ability,
+                dc,
+                debuffed_ability,
+                duration,
+            } => Some((*ability, *dc, *debuffed_ability, *duration)),
+            _ => None,
+        }
+    }
+}
+
+/// A saving throw rolled under `mode` rather than a flat d20 - the same
+/// [`RollMode`] an attack roll already rolls under
+/// ([`crate::rules::combat::sample_hit_with`]), generalised to saves. 5e's
+/// saving throws have no natural-1/natural-20 override the way attack rolls
+/// do, so unlike an attack roll this is exactly `mode.roll(rng) + bonus >=
+/// dc` with no exception carved out.
+///
+/// The generic mechanism [`Rider::InjuryPoison`]'s debuff half uses once it
+/// has taken hold: a target under it rolls its burdened ability's saves with
+/// [`RollMode::Disadvantage`] through this same function rather than a
+/// special case.
+pub fn save_with_mode(rng: &mut Rng, mode: RollMode, bonus: i32, dc: i32) -> bool {
+    mode.roll(rng) + bonus >= dc
+}
+
+/// The exact counterpart of [`save_with_mode`], read off
+/// [`RollMode::distribution`] like [`probability_at_least`] already is for
+/// [`save_success_probability`].
+pub fn save_probability_with_mode(mode: RollMode, bonus: i32, dc: i32) -> f64 {
+    probability_at_least(mode, dc - bonus)
+}
+
+/// Resolve an [`Rider::InjuryPoison`] coating's forcing save - the hit that
+/// uses the coating up: `target` rolls its `ability` save at
+/// [`RollMode::Normal`] against `dc`, via [`save_with_mode`]. `None` if
+/// `rider` is not [`Rider::InjuryPoison`] at all.
+///
+/// Only the forcing save is resolved here. Applying the resulting
+/// disadvantage-on-saves debuff for its stated `duration` is bookkeeping for
+/// whoever tracks conditions and effects over time to do with the `false`
+/// this returns on a failure - the same division [`Rider::SaveOrCondition`]'s
+/// own `duration` field already leaves to `sim::duel` rather than resolving
+/// itself.
+pub fn injury_poison_forcing_save(rng: &mut Rng, target: &Creature, rider: &Rider) -> Option<bool> {
+    let (ability, dc, ..) = rider.injury_poison()?;
+    Some(save_with_mode(
+        rng,
+        RollMode::Normal,
+        target.save(ability),
+        dc,
+    ))
 }
 
 /// Roll a saving throw `target` makes against `condition`, which `attacker`
@@ -691,5 +844,181 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- ITM-06: a condition-triggered weapon damage buff ------------------
+
+    fn poisoner_buff() -> Rider {
+        Rider::ConditionTriggeredWeaponDamage {
+            trigger: Condition::Poisoned,
+            dice_count: 2,
+            dice_sides: 6,
+            bonus: 0,
+            damage_kind: DamageKind::Poison,
+        }
+    }
+
+    #[test]
+    fn arms_only_on_its_own_trigger_condition() {
+        assert!(poisoner_buff().arms_on_condition(Condition::Poisoned));
+        assert!(!poisoner_buff().arms_on_condition(Condition::Stunned));
+        // An unrelated rider never answers yes either, the same "not
+        // mistaken for a different marker" check every other rider accessor
+        // in this module is held to.
+        assert!(!Rider::AlwaysSucceed { uses: 3 }.arms_on_condition(Condition::Poisoned));
+    }
+
+    #[test]
+    fn contributes_no_damage_rider_until_armed() {
+        assert_eq!(poisoner_buff().weapon_damage_if_armed(false), None);
+        assert_eq!(
+            poisoner_buff().weapon_damage_if_armed(true),
+            Some(DamageRider::new(2, 6))
+        );
+    }
+
+    #[test]
+    fn a_non_matching_rider_never_contributes_this_buff() {
+        assert_eq!(sneak_attack().weapon_damage_if_armed(true), None);
+    }
+
+    /// The framework end to end: an attacker who has not yet poisoned
+    /// anything hits for its base damage alone; the same attacker, once
+    /// `arms_on_condition` says the buff is live, appends the extra dice to
+    /// every subsequent weapon attack - checked exactly, not merely by field
+    /// value, against the same `damage_pmf`/`sample_damage` machinery every
+    /// other rider in this module is held to.
+    #[test]
+    fn armed_buff_raises_mean_damage_and_agrees_with_the_exact_path() {
+        let buff = poisoner_buff();
+        let defense = Defense::new(12, 60);
+        let attack = Attack::new(6, 1, 8, 4);
+
+        let unarmed = attack.clone();
+        let armed = attack.with_damage_rider(
+            buff.weapon_damage_if_armed(true)
+                .expect("armed buff contributes a damage rider"),
+        );
+
+        let exact_unarmed = damage_pmf(&unarmed, &defense);
+        let exact_armed = damage_pmf(&armed, &defense);
+        assert!(
+            exact_armed.mean() > exact_unarmed.mean(),
+            "an armed buff must raise expected damage over an unarmed attacker"
+        );
+        // 1d8+4 base, doubled on a crit, plus the buff's 2d6 doubled too.
+        assert_eq!(exact_armed.max(), 2 * 8 + 2 * 2 * 6 + 4);
+
+        for (seed, (name, attack)) in [("unarmed", unarmed), ("armed", armed)]
+            .into_iter()
+            .enumerate()
+        {
+            let exact = damage_pmf(&attack, &defense);
+            let (lo, hi) = (exact.min(), exact.max());
+            let mut rng = Rng::new(seed as u64 + 6100);
+            let n = 100_000;
+            let mut counts = vec![0usize; (hi - lo + 1) as usize];
+            for _ in 0..n {
+                let d = sample_damage(&mut rng, &attack, &defense);
+                assert!(
+                    d >= lo && d <= hi,
+                    "{name}: sampled {d} outside {lo}..={hi}"
+                );
+                counts[(d - lo) as usize] += 1;
+            }
+            for (i, &c) in counts.iter().enumerate() {
+                let value = lo + i as i32;
+                let want = exact.prob(value);
+                let got = c as f64 / n as f64;
+                let tol = 5.0 * (want * (1.0 - want) / n as f64).sqrt() + 1e-4;
+                assert!(
+                    (got - want).abs() < tol,
+                    "{name}: P(damage = {value}) sampled {got:.5}, exact {want:.5}, tol {tol:.5}"
+                );
+            }
+        }
+    }
+
+    // --- ITM-06: a generic consumable injury poison -------------------------
+
+    fn injury_poison() -> Rider {
+        Rider::InjuryPoison {
+            ability: Ability::Con,
+            dc: 13,
+            debuffed_ability: Ability::Str,
+            duration: Duration::ApplierTurn,
+        }
+    }
+
+    #[test]
+    fn injury_poison_reads_back_its_own_parameters() {
+        assert_eq!(
+            injury_poison().injury_poison(),
+            Some((Ability::Con, 13, Ability::Str, Duration::ApplierTurn))
+        );
+        assert_eq!(sneak_attack().injury_poison(), None);
+    }
+
+    #[test]
+    fn injury_poison_forcing_save_returns_none_for_an_unrelated_rider() {
+        let target = Creature::new("target", 12, 20);
+        let mut rng = Rng::new(7700);
+        assert_eq!(
+            injury_poison_forcing_save(&mut rng, &target, &sneak_attack()),
+            None
+        );
+    }
+
+    /// The forcing save is a plain, flat roll - no advantage or disadvantage
+    /// of its own - so its pass rate must land on the same closed form every
+    /// other flat save in this crate already agrees with.
+    #[test]
+    fn injury_poison_forcing_save_agrees_with_a_flat_save_chance() {
+        let mut target = Creature::new("target", 12, 30);
+        target.saves[Ability::Con.index()] = 2;
+        let rider = injury_poison();
+
+        let exact = save_probability_with_mode(RollMode::Normal, 2, 13);
+        let mut rng = Rng::new(7701);
+        let n = 200_000;
+        let successes = (0..n)
+            .filter(|_| {
+                injury_poison_forcing_save(&mut rng, &target, &rider).expect("this is InjuryPoison")
+            })
+            .count();
+        let got = successes as f64 / f64::from(n);
+        let tol = 5.0 * (exact * (1.0 - exact) / f64::from(n)).sqrt() + 1e-4;
+        assert!(
+            (got - exact).abs() < tol,
+            "sampled {got:.5}, exact {exact:.5}, tol {tol:.5}"
+        );
+    }
+
+    /// The debuff half: once the poison has taken hold, the target's
+    /// burdened saves roll with Disadvantage rather than a flat d20 - worse
+    /// than normal, and checked exact-vs-sampled the same way every
+    /// probability in this crate is.
+    #[test]
+    fn a_disadvantaged_save_is_worse_than_a_flat_one_and_agrees_with_the_exact_path() {
+        let bonus = 3;
+        let dc = 15;
+        let flat = save_probability_with_mode(RollMode::Normal, bonus, dc);
+        let disadvantaged = save_probability_with_mode(RollMode::Disadvantage, bonus, dc);
+        assert!(
+            disadvantaged < flat,
+            "disadvantage on a burdened save must be worse than a flat roll"
+        );
+
+        let mut rng = Rng::new(7702);
+        let n = 200_000;
+        let successes = (0..n)
+            .filter(|_| save_with_mode(&mut rng, RollMode::Disadvantage, bonus, dc))
+            .count();
+        let got = successes as f64 / f64::from(n);
+        let tol = 5.0 * (disadvantaged * (1.0 - disadvantaged) / f64::from(n)).sqrt() + 1e-4;
+        assert!(
+            (got - disadvantaged).abs() < tol,
+            "sampled {got:.5}, exact {disadvantaged:.5}, tol {tol:.5}"
+        );
     }
 }
