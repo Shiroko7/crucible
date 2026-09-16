@@ -25,6 +25,7 @@
 
 use crate::prob::dice::Pmf;
 use crate::prob::rng::Rng;
+use crate::rules::creature::DamageKind;
 
 /// How the d20 is rolled. Advantage and disadvantage are distributions over
 /// the *final* value, so "natural 20" means the kept die showed 20.
@@ -228,6 +229,21 @@ pub struct DamageRider {
     pub dice_count: u32,
     pub dice_sides: u32,
     pub bonus: i32,
+    /// This rider's own damage type, when it is not the same as whatever the
+    /// attack it rides on is already reduced as.
+    ///
+    /// `None` - the default from [`DamageRider::new`] - means "reduced
+    /// exactly like the rest of this hit": [`Defense::reduction`], the same
+    /// single [`Reduction`] the base attack uses. That is the pre-existing
+    /// behaviour, and it is correct for a weapon-triggered rider (2024 Sneak
+    /// Attack's extra dice are the same damage type as the weapon that
+    /// qualified it). A rider whose damage type is pinned to something the
+    /// attack itself does not carry - the 5e rule that this kind of extra
+    /// damage matches the *spell's* damage type when a spell attack
+    /// triggered it, not a fixed default - sets `Some(kind)` instead; see
+    /// [`Attack::spell_damage_kind`] and
+    /// [`crate::rules::creature::Rider::extra_damage_for_with_spell_attack_extension`].
+    pub kind: Option<DamageKind>,
 }
 
 impl DamageRider {
@@ -236,6 +252,7 @@ impl DamageRider {
             dice_count,
             dice_sides,
             bonus: 0,
+            kind: None,
         }
     }
 
@@ -271,25 +288,70 @@ impl DamageRider {
         self.dice_count -= dice;
         Some(self)
     }
+
+    /// Pin this rider's damage to `kind` rather than whatever [`Reduction`]
+    /// the rest of the attack uses - see [`DamageRider::kind`].
+    pub fn with_kind(mut self, kind: DamageKind) -> Self {
+        self.kind = Some(kind);
+        self
+    }
 }
 
-/// Exact distribution of every active rider's contribution to one hit's
-/// damage, dice doubled on a crit exactly like the base pool.
-fn rider_pmf(riders: &[DamageRider], crit: bool) -> Pmf {
+/// Exact distribution of one damage rider's contribution to one hit, dice
+/// doubled on a crit exactly like the base pool.
+///
+/// Floored at zero and reduced by *its own* effective [`Reduction`] -
+/// [`Defense::reduction_for`] - before it is convolved with anything else,
+/// the same per-component order [`crate::rules::creature::Strike`] uses for
+/// a hit with more than one damage type. That is what lets a rider whose
+/// [`DamageRider::kind`] differs from the rest of the attack be resisted (or
+/// not) independently of it; a rider with no `kind` of its own falls back to
+/// exactly the reduction the base attack gets, which reproduces the
+/// pre-existing single-`Reduction` behaviour bit for bit.
+fn rider_component_pmf(rider: &DamageRider, crit: bool, defense: &Defense) -> Pmf {
+    let dice = if crit {
+        rider.dice_count * 2
+    } else {
+        rider.dice_count
+    };
+    let reduction = defense.reduction_for(rider.kind);
+    Pmf::pool(dice, rider.dice_sides)
+        .offset(rider.bonus)
+        .floor_at(0)
+        .map_values(move |d| reduction.apply(d))
+}
+
+/// Every active rider's contribution, each reduced on its own via
+/// [`rider_component_pmf`] and then summed.
+fn riders_pmf(riders: &[DamageRider], crit: bool, defense: &Defense) -> Pmf {
     riders.iter().fold(Pmf::constant(0), |acc, r| {
-        let dice = if crit { r.dice_count * 2 } else { r.dice_count };
-        acc.convolve(&Pmf::pool(dice, r.dice_sides).offset(r.bonus))
+        acc.convolve(&rider_component_pmf(r, crit, defense))
     })
 }
 
-/// The sampled counterpart of [`rider_pmf`].
-fn sample_riders(rng: &mut Rng, riders: &[DamageRider], crit: bool) -> i32 {
+/// The sampled counterpart of [`rider_component_pmf`].
+fn sample_rider_component(
+    rng: &mut Rng,
+    rider: &DamageRider,
+    crit: bool,
+    defense: &Defense,
+) -> i32 {
+    let dice = if crit {
+        rider.dice_count * 2
+    } else {
+        rider.dice_count
+    };
+    let raw: i32 = (0..dice).map(|_| rng.die(rider.dice_sides)).sum();
+    defense
+        .reduction_for(rider.kind)
+        .apply((raw + rider.bonus).max(0))
+}
+
+/// The sampled counterpart of [`riders_pmf`].
+fn sample_riders(rng: &mut Rng, riders: &[DamageRider], crit: bool, defense: &Defense) -> i32 {
     riders
         .iter()
-        .map(|r| {
-            let dice = if crit { r.dice_count * 2 } else { r.dice_count };
-            (0..dice).map(|_| rng.die(r.dice_sides)).sum::<i32>() + r.bonus
-        })
+        .map(|r| sample_rider_component(rng, r, crit, defense))
         .sum()
 }
 
@@ -366,6 +428,18 @@ pub struct Attack {
     /// [`Attack`] at all and so never reach this flag or the rider gate it
     /// feeds.
     pub is_spell_attack: bool,
+    /// This attack's own damage type, when it is a spell attack whose damage
+    /// type matters to something else on the attack - set only for spell
+    /// attacks, and left `None` for a weapon attack (this model has no field
+    /// for a weapon's damage type at all; nothing here has needed one yet).
+    ///
+    /// The 5e rule this exists for: a sneak-attack-style extra-damage rider
+    /// triggered by a spell attack deals the *spell's* damage type, not
+    /// whatever type the rider would otherwise default to. See
+    /// [`DamageRider::kind`] and
+    /// [`crate::rules::creature::Rider::extra_damage_for_with_spell_attack_extension`],
+    /// which reads this field and copies it onto the rider it returns.
+    pub spell_damage_kind: Option<DamageKind>,
 }
 
 impl Attack {
@@ -381,6 +455,7 @@ impl Attack {
             finesse_or_ranged: false,
             ally_adjacent: false,
             is_spell_attack: false,
+            spell_damage_kind: None,
         }
     }
 
@@ -409,6 +484,13 @@ impl Attack {
         self
     }
 
+    /// Declare this attack's own damage type - see
+    /// [`Attack::spell_damage_kind`].
+    pub fn with_spell_damage_kind(mut self, kind: DamageKind) -> Self {
+        self.spell_damage_kind = Some(kind);
+        self
+    }
+
     /// Add one attack modifier. Composable: call it again for a second,
     /// unrelated source and both apply to the same roll.
     pub fn with_attack_modifier(mut self, modifier: AttackModifier) -> Self {
@@ -424,11 +506,22 @@ impl Attack {
 }
 
 /// What the attack is being thrown at.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Defense {
     pub ac: i32,
     pub hp: i32,
     pub reduction: Reduction,
+    /// Per-damage-type overrides of `reduction`, for a hit whose components
+    /// are not all the same type - the reason this exists is
+    /// [`DamageRider::kind`]: a rider pinned to a spell's own damage type
+    /// needs a reduction that can differ from the rest of the attack's.
+    ///
+    /// A kind with no entry here falls back to `reduction`, so a plain
+    /// [`Defense::new`] with no overrides reduces every damage source
+    /// identically - exactly the behaviour before per-rider damage types
+    /// existed. Looked up via [`Defense::reduction_for`], never read
+    /// directly.
+    pub kind_reductions: Vec<(DamageKind, Reduction)>,
 }
 
 impl Defense {
@@ -437,12 +530,35 @@ impl Defense {
             ac,
             hp,
             reduction: Reduction::Normal,
+            kind_reductions: Vec::new(),
         }
     }
 
     pub fn with_reduction(mut self, reduction: Reduction) -> Self {
         self.reduction = reduction;
         self
+    }
+
+    /// Resist, are vulnerable to, or are immune to `kind` specifically,
+    /// regardless of what `reduction` says for everything else. Composable:
+    /// call it again for another type.
+    pub fn with_kind_reduction(mut self, kind: DamageKind, reduction: Reduction) -> Self {
+        self.kind_reductions.push((kind, reduction));
+        self
+    }
+
+    /// The effective [`Reduction`] for one damage component of this kind, or
+    /// the attack's own [`Reduction`] when `kind` is `None` or has no entry
+    /// in `kind_reductions` - see [`Defense::kind_reductions`] and
+    /// [`DamageRider::kind`].
+    pub fn reduction_for(&self, kind: Option<DamageKind>) -> Reduction {
+        kind.and_then(|k| {
+            self.kind_reductions
+                .iter()
+                .find(|&&(kk, _)| kk == k)
+                .map(|&(_, r)| r)
+        })
+        .unwrap_or(self.reduction)
     }
 }
 
@@ -612,23 +728,37 @@ pub fn outcomes(attack: &Attack, defense: &Defense) -> Outcomes {
     )
 }
 
+/// Exact distribution of the base attack's own dice and flat bonus alone,
+/// floored and reduced by [`Defense::reduction`] - the piece [`damage_pmf`]
+/// shares between a hit and a crit, and the reduction every rider without
+/// its own [`DamageRider::kind`] also falls back to.
+fn base_pmf(attack: &Attack, defense: &Defense, dice_count: u32) -> Pmf {
+    Pmf::pool(dice_count, attack.dice_sides)
+        .offset(attack.damage_bonus)
+        .floor_at(0)
+        .map_values(|d| defense.reduction.apply(d))
+}
+
 /// Exact distribution of damage dealt by a single attack, zero included.
+///
+/// The base pool and each rider are floored and reduced independently, then
+/// summed - see [`rider_component_pmf`] for why that has to happen before
+/// the convolution rather than after it.
 pub fn damage_pmf(attack: &Attack, defense: &Defense) -> Pmf {
     let o = outcomes(attack, defense);
-    let reduce = defense.reduction;
 
-    let on_hit = Pmf::pool(attack.dice_count, attack.dice_sides)
-        .convolve(&rider_pmf(&attack.damage_riders, false))
-        .offset(attack.damage_bonus)
-        .floor_at(0)
-        .map_values(|d| reduce.apply(d));
+    let on_hit = base_pmf(attack, defense, attack.dice_count).convolve(&riders_pmf(
+        &attack.damage_riders,
+        false,
+        defense,
+    ));
 
     // A crit rolls the damage dice twice. The modifier is added once.
-    let on_crit = Pmf::pool(attack.dice_count * 2, attack.dice_sides)
-        .convolve(&rider_pmf(&attack.damage_riders, true))
-        .offset(attack.damage_bonus)
-        .floor_at(0)
-        .map_values(|d| reduce.apply(d));
+    let on_crit = base_pmf(attack, defense, attack.dice_count * 2).convolve(&riders_pmf(
+        &attack.damage_riders,
+        true,
+        defense,
+    ));
 
     Pmf::mixture(&[
         (o.miss, Pmf::constant(0)),
@@ -651,9 +781,11 @@ pub fn sample_damage(rng: &mut Rng, attack: &Attack, defense: &Defense) -> i32 {
         Landed::Hit => (attack.dice_count, false),
         Landed::Crit => (attack.dice_count * 2, true),
     };
-    let raw: i32 = (0..dice).map(|_| rng.die(attack.dice_sides)).sum::<i32>()
-        + sample_riders(rng, &attack.damage_riders, crit);
-    defense.reduction.apply((raw + attack.damage_bonus).max(0))
+    let base_raw: i32 = (0..dice).map(|_| rng.die(attack.dice_sides)).sum();
+    let base = defense
+        .reduction
+        .apply((base_raw + attack.damage_bonus).max(0));
+    base + sample_riders(rng, &attack.damage_riders, crit, defense)
 }
 
 /// Attacks taken to drop the target, or `None` if it survived the cap.
@@ -1009,6 +1141,123 @@ mod tests {
             let exact = damage_pmf(&attack, &defense);
             let (lo, hi) = (exact.min(), exact.max());
             let mut rng = Rng::new(seed as u64 + 1200);
+            let n = 100_000;
+            let mut counts = vec![0usize; (hi - lo + 1) as usize];
+            for _ in 0..n {
+                let d = sample_damage(&mut rng, &attack, &defense);
+                assert!(
+                    d >= lo && d <= hi,
+                    "{name}: sampled {d} outside {lo}..={hi}"
+                );
+                counts[(d - lo) as usize] += 1;
+            }
+            for (i, &c) in counts.iter().enumerate() {
+                let value = lo + i as i32;
+                let want = exact.prob(value);
+                let got = c as f64 / n as f64;
+                let tol = 5.0 * (want * (1.0 - want) / n as f64).sqrt() + 1e-4;
+                assert!(
+                    (got - want).abs() < tol,
+                    "{name}: P(damage = {value}) sampled {got:.5}, exact {want:.5}, tol {tol:.5}"
+                );
+            }
+        }
+    }
+
+    /// [`Defense::reduction_for`] falls back to the attack's own `reduction`
+    /// for any kind with no override - including `None`, a rider that never
+    /// declared a kind at all - and only consults `kind_reductions` for a
+    /// kind that actually has an entry there.
+    #[test]
+    fn defense_reduction_for_falls_back_to_the_base_reduction() {
+        let defense = Defense::new(10, 20)
+            .with_reduction(Reduction::Vulnerable)
+            .with_kind_reduction(DamageKind::Radiant, Reduction::Resistant);
+        assert_eq!(defense.reduction_for(None), Reduction::Vulnerable);
+        assert_eq!(
+            defense.reduction_for(Some(DamageKind::Force)),
+            Reduction::Vulnerable,
+            "a kind with no override still falls back to the base reduction"
+        );
+        assert_eq!(
+            defense.reduction_for(Some(DamageKind::Radiant)),
+            Reduction::Resistant
+        );
+    }
+
+    /// The whole reason [`DamageRider::kind`] exists: a rider pinned to a
+    /// damage type the target is immune to deals nothing, even though the
+    /// base attack it rides on - and an identical rider with no `kind` of
+    /// its own - are entirely unaffected by that immunity. The type has to
+    /// actually reach damage reduction, not just sit on the struct as a
+    /// label nothing reads.
+    #[test]
+    fn a_damage_rider_with_its_own_kind_is_reduced_independently_of_the_base_attack() {
+        let defense = Defense::new(1, 40) // AC 1: every non-fumble roll hits
+            .with_kind_reduction(DamageKind::Radiant, Reduction::Immune);
+
+        let unmarked_rider = damage_pmf(
+            &Attack::new(5, 1, 6, 0).with_damage_rider(DamageRider::new(4, 6)),
+            &defense,
+        );
+        let radiant_rider = damage_pmf(
+            &Attack::new(5, 1, 6, 0)
+                .with_damage_rider(DamageRider::new(4, 6).with_kind(DamageKind::Radiant)),
+            &defense,
+        );
+        let force_rider = damage_pmf(
+            &Attack::new(5, 1, 6, 0)
+                .with_damage_rider(DamageRider::new(4, 6).with_kind(DamageKind::Force)),
+            &defense,
+        );
+
+        // A rider with no kind of its own is reduced like the rest of the
+        // hit - Normal here - so the immunity entry for Radiant never
+        // applies to it at all.
+        assert!(unmarked_rider.mean() > 0.0);
+        // A rider explicitly pinned to Force is likewise untouched by a
+        // Radiant-only immunity.
+        assert!(close(force_rider.mean(), unmarked_rider.mean()));
+        // A rider pinned to Radiant against Radiant immunity contributes
+        // nothing: only the unaffected 1d6 base attack remains.
+        let base_only = damage_pmf(&Attack::new(5, 1, 6, 0), &defense);
+        assert!(close(radiant_rider.mean(), base_only.mean()));
+        assert!(
+            radiant_rider.mean() < force_rider.mean(),
+            "the same rider shape should deal less net damage as Radiant than as Force \
+             against a target immune only to Radiant"
+        );
+    }
+
+    /// The sampled path for a kind-bearing rider must agree with the exact
+    /// one exactly as strictly as every other case here - this is the same
+    /// per-outcome comparison `sampled_bless_bane_and_a_rider_agree_with_the_exact_path`
+    /// uses, extended to a rider whose [`DamageRider::kind`] differs from
+    /// the base attack's own reduction.
+    #[test]
+    fn sampled_damage_agrees_with_the_exact_path_when_a_rider_has_its_own_kind() {
+        let defense =
+            Defense::new(14, 40).with_kind_reduction(DamageKind::Radiant, Reduction::Resistant);
+        let cases = [
+            (
+                "rider pinned to the resisted kind",
+                Attack::new(6, 1, 8, 4)
+                    .with_damage_rider(DamageRider::new(3, 6).with_kind(DamageKind::Radiant)),
+            ),
+            (
+                "rider pinned to an unresisted kind",
+                Attack::new(6, 1, 8, 4)
+                    .with_damage_rider(DamageRider::new(3, 6).with_kind(DamageKind::Force)),
+            ),
+            (
+                "rider with no kind of its own, alongside an override for another kind",
+                Attack::new(6, 1, 8, 4).with_damage_rider(DamageRider::new(3, 6)),
+            ),
+        ];
+        for (seed, (name, attack)) in cases.into_iter().enumerate() {
+            let exact = damage_pmf(&attack, &defense);
+            let (lo, hi) = (exact.min(), exact.max());
+            let mut rng = Rng::new(seed as u64 + 900);
             let n = 100_000;
             let mut counts = vec![0usize; (hi - lo + 1) as usize];
             for _ in 0..n {
