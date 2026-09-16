@@ -585,6 +585,22 @@ pub struct Move {
     /// Irrelevant to how the move actually resolves - only which list it
     /// ends up in.
     pub kind: MoveKind,
+    /// Set on a move-taking that spent a limited-use charge to be exempt from
+    /// whatever casting-restriction mechanism might apply to it elsewhere -
+    /// being silenced, unable to speak or gesture, and so on. `false` for
+    /// every ordinary move.
+    ///
+    /// This engine has no restriction-checking condition to consult the flag
+    /// against yet - that is a separate, independent mechanism's concern -
+    /// so it exists here as a standalone primitive: whichever mechanism
+    /// checks "can this creature cast right now" can read it once it exists,
+    /// the same way a new [`Condition`] variant is added once and every call
+    /// site the compiler can find is updated to consult it. See
+    /// [`crate::dsl::plugin::casting::BypassCastingRestrictionsPlugin`] for
+    /// how a build grants a charge-gated option to set it, reusing
+    /// [`Uses::Limited`] for the charge budget rather than inventing a
+    /// parallel resource mechanism.
+    pub bypasses_casting_restrictions: bool,
 }
 
 impl Move {
@@ -598,6 +614,7 @@ impl Move {
             effect,
             concentration: false,
             kind: MoveKind::Standard,
+            bypasses_casting_restrictions: false,
         }
     }
 
@@ -630,6 +647,14 @@ impl Move {
 
     pub fn with_kind(mut self, kind: MoveKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// Marks this specific move-taking as exempt from whatever
+    /// casting-restriction mechanism might apply to it - see
+    /// [`Move::bypasses_casting_restrictions`].
+    pub fn with_bypasses_casting_restrictions(mut self) -> Self {
+        self.bypasses_casting_restrictions = true;
         self
     }
 
