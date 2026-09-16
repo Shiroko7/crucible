@@ -230,5 +230,8 @@ pub fn describe_trait(rider: &Rider) -> String {
                 .collect();
             format!("downgrade {}", parts.join(" and "))
         }
+        Rider::ExtraDamageAppliesToSpellAttacks => {
+            "conditional extra damage also applies to spell attacks".to_string()
+        }
     }
 }
