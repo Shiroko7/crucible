@@ -165,6 +165,15 @@ impl Rider {
     /// all - they are resolved via `SaveEffect`, not an [`Attack`], so there
     /// is no hit roll and no [`Rider::extra_damage_for`] call in the first
     /// place; this only ever fires from attack-roll resolution.
+    ///
+    /// The damage type: when `attack` carries an
+    /// [`Attack::spell_damage_kind`] - set only for a spell attack - the
+    /// returned [`DamageRider::kind`] is pinned to match it, the 5e rule
+    /// that this kind of extra damage takes on the triggering *spell's* own
+    /// damage type rather than a fixed default. A weapon attack never sets
+    /// `spell_damage_kind`, so it falls through unchanged: the rider's
+    /// `kind` stays `None` and it is reduced exactly like the rest of the
+    /// hit, same as before this distinction existed.
     pub fn extra_damage_for_with_spell_attack_extension(
         &self,
         attack: &Attack,
@@ -187,11 +196,14 @@ impl Rider {
         if !qualifying_attack || attack.mode == RollMode::Disadvantage {
             return None;
         }
-        if attack.mode == RollMode::Advantage || attack.ally_adjacent {
-            Some(DamageRider::new(*dice_count, *dice_sides))
-        } else {
-            None
+        if attack.mode != RollMode::Advantage && !attack.ally_adjacent {
+            return None;
         }
+        let rider = DamageRider::new(*dice_count, *dice_sides);
+        Some(match attack.spell_damage_kind {
+            Some(kind) => rider.with_kind(kind),
+            None => rider,
+        })
     }
 }
 
@@ -199,7 +211,7 @@ impl Rider {
 mod tests {
     use super::*;
     use crate::prob::rng::Rng;
-    use crate::rules::combat::{damage_pmf, sample_damage, Defense};
+    use crate::rules::combat::{damage_pmf, sample_damage, Defense, Reduction};
     use crate::rules::creature::Creature;
 
     fn close(a: f64, b: f64) -> bool {
@@ -277,6 +289,170 @@ mod tests {
             rider().extra_damage_for_with_spell_attack_extension(&attack, false, true),
             None
         );
+    }
+
+    /// A spell attack that declares its own damage type pins the returned
+    /// rider's [`DamageRider::kind`] to match it - the 5e rule this
+    /// mechanism exists for: this kind of extra damage takes on the
+    /// triggering *spell's* damage type, not a fixed default.
+    #[test]
+    fn a_spell_attacks_declared_kind_overrides_the_riders_damage_type() {
+        let attack = Attack::new(7, 1, 4, 3)
+            .with_mode(RollMode::Advantage)
+            .with_is_spell_attack(true)
+            .with_spell_damage_kind(DamageKind::Radiant);
+        assert_eq!(
+            rider().extra_damage_for_with_spell_attack_extension(&attack, false, true),
+            Some(DamageRider::new(4, 6).with_kind(DamageKind::Radiant)),
+            "the rider's damage type should match the triggering spell's"
+        );
+    }
+
+    /// A weapon attack never declares a `spell_damage_kind` - the field is
+    /// only ever set on a spell attack - so the rider it triggers keeps
+    /// `kind: None`: reduced exactly like the rest of the hit, unaffected by
+    /// this mechanism, same as before it existed.
+    #[test]
+    fn a_weapon_attack_never_gets_a_damage_type_override() {
+        let attack = Attack::new(7, 1, 4, 3)
+            .with_mode(RollMode::Advantage)
+            .with_finesse_or_ranged(true);
+        let extra = rider()
+            .extra_damage_for_with_spell_attack_extension(&attack, false, false)
+            .expect("a finesse-or-ranged weapon attack at advantage qualifies");
+        assert_eq!(
+            extra.kind, None,
+            "a weapon-triggered rider's damage type is unaffected by this mechanism"
+        );
+    }
+
+    /// A spell attack that never declares a damage type is treated the same
+    /// as a weapon attack: the rider's `kind` stays `None` rather than
+    /// defaulting to something invented.
+    #[test]
+    fn a_spell_attack_with_no_declared_kind_leaves_the_riders_type_unaffected() {
+        let attack = Attack::new(7, 1, 4, 3)
+            .with_mode(RollMode::Advantage)
+            .with_is_spell_attack(true);
+        let extra = rider()
+            .extra_damage_for_with_spell_attack_extension(&attack, false, true)
+            .expect("qualifies via the extension");
+        assert_eq!(extra.kind, None);
+    }
+
+    /// The acceptance case for this whole mechanism: the SAME rider,
+    /// triggered off two attacks that differ only in which spell cast them,
+    /// deals different net damage against a target that resists one of
+    /// those spells' damage types but not the other. If this only changed a
+    /// label on the rider and never reached damage reduction, `radiant` and
+    /// `force` below would come out equal.
+    #[test]
+    fn the_same_rider_deals_different_net_damage_depending_on_the_triggering_spells_type() {
+        let defense =
+            Defense::new(1, 60).with_kind_reduction(DamageKind::Radiant, Reduction::Resistant);
+
+        let radiant_spell = Attack::new(7, 1, 4, 0)
+            .with_mode(RollMode::Advantage)
+            .with_is_spell_attack(true)
+            .with_spell_damage_kind(DamageKind::Radiant);
+        let force_spell = Attack::new(7, 1, 4, 0)
+            .with_mode(RollMode::Advantage)
+            .with_is_spell_attack(true)
+            .with_spell_damage_kind(DamageKind::Force);
+
+        let radiant_extra = rider()
+            .extra_damage_for_with_spell_attack_extension(&radiant_spell, false, true)
+            .expect("qualifies");
+        let force_extra = rider()
+            .extra_damage_for_with_spell_attack_extension(&force_spell, false, true)
+            .expect("qualifies");
+        // It is genuinely the same rider - only the declared type differs.
+        assert_eq!(radiant_extra.dice_count, force_extra.dice_count);
+        assert_eq!(radiant_extra.dice_sides, force_extra.dice_sides);
+        assert_eq!(radiant_extra.kind, Some(DamageKind::Radiant));
+        assert_eq!(force_extra.kind, Some(DamageKind::Force));
+
+        // Isolate the rider's own contribution: a base attack pool of zero
+        // dice, so the whole PMF is exactly what the rider deals.
+        let carrier = |extra: DamageRider| {
+            Attack::new(7, 0, 4, 0)
+                .with_mode(RollMode::Advantage)
+                .with_damage_rider(extra)
+        };
+        let radiant_pmf = damage_pmf(&carrier(radiant_extra), &defense);
+        let force_pmf = damage_pmf(&carrier(force_extra), &defense);
+
+        assert!(
+            radiant_pmf.mean() > 0.0,
+            "resistance still lets some through"
+        );
+        assert!(
+            radiant_pmf.mean() < force_pmf.mean(),
+            "the Radiant-triggered rider should deal less net damage than the \
+             Force-triggered one, against a target resistant only to Radiant"
+        );
+
+        // And Force is genuinely untouched by a Radiant-only resistance -
+        // exactly what an identical rider would deal with no resistance
+        // in play at all, not merely "less reduced than Radiant".
+        let no_resistance = Defense::new(1, 60);
+        let force_pmf_unresisted = damage_pmf(&carrier(force_extra), &no_resistance);
+        assert!(close(force_pmf.mean(), force_pmf_unresisted.mean()));
+    }
+
+    /// The sampled path must agree with the exact one for this mechanism
+    /// end to end: a spell's declared damage type flowing from
+    /// [`Attack::spell_damage_kind`] through the rider into
+    /// [`Defense::reduction_for`], for both the resisted and the unresisted
+    /// spell type from the scenario above.
+    #[test]
+    fn sampled_damage_agrees_with_the_exact_path_for_a_spell_inherited_damage_type() {
+        let defense =
+            Defense::new(14, 60).with_kind_reduction(DamageKind::Radiant, Reduction::Resistant);
+        let cases = [
+            (
+                "resisted: the spell's declared type is Radiant",
+                DamageKind::Radiant,
+            ),
+            (
+                "unresisted: the spell's declared type is Force",
+                DamageKind::Force,
+            ),
+        ];
+        for (seed, (name, kind)) in cases.into_iter().enumerate() {
+            let attack = Attack::new(6, 1, 8, 4)
+                .with_mode(RollMode::Advantage)
+                .with_is_spell_attack(true)
+                .with_spell_damage_kind(kind);
+            let extra = rider()
+                .extra_damage_for_with_spell_attack_extension(&attack, false, true)
+                .expect("qualifies");
+            let attack = attack.with_damage_rider(extra);
+
+            let exact = damage_pmf(&attack, &defense);
+            let (lo, hi) = (exact.min(), exact.max());
+            let mut rng = Rng::new(seed as u64 + 1_700);
+            let n = 100_000;
+            let mut counts = vec![0usize; (hi - lo + 1) as usize];
+            for _ in 0..n {
+                let d = sample_damage(&mut rng, &attack, &defense);
+                assert!(
+                    d >= lo && d <= hi,
+                    "{name}: sampled {d} outside {lo}..={hi}"
+                );
+                counts[(d - lo) as usize] += 1;
+            }
+            for (i, &c) in counts.iter().enumerate() {
+                let value = lo + i as i32;
+                let want = exact.prob(value);
+                let got = c as f64 / n as f64;
+                let tol = 5.0 * (want * (1.0 - want) / n as f64).sqrt() + 1e-4;
+                assert!(
+                    (got - want).abs() < tol,
+                    "{name}: P(damage = {value}) sampled {got:.5}, exact {want:.5}, tol {tol:.5}"
+                );
+            }
+        }
     }
 
     /// [`Creature::extra_damage_applies_to_spell_attacks`] reads the marker
