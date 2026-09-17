@@ -352,6 +352,13 @@ impl FeatureRegistry {
                 radiant_damage_kind,
             )))
         });
+
+        // Spiritual Weapon (SRD 5.2, 2nd level, Bonus Action strike, no
+        // concentration) - every number it needs comes off the creature's
+        // own `spellcasting` profile, so there is nothing to read from TOML.
+        self.register("spiritual_weapon", |_val| {
+            Ok(Box::new(SpiritualWeaponPlugin))
+        });
     }
 }
 
@@ -760,5 +767,19 @@ mod tests {
             plugin.apply(&mut builder),
             Err(FeatureError::PrerequisiteNotMet(_))
         ));
+    }
+
+    /// Spiritual Weapon takes no TOML parameters of its own - every number
+    /// it needs comes off the creature's own `spellcasting` profile - so
+    /// building it from an empty table has to succeed.
+    #[test]
+    fn spiritual_weapon_builds_from_toml_with_no_parameters() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str("").unwrap();
+        let plugin = registry
+            .build_plugin("spiritual_weapon", &params)
+            .expect("spiritual_weapon builds from an empty toml table");
+        assert_eq!(plugin.id(), "spiritual_weapon");
+        assert_eq!(plugin.name(), "Spiritual Weapon");
     }
 }
