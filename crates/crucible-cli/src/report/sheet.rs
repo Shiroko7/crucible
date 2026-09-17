@@ -183,5 +183,8 @@ pub fn describe_trait(rider: &Rider) -> String {
         Rider::ExtraDamageAppliesToSpellAttacks => {
             "conditional extra damage also applies to spell attacks".to_string()
         }
+        Rider::ConditionOnHit { condition, .. } => {
+            format!("{} on hit, no save", condition.name())
+        }
     }
 }
