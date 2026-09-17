@@ -38,7 +38,8 @@
 use crate::prob::rng::Rng;
 use crate::rules::combat::{Landed, RollMode};
 use crate::rules::creature::{
-    Ability, AttackTrigger, Condition, Cost, Creature, Duration, Effect, Move, Rider, Uses,
+    Ability, AttackTrigger, Condition, Cost, Creature, Duration, Effect, Move, Rider, SpellSlots,
+    Uses,
 };
 
 /// Which side of the fight. A side is a team, of any size.
@@ -240,6 +241,13 @@ struct Fighter<'a> {
     legendary_left: u32,
     /// Remaining points in each of the creature's shared pools.
     resources: Vec<u32>,
+    /// This fight's copy of the creature's spell slot pools, spent
+    /// independently of `resources`: a slot is not a named
+    /// [`crate::rules::creature::Resource`], it is one of nine counters on
+    /// [`SpellSlots`]. Mirrors `creature.spell_slots` the same way
+    /// `resources` mirrors `creature.resources`, so the shared `Creature`
+    /// behind every rollout stays untouched.
+    spell_slots: SpellSlots,
     /// Remaining uses of each of the creature's own riders, parallel to
     /// `creature.riders`.
     rider_uses: Vec<u32>,
@@ -284,6 +292,7 @@ impl<'a> Fighter<'a> {
             // loses initiative, which is exactly when it matters.
             legendary_left: creature.legendary_uses,
             resources: creature.resources.iter().map(|r| r.max).collect(),
+            spell_slots: creature.spell_slots,
             rider_uses: creature.riders.iter().map(|r| r.initial_uses()).collect(),
             conditions: Vec::new(),
             concentration: None,
@@ -342,6 +351,26 @@ impl<'a> Fighter<'a> {
                 *r = r.saturating_sub(c.amount);
             }
             self.spent += c.amount;
+        }
+    }
+
+    /// Can this fighter afford a move that spends a spell slot at `level`?
+    /// `None` (no spell cost) is always affordable; a hoarding policy that
+    /// will not spend a resource will not spend a slot either - the same
+    /// rule [`Fighter::can_pay`] applies to a [`Cost`].
+    fn can_cast(&self, level: Option<u32>) -> bool {
+        match level {
+            None => true,
+            Some(l) => self.will_spend() && self.spell_slots.available(l) > 0,
+        }
+    }
+
+    /// Spend one slot of `level`, counting it against `spent` like any other
+    /// burnt resource. A no-op for a move with no spell cost.
+    fn cast(&mut self, level: Option<u32>) {
+        if let Some(l) = level {
+            self.spell_slots.cast(l);
+            self.spent += 1;
         }
     }
 
@@ -755,10 +784,12 @@ impl<'a> Fight<'a> {
             let chosen = &moves[pick];
             if !slot.states(&self.fighters[me])[pick].available()
                 || !self.fighters[me].can_pay(chosen.cost)
+                || !self.fighters[me].can_cast(chosen.spell_level)
             {
                 continue;
             }
             self.fighters[me].pay(chosen.cost);
+            self.fighters[me].cast(chosen.spell_level);
             self.fighters[me].spend_move(slot, pick, chosen.uses);
             self.apply(chosen, rng, me, target, record, &mut line);
         }
@@ -892,9 +923,9 @@ impl<'a> Fight<'a> {
         let against = self.fighters[target].creature;
         let fix = |slot: Slot, pick: Option<usize>| -> Option<usize> {
             let still_legal = pick.is_some_and(|i| {
-                slot.moves(f.creature)
-                    .get(i)
-                    .is_some_and(|m| slot.states(f)[i].available() && f.can_pay(m.cost))
+                slot.moves(f.creature).get(i).is_some_and(|m| {
+                    slot.states(f)[i].available() && f.can_pay(m.cost) && f.can_cast(m.spell_level)
+                })
             });
             if pick.is_none() || still_legal {
                 pick
@@ -922,7 +953,7 @@ impl<'a> Fight<'a> {
             .zip(slot.states(f))
             .enumerate()
         {
-            if state.available() && f.can_pay(m.cost) {
+            if state.available() && f.can_pay(m.cost) && f.can_cast(m.spell_level) {
                 out.push(Some(i));
             }
         }
@@ -1021,6 +1052,7 @@ impl<'a> Fight<'a> {
 
         self.fighters[me].legendary_left -= 1;
         self.fighters[me].pay(chosen.cost);
+        self.fighters[me].cast(chosen.spell_level);
         self.fighters[me].spend_move(Slot::Legendary, pick, chosen.uses);
         self.apply(chosen, rng, me, target, record, &mut line);
 
@@ -1433,7 +1465,7 @@ impl Policy {
         let bloodied = f.bloodied();
         let mut best: Option<(usize, (f64, f64))> = None;
         for (i, (m, state)) in moves.iter().zip(states).enumerate() {
-            if !state.available() || !f.can_pay(m.cost) {
+            if !state.available() || !f.can_pay(m.cost) || !f.can_cast(m.spell_level) {
                 continue;
             }
             // A hoarding policy passes over anything with a price on it, not just
@@ -1473,9 +1505,13 @@ impl Policy {
 }
 
 /// How much of a finite resource a move burns, for a policy that wants to burn
-/// them. A pool cost counts by its size; any private budget counts as one.
+/// them. A pool cost counts by its size; any private budget counts as one; a
+/// spell slot counts by its level, since a Nova table reaches for its
+/// highest slot first.
 fn spend_weight(m: &Move) -> u32 {
-    m.cost.map_or(0, |c| c.amount) + u32::from(!matches!(m.uses, Uses::Unlimited))
+    m.cost.map_or(0, |c| c.amount)
+        + u32::from(!matches!(m.uses, Uses::Unlimited))
+        + m.spell_level.unwrap_or(0)
 }
 
 /// The 5e stacking rule: any advantage and any disadvantage cancel to a flat
@@ -2909,5 +2945,181 @@ mod tests {
         fight.apply_condition(0, Condition::Stunned, Expiry::TurnStart(0));
         assert!(fight.fighters[0].concentration.is_none());
         assert!(!fight.fighters[1].has(|c| c == Condition::Poisoned));
+    }
+
+    // --- Spiritual Weapon (SPL-02) ------------------------------------
+    //
+    // The moves built here mirror exactly what
+    // `dsl::plugin::spells::SpiritualWeaponPlugin` registers, but are
+    // constructed directly rather than imported from `dsl` - `sim` sits
+    // below `dsl` in the subsystem order (see `lib.rs`'s module docs), so a
+    // test that exercises the duel engine's own bookkeeping has no business
+    // depending on the DSL layer above it.
+
+    /// The initial cast: a Bonus Action, a 2nd-level slot, and - critically
+    /// for the "pay once, then repeat" shape - `Uses::Limited(1)` so it can
+    /// never be taken a second time even if a slot is still available.
+    fn spiritual_weapon_cast_move(to_hit: i32, ability_modifier: i32) -> Move {
+        Move::new(
+            "Spiritual Weapon",
+            Effect::Strikes {
+                strike: Strike::new(
+                    to_hit,
+                    vec![DamageRoll::new(1, 8, ability_modifier, DamageKind::Force)],
+                ),
+                count: 1,
+            },
+        )
+        .with_uses(Uses::Limited(1))
+        .with_spell_level(2)
+    }
+
+    /// The repeat: an identical strike, free and unlimited, so once the
+    /// move above is spent this is the only bonus action left that still
+    /// qualifies.
+    fn spiritual_weapon_strike_again_move(to_hit: i32, ability_modifier: i32) -> Move {
+        Move::new(
+            "Spiritual Weapon (Strike Again)",
+            Effect::Strikes {
+                strike: Strike::new(
+                    to_hit,
+                    vec![DamageRoll::new(1, 8, ability_modifier, DamageKind::Force)],
+                ),
+                count: 1,
+            },
+        )
+    }
+
+    /// The initial cast spends the caster's one 2nd-level slot and then
+    /// becomes permanently unavailable for the rest of the fight
+    /// (`Uses::Limited(1)`); the repeat strike never touches the slot pool
+    /// at all, on this round or any later one.
+    #[test]
+    fn spiritual_weapons_initial_cast_spends_a_slot_and_the_repeat_strike_does_not() {
+        let mut caster = Creature::new("caster", 20, 100);
+        caster.spell_slots.set_max(2, 1);
+        caster.bonus_actions.push(spiritual_weapon_cast_move(6, 3));
+        caster
+            .bonus_actions
+            .push(spiritual_weapon_strike_again_move(6, 3));
+
+        let dummy = Creature::new("dummy", 1, 1_000); // AC 1: almost everything hits
+
+        let roster = [(&caster, Side::A), (&dummy, Side::B)];
+        let mut rng = Rng::new(3_000);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        assert_eq!(fight.fighters[0].spell_slots.available(2), 1);
+        assert!(
+            fight.fighters[0].bonus_actions[0].available(),
+            "the cast starts available"
+        );
+
+        fight.take_turn(1, 0, &mut rng, &mut log, None);
+        assert_eq!(
+            fight.fighters[0].spell_slots.available(2),
+            0,
+            "the initial cast spends the one 2nd-level slot"
+        );
+        assert!(
+            !fight.fighters[0].bonus_actions[0].available(),
+            "the cast is a once-per-fight bonus action, spent or not"
+        );
+        assert!(
+            fight.fighters[0].bonus_actions[1].available(),
+            "the repeat strike is unlimited and stays available"
+        );
+
+        fight.take_turn(2, 0, &mut rng, &mut log, None);
+        assert_eq!(
+            fight.fighters[0].spell_slots.available(2),
+            0,
+            "the repeat strike must not spend a second slot"
+        );
+        assert!(
+            fight.fighters[0].bonus_actions[1].available(),
+            "the repeat strike stays available across rounds"
+        );
+    }
+
+    /// Spiritual Weapon never sets [`Move::concentration`], so it can be
+    /// summoned alongside a genuinely concentrated spell without either one
+    /// displacing the other - unlike casting a second concentration spell,
+    /// which ends the first (`a_second_concentration_spell_ends_the_first`,
+    /// above). The action establishes concentration on `Hold`; the bonus
+    /// action then casts Spiritual Weapon, and both effects have to still be
+    /// standing afterwards.
+    #[test]
+    fn spiritual_weapon_coexists_with_an_active_concentration_spell_without_disturbing_it() {
+        let hold = Move::new(
+            "Hold",
+            Effect::Save(SaveEffect {
+                ability: Ability::Wis,
+                dc: 99, // never saved
+                damage: vec![],
+                half_on_success: false,
+                on_failure: Some((Condition::Prone, Duration::ApplierTurn)),
+                max_targets: None,
+            }),
+        )
+        .with_concentration();
+
+        let mut caster = Creature::new("caster", 10, 100);
+        caster.spell_slots.set_max(2, 1);
+        caster.actions.push(hold);
+        caster.bonus_actions.push(spiritual_weapon_cast_move(6, 3));
+        caster
+            .bonus_actions
+            .push(spiritual_weapon_strike_again_move(6, 3));
+
+        let mut victim = Creature::new("victim", 1, 1_000);
+        victim.saves[Ability::Wis.index()] = -100; // never saves
+
+        let roster = [(&caster, Side::A), (&victim, Side::B)];
+        let mut rng = Rng::new(3_001);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        fight.take_turn(1, 0, &mut rng, &mut log, None);
+
+        assert!(
+            fight.fighters[1].has(|c| c == Condition::Prone),
+            "the action's concentration effect should have landed"
+        );
+        let active = fight.fighters[0]
+            .concentration
+            .as_ref()
+            .expect("still concentrating on Hold");
+        match &active.effect {
+            ConcentrationEffect::Condition { targets, condition } => {
+                assert_eq!(*condition, Condition::Prone);
+                assert_eq!(*targets, vec![1]);
+            }
+        }
+
+        assert_eq!(
+            fight.fighters[0].spell_slots.available(2),
+            0,
+            "Spiritual Weapon's own bonus action should still have spent its slot"
+        );
+        assert!(
+            !fight.fighters[0].bonus_actions[0].available(),
+            "Spiritual Weapon's cast should have fired alongside the concentration spell"
+        );
     }
 }
