@@ -117,10 +117,16 @@ impl FeatureRegistry {
                         "cunning_strike needs a `proficiency_bonus`".to_string(),
                     )
                 })? as i32;
-            Ok(Box::new(CunningStrikePlugin::new(
-                dex_modifier,
-                proficiency_bonus,
-            )))
+            // A magic item's flat bonus to the DC (ITM-06) - optional, and
+            // zero (no change at all) when the config never mentions it.
+            let item_bonus = val
+                .get("item_bonus")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(0) as i32;
+            Ok(Box::new(
+                CunningStrikePlugin::new(dex_modifier, proficiency_bonus)
+                    .with_item_bonus(item_bonus),
+            ))
         });
     }
 }
@@ -188,6 +194,37 @@ mod tests {
         assert_eq!(
             builder.creature.riders,
             vec![crate::rules::creature::Rider::CunningStrike { dc: 15 }]
+        );
+    }
+
+    /// ITM-06: an optional `item_bonus` in the TOML flows through to the DC,
+    /// and is zero - unchanged from before this field existed - when the
+    /// config never mentions it.
+    #[test]
+    fn cunning_strike_reads_an_optional_item_bonus_from_toml() {
+        let registry = FeatureRegistry::new();
+
+        let without: toml::Value =
+            toml::from_str("plugin = \"cunning_strike\"\ndex_modifier = 4\nproficiency_bonus = 3")
+                .unwrap();
+        let plugin = registry.build_plugin("cunning_strike", &without).unwrap();
+        let mut builder = crate::dsl::plugin::CreatureBuilder::new("Rogue", 15, 40);
+        plugin.apply(&mut builder).unwrap();
+        assert_eq!(
+            builder.creature.riders,
+            vec![crate::rules::creature::Rider::CunningStrike { dc: 15 }]
+        );
+
+        let with: toml::Value = toml::from_str(
+            "plugin = \"cunning_strike\"\ndex_modifier = 4\nproficiency_bonus = 3\nitem_bonus = 2",
+        )
+        .unwrap();
+        let plugin = registry.build_plugin("cunning_strike", &with).unwrap();
+        let mut builder = crate::dsl::plugin::CreatureBuilder::new("Rogue", 15, 40);
+        plugin.apply(&mut builder).unwrap();
+        assert_eq!(
+            builder.creature.riders,
+            vec![crate::rules::creature::Rider::CunningStrike { dc: 17 }]
         );
     }
 

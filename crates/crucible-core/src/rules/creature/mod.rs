@@ -12,7 +12,8 @@ pub use action::{
 pub use combatant::Creature;
 pub use damage::{DamageKind, DamageRoll};
 pub use rider::{
-    save_success_probability, saving_throw_against_condition, AttackTrigger, Rider,
+    injury_poison_forcing_save, save_probability_with_mode, save_success_probability,
+    save_with_mode, saving_throw_against_condition, AttackTrigger, Rider,
 };
 pub use types::{
     Ability, Condition, Cost, Duration, Resource, SpellCastingProfile, SpellSlots, SPELL_LEVELS,

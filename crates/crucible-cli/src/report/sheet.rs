@@ -195,5 +195,26 @@ pub fn describe_trait(rider: &Rider) -> String {
                 .collect();
             format!("downgrade {}", parts.join(" and "))
         }
+        Rider::ConditionTriggeredWeaponDamage {
+            trigger,
+            dice_count,
+            dice_sides,
+            bonus,
+            damage_kind,
+        } => format!(
+            "after inflicting {}: weapon attacks deal +{dice_count}d{dice_sides}{bonus:+} {} for the rest of the fight",
+            trigger.name(),
+            damage_kind.name()
+        ),
+        Rider::InjuryPoison {
+            ability,
+            dc,
+            debuffed_ability,
+            ..
+        } => format!(
+            "injury poison: next hit forces {} dc {dc}, fail gives disadvantage on {} saves",
+            ability.name(),
+            debuffed_ability.name()
+        ),
     }
 }
