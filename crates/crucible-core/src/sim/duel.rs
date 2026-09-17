@@ -1106,8 +1106,7 @@ impl<'a> Fight<'a> {
             Effect::Strikes { strike, count } => {
                 let mut current_target = target;
                 let mut against = self.fighters[current_target].creature;
-                let mut mode =
-                    self.attack_mode_consuming_mark(strike.mode, me, current_target);
+                let mut mode = self.attack_mode_consuming_mark(strike.mode, me, current_target);
                 // Paralyzed: any hit against it is an automatic critical hit.
                 let mut force_crit = self.fighters[current_target].has(Condition::auto_crits);
                 for _ in 0..*count {
@@ -1301,7 +1300,10 @@ impl<'a> Fight<'a> {
                         ));
                     }
                 }
-                Rider::ConditionOnHit { condition, duration } => {
+                Rider::ConditionOnHit {
+                    condition,
+                    duration,
+                } => {
                     self.apply_condition(target, *condition, expiry(me, target, *duration));
                     landed_conditions.push((target, *condition));
                     if record {
@@ -3142,7 +3144,15 @@ mod tests {
         }];
         let mut notes = Vec::new();
         let mut landed_conditions = Vec::new();
-        fight.fire_on_hit(&mut rng, 0, 1, &riders, false, &mut notes, &mut landed_conditions);
+        fight.fire_on_hit(
+            &mut rng,
+            0,
+            1,
+            &riders,
+            false,
+            &mut notes,
+            &mut landed_conditions,
+        );
 
         assert!(fight.fighters[1].has(|c| c == Condition::Marked));
         assert_eq!(landed_conditions, vec![(1, Condition::Marked)]);

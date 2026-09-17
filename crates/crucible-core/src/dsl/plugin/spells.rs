@@ -236,7 +236,11 @@ mod tests {
         (a - b).abs() < 1e-12
     }
 
-    fn caster_builder(ability_modifier: i32, proficiency_bonus: i32, slots: u32) -> CreatureBuilder {
+    fn caster_builder(
+        ability_modifier: i32,
+        proficiency_bonus: i32,
+        slots: u32,
+    ) -> CreatureBuilder {
         let mut builder = CreatureBuilder::new("Cleric", 16, 30);
         builder.set_spellcasting(SpellCastingProfile::new(
             Ability::Wis,
@@ -541,7 +545,7 @@ mod tests {
     /// in - the same test shape `sneak_attack`'s own parameterization gets.
     #[test]
     fn dice_are_a_parameter_not_a_hardcoded_constant() {
-        let mut builder = caster_builder(2, 2, 1);
+        let builder = caster_builder(2, 2, 1);
         let built = builder
             .apply_feature(&GuidingBoltPlugin::with_dice(5, 6))
             .expect("guiding bolt applies")
@@ -559,10 +563,13 @@ mod tests {
 
     #[test]
     fn applying_without_a_spellcasting_profile_is_rejected() {
+        // Calls the plugin's own `apply` (`&mut CreatureBuilder`) rather than
+        // the builder's consuming `apply_feature`, the same way
+        // `registry`'s `prestige_spellcasting_refuses_a_creature_that_does_not_qualify`
+        // test does - `apply_feature` takes `self` by value and does not hand
+        // it back on an `Err`, so there would be nothing left to inspect.
         let mut builder = CreatureBuilder::new("Not A Caster", 16, 30);
-        let err = builder
-            .apply_feature(&GuidingBoltPlugin::new())
-            .unwrap_err();
+        let err = GuidingBoltPlugin::new().apply(&mut builder).unwrap_err();
         assert!(matches!(err, FeatureError::InvalidConfiguration(_)));
         assert!(builder.creature.actions.is_empty());
     }
@@ -592,7 +599,7 @@ mod tests {
     /// exact one - the project's standing exact-vs-sampled contract.
     #[test]
     fn sampled_damage_agrees_with_the_exact_path() {
-        let mut builder = caster_builder(4, 3, 1); // attack bonus 7
+        let builder = caster_builder(4, 3, 1); // attack bonus 7
         let built = builder
             .apply_feature(&GuidingBoltPlugin::new())
             .expect("guiding bolt applies")
