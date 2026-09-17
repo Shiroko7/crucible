@@ -74,6 +74,7 @@ mod tests {
             half_on_success: true,
             on_failure: None,
             max_targets: None,
+            requires_type: None,
         };
         // Needs a 23 on a d20; unlike an attack roll, a natural 20 does not
         // rescue it.
@@ -97,6 +98,7 @@ mod tests {
             half_on_success: true,
             on_failure: None,
             max_targets: None,
+            requires_type: None,
         };
         // 21 -> 10 on the save, then 5 from resistance. Rounding down twice is
         // not the same as quartering, which is why the order is pinned here.
@@ -115,6 +117,7 @@ mod tests {
             half_on_success: true,
             on_failure: None,
             max_targets: None,
+            requires_type: None,
         };
 
         let mut always_saves = dummy(10);

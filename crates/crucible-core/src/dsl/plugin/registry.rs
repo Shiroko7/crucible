@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::rogue::*;
-use super::spells::{CureWoundsPlugin, HealingWordPlugin};
+use super::spells::{CureWoundsPlugin, HealingWordPlugin, HoldPersonPlugin};
 use super::standard::*;
 use super::traits::{FeatureError, FeaturePlugin, FeatureResult};
 use crate::rules::creature::Ability;
@@ -97,6 +97,9 @@ impl FeatureRegistry {
             let floor = val.get("floor").and_then(|v| v.as_integer()).unwrap_or(10) as i32;
             Ok(Box::new(ReliableTalentPlugin::with_floor(floor)))
         });
+
+        // Hold Person
+        self.register("hold_person", |_val| Ok(Box::new(HoldPersonPlugin::new())));
     }
 }
 

@@ -39,7 +39,7 @@ use crate::prob::rng::Rng;
 use crate::rules::combat::{Landed, RollMode};
 use crate::rules::creature::{
     apply_healing, Ability, AttackTrigger, Condition, Cost, Creature, Duration, Effect, Move,
-    Rider, Uses,
+    Rider, SpellSlots, Uses,
 };
 
 /// Which side of the fight. A side is a team, of any size.
@@ -241,6 +241,10 @@ struct Fighter<'a> {
     legendary_left: u32,
     /// Remaining points in each of the creature's shared pools.
     resources: Vec<u32>,
+    /// Remaining spell slots, mirroring `creature.spell_slots` the same way
+    /// `resources` mirrors `creature.resources`: a per-fight mutable copy, so
+    /// the shared `Creature` behind every rollout stays untouched.
+    spell_slots: SpellSlots,
     /// Remaining uses of each of the creature's own riders, parallel to
     /// `creature.riders`.
     rider_uses: Vec<u32>,
@@ -285,6 +289,7 @@ impl<'a> Fighter<'a> {
             // loses initiative, which is exactly when it matters.
             legendary_left: creature.legendary_uses,
             resources: creature.resources.iter().map(|r| r.max).collect(),
+            spell_slots: creature.spell_slots,
             rider_uses: creature.riders.iter().map(|r| r.initial_uses()).collect(),
             conditions: Vec::new(),
             concentration: None,
@@ -343,6 +348,25 @@ impl<'a> Fighter<'a> {
                 *r = r.saturating_sub(c.amount);
             }
             self.spent += c.amount;
+        }
+    }
+
+    /// Is a slot of exactly `level` available and something this policy is
+    /// willing to spend? A spell slot is exactly the kind of finite resource
+    /// `will_spend` already gates `cost` behind.
+    fn can_cast(&self, level: Option<u32>) -> bool {
+        match level {
+            None => true,
+            Some(lvl) => self.will_spend() && self.spell_slots.available(lvl) > 0,
+        }
+    }
+
+    /// Spend a slot of `level`, counting it the same way `pay` counts a
+    /// resource cost.
+    fn cast_spell_slot(&mut self, level: Option<u32>) {
+        if let Some(lvl) = level {
+            self.spell_slots.cast(lvl);
+            self.spent += 1;
         }
     }
 
@@ -756,10 +780,12 @@ impl<'a> Fight<'a> {
             let chosen = &moves[pick];
             if !slot.states(&self.fighters[me])[pick].available()
                 || !self.fighters[me].can_pay(chosen.cost)
+                || !self.fighters[me].can_cast(chosen.spell_slot_level)
             {
                 continue;
             }
             self.fighters[me].pay(chosen.cost);
+            self.fighters[me].cast_spell_slot(chosen.spell_slot_level);
             self.fighters[me].spend_move(slot, pick, chosen.uses);
             self.apply(chosen, rng, me, target, record, &mut line);
         }
@@ -893,9 +919,11 @@ impl<'a> Fight<'a> {
         let against = self.fighters[target].creature;
         let fix = |slot: Slot, pick: Option<usize>| -> Option<usize> {
             let still_legal = pick.is_some_and(|i| {
-                slot.moves(f.creature)
-                    .get(i)
-                    .is_some_and(|m| slot.states(f)[i].available() && f.can_pay(m.cost))
+                slot.moves(f.creature).get(i).is_some_and(|m| {
+                    slot.states(f)[i].available()
+                        && f.can_pay(m.cost)
+                        && f.can_cast(m.spell_slot_level)
+                })
             });
             if pick.is_none() || still_legal {
                 pick
@@ -923,7 +951,7 @@ impl<'a> Fight<'a> {
             .zip(slot.states(f))
             .enumerate()
         {
-            if state.available() && f.can_pay(m.cost) {
+            if state.available() && f.can_pay(m.cost) && f.can_cast(m.spell_slot_level) {
                 out.push(Some(i));
             }
         }
@@ -1178,6 +1206,14 @@ impl<'a> Fight<'a> {
                 let side = self.fighters[me].side;
                 let mut caught: Vec<usize> = (0..self.fighters.len())
                     .filter(|&i| self.fighters[i].side != side && self.fighters[i].alive())
+                    // A type-restricted save (Hold Person's "humanoid") never
+                    // catches anything else at all - not even a rolled save
+                    // that then does nothing, the same way `max_targets` caps
+                    // who is caught rather than who saves.
+                    .filter(|&i| match &save.requires_type {
+                        None => true,
+                        Some(t) => self.fighters[i].creature.is_creature_type(t),
+                    })
                     .collect();
                 if let Some(max) = save.max_targets {
                     caught.truncate(max as usize);
@@ -1455,7 +1491,7 @@ impl Policy {
         let bloodied = f.bloodied();
         let mut best: Option<(usize, (f64, f64))> = None;
         for (i, (m, state)) in moves.iter().zip(states).enumerate() {
-            if !state.available() || !f.can_pay(m.cost) {
+            if !state.available() || !f.can_pay(m.cost) || !f.can_cast(m.spell_slot_level) {
                 continue;
             }
             // A hoarding policy passes over anything with a price on it, not just
@@ -1497,7 +1533,9 @@ impl Policy {
 /// How much of a finite resource a move burns, for a policy that wants to burn
 /// them. A pool cost counts by its size; any private budget counts as one.
 fn spend_weight(m: &Move) -> u32 {
-    m.cost.map_or(0, |c| c.amount) + u32::from(!matches!(m.uses, Uses::Unlimited))
+    m.cost.map_or(0, |c| c.amount)
+        + u32::from(!matches!(m.uses, Uses::Unlimited))
+        + m.spell_slot_level.unwrap_or(0)
 }
 
 /// The 5e stacking rule: any advantage and any disadvantage cancel to a flat
@@ -2226,6 +2264,7 @@ mod tests {
                 half_on_success: false,
                 on_failure: None,
                 max_targets: None,
+                requires_type: None,
             }),
         );
         let claw = Move::new(
@@ -2460,6 +2499,7 @@ mod tests {
                 half_on_success: true,
                 on_failure: None,
                 max_targets: None,
+                requires_type: None,
             }),
         ));
         let mut victim = Creature::new("victim", 10, 1_000);
@@ -2745,6 +2785,7 @@ mod tests {
                     half_on_success: false,
                     on_failure: Some((condition, Duration::ApplierTurn)),
                     max_targets: None,
+                    requires_type: None,
                 }),
             )
             .with_concentration()
