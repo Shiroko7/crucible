@@ -372,6 +372,9 @@ fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> {
         // The DSL has no clause for it yet; a scenario that needs
         // concentration waits on that syntax, not on the engine.
         concentration: false,
+        // Same gap as `concentration` above: no clause yet for spending a
+        // spell slot from a hand-written scenario move.
+        spell_level: None,
     })
 }
 
