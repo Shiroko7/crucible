@@ -316,10 +316,26 @@ mod tests {
             Condition::Poisoned,
             Condition::Blinded,
             Condition::Paralyzed,
+            Condition::Marked,
         ] {
             assert_eq!(Condition::parse(c.name()), Some(c));
         }
         assert_eq!(Condition::parse("paralysed"), Some(Condition::Paralyzed));
         assert_eq!(Condition::parse("nonsense"), None);
+    }
+
+    /// Marked only ever grants advantage to attackers - it does not
+    /// incapacitate, burden its own attacks, or do anything else every other
+    /// condition here does, which is the point: it is a narrow, single-shot
+    /// primitive, not a bundle.
+    #[test]
+    fn marked_only_grants_advantage_to_attackers() {
+        assert!(Condition::Marked.advantage_to_attackers());
+        assert!(!Condition::Marked.incapacitated());
+        assert!(!Condition::Marked.disadvantage_to_attackers());
+        assert!(!Condition::Marked.disadvantage_on_attacks());
+        assert!(!Condition::Marked.auto_fails(Ability::Str));
+        assert!(!Condition::Marked.blocks_riders());
+        assert!(!Condition::Marked.auto_crits());
     }
 }

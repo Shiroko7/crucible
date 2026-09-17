@@ -1,8 +1,8 @@
 //! Healing and triage spells: Healing Word and Cure Wounds (SRD 5.2, 2024
-//! rules).
+//! rules). Also Guiding Bolt: see [`GuidingBoltPlugin`] below.
 //!
-//! Both restore hit points using `1..2 dice + the caster's spellcasting
-//! ability modifier`, read from the creature's own
+//! Both healing spells restore hit points using `1..2 dice + the caster's
+//! spellcasting ability modifier`, read from the creature's own
 //! [`crate::rules::creature::SpellCastingProfile`] rather than a hardcoded
 //! number, and both spend one 1st-level spell slot from the caster's
 //! [`crate::rules::creature::SpellSlots`].
@@ -26,15 +26,18 @@
 //!   a separate, considerably larger feature (self/ally targeting for every
 //!   effect, plus a policy that decides when to heal) and is left for a
 //!   follow-up rather than bolted on here.
-//! - **Upcasting.** Both spells are implemented as their base 1st-level
-//!   cast only; scaling the healing dice with a higher slot is skipped.
+//! - **Upcasting.** Both healing spells are implemented as their base
+//!   1st-level cast only; scaling the healing dice with a higher slot is
+//!   skipped.
 
-use crate::rules::creature::{Effect, HealRoll, Move};
+use crate::rules::creature::{
+    Condition, Cost, DamageKind, DamageRoll, Duration, Effect, HealRoll, Move, Rider, Strike,
+};
 
 use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
 
-/// Both spells are cast here at their base, 1st-level, rate. See the module
-/// doc: upcasting is out of scope.
+/// Both healing spells are cast here at their base, 1st-level, rate. See the
+/// module doc: upcasting is out of scope.
 const BASE_SLOT_LEVEL: u32 = 1;
 
 /// The ability modifier a healing spell adds, read off the creature's own
@@ -113,16 +116,138 @@ impl FeaturePlugin for CureWoundsPlugin {
     }
 }
 
+/// Guiding Bolt (SRD 5.2, 1st-level Evocation): a ranged spell attack for
+/// 4d6 Radiant damage, using the caster's own spell attack bonus. On a hit,
+/// the target is marked - [`Condition::Marked`] - so the next attack roll
+/// made against it before the start of its own next turn, by anyone, has
+/// Advantage.
+///
+/// `dice_count`/`dice_sides` are plugin parameters rather than `4` and `6`
+/// baked in, the same way [`super::rogue::SneakAttackPlugin`]'s dice are - a
+/// homebrew variant or a future upcast-aware caller can hand this a
+/// different pool without a code change. Upcasting Guiding Bolt itself (more
+/// dice from a higher-level slot) is not modelled: this always spends
+/// exactly one 1st-level slot.
+///
+/// Consuming a spell slot during a live fight has no existing machinery of
+/// its own yet - `SpellSlots` (ARCH-05) only ever tracks the *declared*
+/// maximum and is never read by `sim::duel`, which only knows how to spend
+/// from the named [`crate::rules::creature::Resource`] pool
+/// [`crate::rules::creature::Cost`] already points at. Rather than build a
+/// second, parallel spend-tracking mechanism for this one spell, this plugin
+/// mirrors the caster's already-declared 1st-level slot count into a
+/// same-named live resource (`spell_slot_1`) via the existing, idempotent
+/// [`CreatureBuilder::ensure_resource`] - so a second 1st-level spell from a
+/// sibling plugin naturally shares the same pool instead of getting its own.
+/// That is a deliberately small bridge, not the final shape of spell-slot
+/// spending; a real "cast at exactly this level" primitive belongs to a
+/// later task once more than one spell needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuidingBoltPlugin {
+    pub dice_count: u32,
+    pub dice_sides: u32,
+}
+
+impl GuidingBoltPlugin {
+    /// The printed 4d6.
+    pub fn new() -> Self {
+        Self::with_dice(4, 6)
+    }
+
+    /// As [`GuidingBoltPlugin::new`], with an overridden dice pool.
+    pub fn with_dice(dice_count: u32, dice_sides: u32) -> Self {
+        Self {
+            dice_count,
+            dice_sides,
+        }
+    }
+}
+
+impl Default for GuidingBoltPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FeaturePlugin for GuidingBoltPlugin {
+    fn id(&self) -> &'static str {
+        "guiding_bolt"
+    }
+
+    fn name(&self) -> &str {
+        "Guiding Bolt"
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        let profile = builder.creature.spellcasting.ok_or_else(|| {
+            FeatureError::InvalidConfiguration(
+                "guiding_bolt needs the creature's spellcasting profile set first \
+                 (declare `[*.spellcasting]`, or list a spellcasting-granting feature \
+                 before `guiding_bolt` in `features`)"
+                    .to_string(),
+            )
+        })?;
+        let to_hit = profile.attack_bonus();
+
+        let slot_max = builder.creature.spell_slots.max(1);
+        let slot_resource = builder.ensure_resource("spell_slot_1", slot_max);
+
+        let strike = Strike::new(
+            to_hit,
+            vec![DamageRoll::new(
+                self.dice_count,
+                self.dice_sides,
+                0,
+                DamageKind::Radiant,
+            )],
+        );
+
+        let action = Move::new("Guiding Bolt", Effect::Strikes { strike, count: 1 })
+            .with_cost(Cost {
+                resource: slot_resource,
+                amount: 1,
+            })
+            .with_rider(Rider::ConditionOnHit {
+                condition: Condition::Marked,
+                duration: Duration::VictimTurn,
+            });
+
+        builder.add_action(action);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dsl::plugin::traits::CreatureBuilder;
     use crate::prob::rng::Rng;
+    use crate::rules::combat::{damage_pmf, sample_damage, Attack, Defense, RollMode};
     use crate::rules::creature::{apply_healing, is_down, Ability, Creature, SpellCastingProfile};
 
     fn wisdom_caster(ability_modifier: i32) -> CreatureBuilder {
         let mut builder = CreatureBuilder::new("Cleric", 14, 30);
         builder.set_spellcasting(SpellCastingProfile::new(Ability::Wis, ability_modifier, 3));
         builder.set_spell_slot_max(1, 2);
+        builder
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-12
+    }
+
+    fn caster_builder(
+        ability_modifier: i32,
+        proficiency_bonus: i32,
+        slots: u32,
+    ) -> CreatureBuilder {
+        let mut builder = CreatureBuilder::new("Cleric", 16, 30);
+        builder.set_spellcasting(SpellCastingProfile::new(
+            Ability::Wis,
+            ability_modifier,
+            proficiency_bonus,
+        ));
+        builder.set_spell_slot_max(1, slots);
         builder
     }
 
@@ -349,5 +474,227 @@ mod tests {
         let (new_hp, revived) = apply_healing(0, ally_max_hp, healed);
         assert!(new_hp > 0);
         assert!(revived);
+    }
+
+    #[test]
+    fn applying_grants_an_action_using_the_casters_computed_attack_bonus() {
+        let builder = caster_builder(3, 2, 2); // attack bonus 5
+        let built = builder
+            .apply_feature(&GuidingBoltPlugin::new())
+            .expect("guiding bolt applies to a caster")
+            .build()
+            .expect("builds");
+
+        assert_eq!(built.actions.len(), 1);
+        let action = &built.actions[0];
+        assert_eq!(action.name, "Guiding Bolt");
+        match &action.effect {
+            Effect::Strikes { strike, count } => {
+                assert_eq!(*count, 1);
+                assert_eq!(strike.to_hit, 5, "5 = 3 (ability mod) + 2 (proficiency)");
+                assert_eq!(
+                    strike.damage,
+                    vec![DamageRoll::new(4, 6, 0, DamageKind::Radiant)]
+                );
+            }
+            other => panic!("expected a Strikes effect, got {other:?}"),
+        }
+
+        // A 1st-level slot, spent from a resource pool mirroring the
+        // caster's own declared maximum.
+        assert_eq!(
+            action.cost,
+            Some(Cost {
+                resource: 0,
+                amount: 1
+            })
+        );
+        assert_eq!(built.resources[0].name, "spell_slot_1");
+        assert_eq!(built.resources[0].max, 2);
+
+        // The mark, applied unconditionally on a hit.
+        assert_eq!(
+            action.riders,
+            vec![Rider::ConditionOnHit {
+                condition: Condition::Marked,
+                duration: Duration::VictimTurn,
+            }]
+        );
+    }
+
+    /// A different profile and slot count produce a different bonus and a
+    /// different pool size, proving neither was a hardcoded constant.
+    #[test]
+    fn a_differently_configured_caster_gets_its_own_numbers() {
+        let mut builder = caster_builder(4, 3, 1); // attack bonus 7
+        builder.set_spellcasting(SpellCastingProfile::new(Ability::Wis, 4, 3).with_item_bonus(1));
+        let built = builder
+            .apply_feature(&GuidingBoltPlugin::new())
+            .expect("guiding bolt applies")
+            .build()
+            .expect("builds");
+
+        let Effect::Strikes { strike, .. } = &built.actions[0].effect else {
+            panic!("expected Strikes");
+        };
+        assert_eq!(strike.to_hit, 8, "4 (mod) + 3 (proficiency) + 1 (item)");
+        assert_eq!(built.resources[0].max, 1);
+    }
+
+    /// `dice_count`/`dice_sides` are parameters, not the printed 4d6 baked
+    /// in - the same test shape `sneak_attack`'s own parameterization gets.
+    #[test]
+    fn dice_are_a_parameter_not_a_hardcoded_constant() {
+        let builder = caster_builder(2, 2, 1);
+        let built = builder
+            .apply_feature(&GuidingBoltPlugin::with_dice(5, 6))
+            .expect("guiding bolt applies")
+            .build()
+            .expect("builds");
+
+        let Effect::Strikes { strike, .. } = &built.actions[0].effect else {
+            panic!("expected Strikes");
+        };
+        assert_eq!(
+            strike.damage,
+            vec![DamageRoll::new(5, 6, 0, DamageKind::Radiant)]
+        );
+    }
+
+    #[test]
+    fn applying_without_a_spellcasting_profile_is_rejected() {
+        // Calls the plugin's own `apply` (`&mut CreatureBuilder`) rather than
+        // the builder's consuming `apply_feature`, the same way
+        // `registry`'s `prestige_spellcasting_refuses_a_creature_that_does_not_qualify`
+        // test does - `apply_feature` takes `self` by value and does not hand
+        // it back on an `Err`, so there would be nothing left to inspect.
+        let mut builder = CreatureBuilder::new("Not A Caster", 16, 30);
+        let err = GuidingBoltPlugin::new().apply(&mut builder).unwrap_err();
+        assert!(matches!(err, FeatureError::InvalidConfiguration(_)));
+        assert!(builder.creature.actions.is_empty());
+    }
+
+    /// A sibling 1st-level spell feature sharing the same slot level should
+    /// end up drawing from the very same resource pool rather than getting
+    /// its own - `ensure_resource` is idempotent by name, and this proves
+    /// this plugin actually leans on that rather than reinventing a pool.
+    #[test]
+    fn a_second_first_level_spell_shares_the_same_slot_pool() {
+        let mut builder = caster_builder(3, 2, 3);
+        builder.ensure_resource("spell_slot_1", 3);
+        let idx_before = builder.resource_index("spell_slot_1").unwrap();
+
+        let built = builder
+            .apply_feature(&GuidingBoltPlugin::new())
+            .expect("guiding bolt applies")
+            .build()
+            .expect("builds");
+
+        assert_eq!(built.resources.len(), 1, "no second pool was created");
+        assert_eq!(built.actions[0].cost.unwrap().resource, idx_before);
+    }
+
+    /// The `Strike`'s own damage distribution: a miss deals nothing, a hit
+    /// or crit deals 4d6, and the sampled path must land on exactly the
+    /// exact one - the project's standing exact-vs-sampled contract.
+    #[test]
+    fn sampled_damage_agrees_with_the_exact_path() {
+        let builder = caster_builder(4, 3, 1); // attack bonus 7
+        let built = builder
+            .apply_feature(&GuidingBoltPlugin::new())
+            .expect("guiding bolt applies")
+            .build()
+            .expect("builds");
+        let Effect::Strikes { strike, .. } = &built.actions[0].effect else {
+            panic!("expected Strikes");
+        };
+
+        let target = crate::rules::creature::Creature::new("target", 15, 40);
+        let exact = strike.damage_pmf(&target);
+        assert!(close(exact.total(), 1.0));
+        assert!(exact.min() >= 0, "damage floors at zero");
+        assert!(exact.prob(0) > 0.0, "a miss must be possible");
+        // 4d6 tops at 24, doubled to 48 on a crit.
+        assert_eq!(exact.max(), 48);
+
+        let (lo, hi) = (exact.min(), exact.max());
+        let mut rng = Rng::new(4_200);
+        let n = 100_000;
+        let mut counts = vec![0usize; (hi - lo + 1) as usize];
+        for _ in 0..n {
+            let d = strike.sample(&mut rng, &target);
+            assert!(d >= lo && d <= hi, "sampled {d} outside {lo}..={hi}");
+            counts[(d - lo) as usize] += 1;
+        }
+        for (i, &c) in counts.iter().enumerate() {
+            let value = lo + i as i32;
+            let want = exact.prob(value);
+            let got = c as f64 / n as f64;
+            let tol = 5.0 * (want * (1.0 - want) / n as f64).sqrt() + 1e-4;
+            assert!(
+                (got - want).abs() < tol,
+                "P(damage = {value}) sampled {got:.5}, exact {want:.5}, tol {tol:.5}"
+            );
+        }
+    }
+
+    /// Acceptance criterion: Guiding Bolt is a spell attack roll
+    /// ([`Attack::is_spell_attack`]) whose damage profile composes with the
+    /// AT-02 sneak-attack-style extension exactly like a weapon attack does,
+    /// as soon as the attack has Advantage - from this exact mark's own
+    /// prior use, or any other source. Verified at the [`rules::combat`]
+    /// level, the same way AT-02's own tests prove the gate, and checked
+    /// exact-vs-sampled.
+    ///
+    /// [`rules::combat`]: crate::rules::combat
+    #[test]
+    fn guiding_bolts_profile_composes_with_the_sneak_attack_style_spell_extension_under_advantage()
+    {
+        let attack = Attack::new(7, 4, 6, 0)
+            .with_is_spell_attack(true)
+            .with_mode(RollMode::Advantage);
+
+        // A rogue-shaped rider that opted into the spell-attack extension.
+        let sneak = Rider::ConditionalExtraDamage {
+            dice_count: 3,
+            dice_sides: 6,
+            once_per_turn: true,
+        };
+        let extra = sneak
+            .extra_damage_for_with_spell_attack_extension(&attack, false, true)
+            .expect("a spell attack at advantage should qualify with the extension");
+        let with_sneak = attack.with_damage_rider(extra);
+
+        let defense = Defense::new(14, 60);
+        let exact = damage_pmf(&with_sneak, &defense);
+        let (lo, hi) = (exact.min(), exact.max());
+        let mut rng = Rng::new(4_300);
+        let n = 100_000;
+        let mut counts = vec![0usize; (hi - lo + 1) as usize];
+        for _ in 0..n {
+            let d = sample_damage(&mut rng, &with_sneak, &defense);
+            assert!(d >= lo && d <= hi, "sampled {d} outside {lo}..={hi}");
+            counts[(d - lo) as usize] += 1;
+        }
+        for (i, &c) in counts.iter().enumerate() {
+            let value = lo + i as i32;
+            let want = exact.prob(value);
+            let got = c as f64 / n as f64;
+            let tol = 5.0 * (want * (1.0 - want) / n as f64).sqrt() + 1e-4;
+            assert!(
+                (got - want).abs() < tol,
+                "P(damage = {value}) sampled {got:.5}, exact {want:.5}, tol {tol:.5}"
+            );
+        }
+
+        // Without the extension, the very same spell attack must not
+        // qualify - the extension is what makes it additive, not automatic.
+        let attack_unextended = Attack::new(7, 4, 6, 0)
+            .with_is_spell_attack(true)
+            .with_mode(RollMode::Advantage);
+        assert_eq!(
+            sneak.extra_damage_for_with_spell_attack_extension(&attack_unextended, false, false),
+            None
+        );
     }
 }

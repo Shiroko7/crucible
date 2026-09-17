@@ -191,6 +191,25 @@ impl FeatureRegistry {
                 attack_bonus,
             )))
         });
+
+        // Guiding Bolt (SRD 5.2, 1st level): a ranged spell attack for 4d6
+        // Radiant using the caster's own `SpellCastingProfile`, marking the
+        // target on a hit. `dice_count`/`dice_sides` default to the printed
+        // 4d6 but can be overridden, the same way `sneak_attack`'s dice are -
+        // see `spells::GuidingBoltPlugin`.
+        self.register("guiding_bolt", |val| {
+            let dice_count = val
+                .get("dice_count")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(4) as u32;
+            let dice_sides = val
+                .get("dice_sides")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(6) as u32;
+            Ok(Box::new(super::spells::GuidingBoltPlugin::with_dice(
+                dice_count, dice_sides,
+            )))
+        });
     }
 }
 
@@ -326,5 +345,78 @@ mod tests {
             registry.build_plugin("prestige_spellcasting", &params),
             Err(FeatureError::InvalidConfiguration(_))
         ));
+    }
+
+    /// Guiding Bolt builds from an empty TOML table (its printed 4d6),
+    /// proving the registry entry actually reaches `spells::GuidingBoltPlugin`
+    /// rather than only being reachable by constructing it directly in Rust.
+    #[test]
+    fn guiding_bolt_defaults_to_4d6_but_can_be_overridden() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str("plugin = \"guiding_bolt\"").unwrap();
+        let plugin = registry
+            .build_plugin("guiding_bolt", &params)
+            .expect("guiding_bolt builds from an empty toml table");
+        assert_eq!(plugin.id(), "guiding_bolt");
+        assert_eq!(plugin.name(), "Guiding Bolt");
+
+        let mut builder = crate::dsl::plugin::CreatureBuilder::new("Cleric", 16, 30);
+        builder.set_spellcasting(crate::rules::creature::SpellCastingProfile::new(
+            Ability::Wis,
+            3,
+            2,
+        ));
+        builder.set_spell_slot_max(1, 2);
+        let built = builder
+            .apply_feature(plugin.as_ref())
+            .expect("guiding_bolt applies to a caster")
+            .build()
+            .expect("builds");
+        let crate::rules::creature::Effect::Strikes { strike, .. } = &built.actions[0].effect
+        else {
+            panic!("expected a Strikes effect");
+        };
+        assert_eq!(
+            strike.damage,
+            vec![crate::rules::creature::DamageRoll::new(
+                4,
+                6,
+                0,
+                crate::rules::creature::DamageKind::Radiant
+            )]
+        );
+
+        // A different dice pool overrides the printed default, the same way
+        // `sneak_attack`'s does.
+        let overridden: toml::Value =
+            toml::from_str("plugin = \"guiding_bolt\"\ndice_count = 5\ndice_sides = 8").unwrap();
+        let plugin = registry
+            .build_plugin("guiding_bolt", &overridden)
+            .expect("guiding_bolt builds with overridden dice");
+        let mut builder = crate::dsl::plugin::CreatureBuilder::new("Cleric", 16, 30);
+        builder.set_spellcasting(crate::rules::creature::SpellCastingProfile::new(
+            Ability::Wis,
+            3,
+            2,
+        ));
+        builder.set_spell_slot_max(1, 2);
+        let built = builder
+            .apply_feature(plugin.as_ref())
+            .expect("guiding_bolt applies")
+            .build()
+            .expect("builds");
+        let crate::rules::creature::Effect::Strikes { strike, .. } = &built.actions[0].effect
+        else {
+            panic!("expected a Strikes effect");
+        };
+        assert_eq!(
+            strike.damage,
+            vec![crate::rules::creature::DamageRoll::new(
+                5,
+                8,
+                0,
+                crate::rules::creature::DamageKind::Radiant
+            )]
+        );
     }
 }

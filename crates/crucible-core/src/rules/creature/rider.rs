@@ -94,6 +94,22 @@ pub enum Rider {
         dice_sides: u32,
         once_per_turn: bool,
     },
+    /// On a hit, unconditionally applies a condition to the target - no
+    /// saving throw offered, unlike [`Rider::SaveOrCondition`].
+    ///
+    /// Guiding Bolt's mark:
+    /// [`crate::rules::creature::Condition::Marked`], granting Advantage to
+    /// the next attack roll made against the target by anyone, cleared the
+    /// moment that roll happens (see `sim::duel::Fight`'s attack resolution)
+    /// or at the start of the target's own next turn, whichever comes first.
+    /// Distinct from `SaveOrCondition` because nothing about the mark is
+    /// resistible - it lands whenever the attack does - and it carries no
+    /// cost or once-per-turn budget of its own; the spell's own casting cost
+    /// (a spell slot) already gates it.
+    ConditionOnHit {
+        condition: Condition,
+        duration: Duration,
+    },
     /// Marks a creature whose [`Rider::ConditionalExtraDamage`] also accepts
     /// a qualifying spell attack roll
     /// ([`crate::rules::combat::Attack::is_spell_attack`]), not only a

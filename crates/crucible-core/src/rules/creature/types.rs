@@ -70,6 +70,17 @@ pub enum Condition {
     /// [`Condition::auto_crits`]: a hit landed against it is an automatic
     /// critical.
     Paralyzed,
+    /// Outlined by a fading light: no effect on its own actions or saves, but
+    /// the next attack roll made against it - by anyone, not only whoever
+    /// applied it - has advantage.
+    ///
+    /// Guiding Bolt's mark. Unlike every other condition here, it is not
+    /// cleared only at a turn boundary: `sim::duel`'s attack resolution
+    /// consumes it the moment that next roll happens, so it clears whichever
+    /// comes first - a roll against its holder, or the start of the holder's
+    /// own next turn (its usual [`Duration::VictimTurn`] expiry, for the
+    /// "never got attacked" case).
+    Marked,
 }
 
 impl Condition {
@@ -81,6 +92,7 @@ impl Condition {
             "poisoned" => Self::Poisoned,
             "blinded" => Self::Blinded,
             "paralyzed" | "paralysed" => Self::Paralyzed,
+            "marked" => Self::Marked,
             _ => return None,
         })
     }
@@ -93,6 +105,7 @@ impl Condition {
             Self::Poisoned => "poisoned",
             Self::Blinded => "blinded",
             Self::Paralyzed => "paralyzed",
+            Self::Marked => "marked",
         }
     }
 
@@ -110,7 +123,7 @@ impl Condition {
     pub fn advantage_to_attackers(self) -> bool {
         matches!(
             self,
-            Self::Stunned | Self::Prone | Self::Blinded | Self::Paralyzed
+            Self::Stunned | Self::Prone | Self::Blinded | Self::Paralyzed | Self::Marked
         )
     }
 
