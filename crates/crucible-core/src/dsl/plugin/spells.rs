@@ -2573,6 +2573,11 @@ mod tests {
 
     #[test]
     fn applying_without_a_spellcasting_profile_is_rejected() {
+        // Calls the plugin's own `apply` (`&mut CreatureBuilder`) rather than
+        // the builder's consuming `apply_feature`, the same way
+        // `registry`'s `prestige_spellcasting_refuses_a_creature_that_does_not_qualify`
+        // test does - `apply_feature` takes `self` by value and does not hand
+        // it back on an `Err`, so there would be nothing left to inspect.
         let mut builder = CreatureBuilder::new("Not A Caster", 16, 30);
         assert!(matches!(
             GuidingBoltPlugin::new().apply(&mut builder),

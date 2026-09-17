@@ -255,7 +255,7 @@ pub fn describe_trait(rider: &Rider) -> String {
             debuffed_ability.name()
         ),
         Rider::ConditionOnHit { condition, .. } => {
-            format!("{} on hit, no save", condition.name())
+            format!("{} on hit (no save)", condition.name())
         }
     }
 }
