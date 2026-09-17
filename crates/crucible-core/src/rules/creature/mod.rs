@@ -6,7 +6,9 @@ pub mod damage;
 pub mod rider;
 pub mod types;
 
-pub use action::{apply_healing, is_down, Effect, HealRoll, Move, SaveEffect, Strike, Uses};
+pub use action::{
+    apply_healing, is_down, Effect, HealRoll, Move, MoveKind, SaveEffect, Strike, Uses,
+};
 pub use combatant::Creature;
 pub use damage::{DamageKind, DamageRoll};
 pub use rider::{AttackTrigger, Rider};

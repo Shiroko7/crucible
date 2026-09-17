@@ -43,6 +43,13 @@ pub struct Creature {
     /// Legendary actions available each round, each move costing one. Real
     /// blocks have moves costing two or three; nothing here needs that yet.
     pub legendary_uses: u32,
+    /// Reliable Talent (2024 Rogue 11): a floor under a d20 roll for a check
+    /// the creature is proficient in - `Some(10)` for the standard feature,
+    /// `None` for a creature without it. Plain field rather than a
+    /// [`Rider`] because, like `legendary_uses`, nothing about it is
+    /// triggered or conditional; see [`Creature::check_floor`] for where the
+    /// "proficient" half of the rule is applied.
+    pub reliable_talent_floor: Option<i32>,
 }
 
 impl Creature {
@@ -64,6 +71,7 @@ impl Creature {
             bonus_actions: Vec::new(),
             legendary: Vec::new(),
             legendary_uses: 0,
+            reliable_talent_floor: None,
         }
     }
 
@@ -108,6 +116,19 @@ impl Creature {
         self.spellcasting.map(|p| p.attack_bonus())
     }
 
+    /// The floor Reliable Talent (or anything shaped like it) puts under a
+    /// d20 check, for a check the creature is `proficient` in - `None`
+    /// otherwise, and `None` for a creature without the feature at all
+    /// regardless of proficiency. Feed the result straight into
+    /// [`crate::rules::check::CheckRoll::with_floor`].
+    pub fn check_floor(&self, proficient: bool) -> Option<i32> {
+        if proficient {
+            self.reliable_talent_floor
+        } else {
+            None
+        }
+    }
+
     /// Spell save DC, for a creature that casts spells at all.
     pub fn spell_save_dc(&self) -> Option<i32> {
         self.spellcasting.map(|p| p.save_dc())
@@ -125,6 +146,13 @@ impl Creature {
 
     pub fn with_rider(mut self, rider: Rider) -> Self {
         self.riders.push(rider);
+        self
+    }
+
+    /// Reliable Talent (or anything shaped like it): floor proficient checks
+    /// at `floor`.
+    pub fn with_reliable_talent_floor(mut self, floor: i32) -> Self {
+        self.reliable_talent_floor = Some(floor);
         self
     }
 }
