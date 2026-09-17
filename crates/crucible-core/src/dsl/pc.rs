@@ -56,6 +56,15 @@ impl PlayerCharacter {
         let mut builder = CreatureBuilder::new(&self.name, self.ac, self.hp);
         builder.creature.initiative = self.initiative;
 
+        // Apply raw ability scores, ahead of `features` below - a
+        // prerequisite-gated feature (a prestige spellcasting grant, say)
+        // needs these already in place when it runs.
+        for (ability_name, &score) in &self.abilities {
+            let ability = Ability::parse(ability_name)
+                .ok_or_else(|| FeatureError::UnknownAbility(ability_name.clone()))?;
+            builder.set_ability_score(ability, score);
+        }
+
         // Apply saves
         for (ability_name, &bonus) in &self.saves {
             let ability = Ability::parse(ability_name)

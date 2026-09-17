@@ -18,6 +18,11 @@ pub enum FeatureError {
     UnknownDamageKind(String),
     InvalidConfiguration(String),
     ExecutionError(String),
+    /// A feature with entry prerequisites (a prestige-style grant, typically)
+    /// refused to apply because the creature does not meet them. Distinct
+    /// from `InvalidConfiguration`, which is a malformed plugin declaration -
+    /// this is a well-formed feature that correctly does not apply here.
+    PrerequisiteNotMet(String),
 }
 
 impl fmt::Display for FeatureError {
@@ -29,6 +34,7 @@ impl fmt::Display for FeatureError {
             Self::UnknownDamageKind(d) => write!(f, "unknown damage kind '{d}'"),
             Self::InvalidConfiguration(msg) => write!(f, "invalid configuration: {msg}"),
             Self::ExecutionError(msg) => write!(f, "feature execution error: {msg}"),
+            Self::PrerequisiteNotMet(msg) => write!(f, "prerequisite not met: {msg}"),
         }
     }
 }
@@ -128,6 +134,12 @@ impl CreatureBuilder {
     /// [`crate::rules::creature::Creature::check_floor`].
     pub fn set_reliable_talent_floor(&mut self, floor: i32) {
         self.creature.reliable_talent_floor = Some(floor);
+    }
+
+    /// Set a raw ability score, as opposed to [`CreatureBuilder::set_save`]'s
+    /// bonus.
+    pub fn set_ability_score(&mut self, ability: Ability, score: i32) {
+        self.creature.abilities[ability.index()] = score;
     }
 
     /// Declare a spell slot pool's maximum (and starting available count) at
