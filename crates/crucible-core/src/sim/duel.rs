@@ -2823,7 +2823,7 @@ mod tests {
                     dc: 99, // never saved
                     damage: vec![],
                     half_on_success: false,
-                    on_failure: Some((condition, Duration::ApplierTurn)),
+                    on_failure: vec![(condition, Duration::ApplierTurn)],
                     max_targets: None,
                     requires_type: None,
                 }),
