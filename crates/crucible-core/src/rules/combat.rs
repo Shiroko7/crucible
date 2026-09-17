@@ -258,6 +258,18 @@ pub struct Attack {
     /// "an ally is next to the target" sets the same flag rather than
     /// growing a second one.
     pub ally_adjacent: bool,
+    /// Whether this attack is a spell attack roll, as opposed to a weapon
+    /// attack - the roll-type gate a sneak-attack-style extra damage rider
+    /// can be extended to accept alongside [`Attack::finesse_or_ranged`],
+    /// for a build that grants that extension (see
+    /// [`crate::rules::creature::Rider::extra_damage_for_with_spell_attack_extension`]).
+    /// `false` for a weapon attack and for anything that never asks.
+    ///
+    /// This is purely "was this attack resolved as a spell attack roll" -
+    /// it has no bearing on saving-throw spells, which never build an
+    /// [`Attack`] at all and so never reach this flag or the rider gate it
+    /// feeds.
+    pub is_spell_attack: bool,
 }
 
 impl Attack {
@@ -272,6 +284,7 @@ impl Attack {
             damage_riders: Vec::new(),
             finesse_or_ranged: false,
             ally_adjacent: false,
+            is_spell_attack: false,
         }
     }
 
@@ -291,6 +304,12 @@ impl Attack {
     /// [`Attack::ally_adjacent`].
     pub fn with_ally_adjacent(mut self, ally_adjacent: bool) -> Self {
         self.ally_adjacent = ally_adjacent;
+        self
+    }
+
+    /// Mark this attack as a spell attack roll - see [`Attack::is_spell_attack`].
+    pub fn with_is_spell_attack(mut self, is_spell_attack: bool) -> Self {
+        self.is_spell_attack = is_spell_attack;
         self
     }
 
