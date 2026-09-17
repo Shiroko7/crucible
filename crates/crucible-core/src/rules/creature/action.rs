@@ -585,6 +585,15 @@ pub struct Move {
     /// Irrelevant to how the move actually resolves - only which list it
     /// ends up in.
     pub kind: MoveKind,
+    /// The spell slot level this move spends, if any - 1st through 9th.
+    /// Distinct from `cost`: a slot is drawn from the caster's
+    /// [`crate::rules::creature::SpellSlots`], nine independent counters,
+    /// never a named [`crate::rules::creature::Resource`] pool, so a move
+    /// can in principle spend both a slot and a resource without either
+    /// accounting system needing to know about the other. `None` for
+    /// anything that is not cast from a slot: weapon attacks, at-will
+    /// cantrips, riders that only ever tag along on a hit.
+    pub spell_level: Option<u32>,
 }
 
 impl Move {
@@ -598,6 +607,7 @@ impl Move {
             effect,
             concentration: false,
             kind: MoveKind::Standard,
+            spell_level: None,
         }
     }
 
@@ -633,11 +643,19 @@ impl Move {
         self
     }
 
+    /// Spend one slot of `level` (1st through 9th) from the caster's
+    /// [`crate::rules::creature::SpellSlots`] to take this move.
+    pub fn with_spell_level(mut self, level: u32) -> Self {
+        self.spell_level = Some(level);
+        self
+    }
+
     /// A move that spends nothing is one a hoarding policy will still take.
     pub fn is_free(&self) -> bool {
         matches!(self.uses, Uses::Unlimited)
             && self.cost.is_none()
             && self.spell_slot_level.is_none()
+            && self.spell_level.is_none()
     }
 
     /// Spend this move's spell slot, if it has one, from `caster`'s own
