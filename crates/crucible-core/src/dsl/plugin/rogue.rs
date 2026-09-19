@@ -1,6 +1,8 @@
 //! Rogue class feature plugins.
 
-use crate::rules::creature::{Ability, Condition, Effect, Move, MoveKind, Rider, SpellCastingProfile};
+use crate::rules::creature::{
+    Ability, Condition, Effect, Move, MoveKind, Rider, SpellCastingProfile,
+};
 
 use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
 
