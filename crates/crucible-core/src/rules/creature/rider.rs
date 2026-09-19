@@ -1,7 +1,7 @@
 //! Triggered modifiers and reactions (riders).
 
 use super::damage::{DamageKind, DamageRoll};
-use super::types::{Ability, Condition, Cost, Duration};
+use super::types::{Ability, Condition, Cost, CreatureType, Duration};
 use crate::rules::combat::{Attack, DamageRider, RollMode};
 
 /// What kind of incoming attack a [`Rider::ReactionOnTargeted`] answers.
@@ -118,6 +118,31 @@ pub enum Rider {
     ///
     /// [`SpellCastingProfile`]: super::types::SpellCastingProfile
     CunningStrike { dc: i32 },
+    /// Extra damage dice on a hit against a creature of one specific type -
+    /// gated on the *target's* [`CreatureType`] rather than anything about the
+    /// attack roll itself.
+    ///
+    /// A slaying weapon's bonus against its favoured prey, a paladin's Smite
+    /// against fiends and undead, a ranger's Favored Enemy damage - every
+    /// "extra dice when the target is a `X`" feature is this variant, not a
+    /// branch per weapon or feature. Unlike [`Rider::ConditionalExtraDamage`]
+    /// there is no once-per-turn budget: none of those features are limited
+    /// that way, so every qualifying hit gets the bonus.
+    ///
+    /// `damage_kind` is parsed and validated same as every other damage
+    /// component in this DSL, but - like [`Rider::ConditionalExtraDamage`]'s
+    /// dice, which do not carry the weapon's own damage type either - the
+    /// [`DamageRider`] this contributes has no type of its own to compose with
+    /// `combat::damage_pmf`'s single [`crate::rules::combat::Reduction`]. A
+    /// future type-aware resistance path on the exact/sampled attack model
+    /// would read it from here rather than needing a new field.
+    BonusDamageVsCreatureType {
+        dice_count: u32,
+        dice_sides: u32,
+        bonus: i32,
+        damage_kind: DamageKind,
+        creature_type: CreatureType,
+    },
 }
 
 impl Rider {
@@ -186,6 +211,41 @@ impl Rider {
             _ => None,
         }
     }
+
+    /// The [`DamageRider`] this rider contributes against a target of
+    /// `target_creature_type`, or `None` if this variant is not
+    /// [`Rider::BonusDamageVsCreatureType`] or the target's type does not
+    /// match - including a target with no declared type at all, which can
+    /// never match a specific one.
+    ///
+    /// Takes the type rather than the whole target [`super::combatant::Creature`]
+    /// because the gate only ever needs that one field - the same shape as
+    /// [`Rider::extra_damage_for`] taking the attack's own flags rather than
+    /// the whole [`Attack`]'s owner.
+    ///
+    /// Composes with any other active rider rather than replacing it: this
+    /// and [`Rider::extra_damage_for`] each contribute their own
+    /// [`DamageRider`] to the same [`Attack::damage_riders`] list, so a
+    /// qualifying hit from a rogue wielding a favoured weapon gets both.
+    pub fn bonus_damage_vs_creature_type(
+        &self,
+        target_creature_type: Option<CreatureType>,
+    ) -> Option<DamageRider> {
+        let Rider::BonusDamageVsCreatureType {
+            dice_count,
+            dice_sides,
+            bonus,
+            creature_type,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if target_creature_type != Some(*creature_type) {
+            return None;
+        }
+        Some(DamageRider::new(*dice_count, *dice_sides).with_bonus(*bonus))
+    }
 }
 
 #[cfg(test)]
@@ -199,6 +259,20 @@ mod tests {
             dice_count: 4,
             dice_sides: 6,
             once_per_turn: true,
+        }
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-12
+    }
+
+    fn slaying_rider() -> Rider {
+        Rider::BonusDamageVsCreatureType {
+            dice_count: 3,
+            dice_sides: 6,
+            bonus: 0,
+            damage_kind: DamageKind::Piercing,
+            creature_type: CreatureType::Dragon,
         }
     }
 
@@ -310,6 +384,157 @@ mod tests {
             let exact = damage_pmf(&attack, &defense);
             let (lo, hi) = (exact.min(), exact.max());
             let mut rng = Rng::new(seed as u64 + 1500);
+            let n = 100_000;
+            let mut counts = vec![0usize; (hi - lo + 1) as usize];
+            for _ in 0..n {
+                let d = sample_damage(&mut rng, &attack, &defense);
+                assert!(
+                    d >= lo && d <= hi,
+                    "{name}: sampled {d} outside {lo}..={hi}"
+                );
+                counts[(d - lo) as usize] += 1;
+            }
+            for (i, &c) in counts.iter().enumerate() {
+                let value = lo + i as i32;
+                let want = exact.prob(value);
+                let got = c as f64 / n as f64;
+                let tol = 5.0 * (want * (1.0 - want) / n as f64).sqrt() + 1e-4;
+                assert!(
+                    (got - want).abs() < tol,
+                    "{name}: P(damage = {value}) sampled {got:.5}, exact {want:.5}, tol {tol:.5}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn applies_only_against_a_matching_creature_type() {
+        let got = slaying_rider().bonus_damage_vs_creature_type(Some(CreatureType::Dragon));
+        assert_eq!(got, Some(DamageRider::new(3, 6)));
+    }
+
+    #[test]
+    fn does_not_apply_against_a_different_creature_type() {
+        assert_eq!(
+            slaying_rider().bonus_damage_vs_creature_type(Some(CreatureType::Giant)),
+            None
+        );
+    }
+
+    #[test]
+    fn does_not_apply_against_a_target_with_no_declared_type() {
+        assert_eq!(slaying_rider().bonus_damage_vs_creature_type(None), None);
+    }
+
+    #[test]
+    fn a_non_matching_rider_variant_never_contributes_this_gate() {
+        let sneak = Rider::ConditionalExtraDamage {
+            dice_count: 4,
+            dice_sides: 6,
+            once_per_turn: true,
+        };
+        assert_eq!(
+            sneak.bonus_damage_vs_creature_type(Some(CreatureType::Dragon)),
+            None
+        );
+    }
+
+    /// The acceptance criterion this task turns on: a qualifying hit stacks
+    /// this rider's dice with Sneak Attack's rather than either replacing the
+    /// other, because both riders contribute separately to the same
+    /// `Attack::damage_riders` list.
+    #[test]
+    fn stacks_with_sneak_attack_on_the_same_qualifying_hit() {
+        let sneak = Rider::ConditionalExtraDamage {
+            dice_count: 4,
+            dice_sides: 6,
+            once_per_turn: true,
+        };
+        let attack = Attack::new(7, 1, 4, 3)
+            .with_mode(RollMode::Advantage)
+            .with_finesse_or_ranged(true);
+
+        let sneak_extra = sneak
+            .extra_damage_for(&attack, false)
+            .expect("sneak attack qualifies");
+        let slaying_extra = slaying_rider()
+            .bonus_damage_vs_creature_type(Some(CreatureType::Dragon))
+            .expect("the target is a dragon");
+
+        let neither = attack.clone();
+        let both = attack
+            .clone()
+            .with_damage_rider(sneak_extra)
+            .with_damage_rider(slaying_extra);
+
+        let defense = Defense::new(1, 200); // AC 1: every non-fumble roll hits
+        let mean_neither = damage_pmf(&neither, &defense).mean();
+        let mean_both = damage_pmf(&both, &defense).mean();
+        assert!(
+            mean_both > mean_neither,
+            "both riders' dice should raise the mean damage over neither firing"
+        );
+
+        // Two separate d6 riders (4d6 and 3d6) convolve to exactly the same
+        // distribution as one 7d6 rider - dice of the same size are additive
+        // under convolution, doubling on a crit included - so comparing
+        // against that single merged rider is an exact check that both
+        // riders' dice are present and neither replaced the other.
+        let merged_reference = attack.with_damage_rider(DamageRider::new(4 + 3, 6));
+        let pmf_both = damage_pmf(&both, &defense);
+        let pmf_merged = damage_pmf(&merged_reference, &defense);
+        assert!(close(pmf_both.mean(), pmf_merged.mean()));
+        assert_eq!(pmf_both.min(), pmf_merged.min());
+        assert_eq!(pmf_both.max(), pmf_merged.max());
+
+        // And the max damage is the base plus every die maxed, doubled on a
+        // crit exactly like the base pool - `rider_pmf` handles both riders
+        // identically, so there is nothing special about there being two.
+        let base_crit_max = 2 * 4; // 1d4 base, doubled on a crit
+        let riders_crit_max = 2 * (4 * 6) + 2 * (3 * 6);
+        assert_eq!(
+            pmf_both.max(),
+            base_crit_max + riders_crit_max + 3 /* damage_bonus */
+        );
+    }
+
+    #[test]
+    fn sampled_bonus_vs_creature_type_agrees_with_the_exact_path_alone_and_stacked() {
+        let defense = Defense::new(14, 80);
+        let sneak = Rider::ConditionalExtraDamage {
+            dice_count: 4,
+            dice_sides: 6,
+            once_per_turn: true,
+        };
+        let attack = Attack::new(6, 1, 8, 4)
+            .with_mode(RollMode::Advantage)
+            .with_finesse_or_ranged(true);
+
+        let slaying_extra = slaying_rider()
+            .bonus_damage_vs_creature_type(Some(CreatureType::Dragon))
+            .expect("the target is a dragon");
+        let sneak_extra = sneak
+            .extra_damage_for(&attack, false)
+            .expect("sneak attack qualifies");
+
+        let cases = [
+            (
+                "vs-creature-type rider alone",
+                attack.clone().with_damage_rider(slaying_extra),
+            ),
+            (
+                "stacked with sneak attack",
+                attack
+                    .clone()
+                    .with_damage_rider(slaying_extra)
+                    .with_damage_rider(sneak_extra),
+            ),
+        ];
+
+        for (seed, (name, attack)) in cases.into_iter().enumerate() {
+            let exact = damage_pmf(&attack, &defense);
+            let (lo, hi) = (exact.min(), exact.max());
+            let mut rng = Rng::new(seed as u64 + 1300);
             let n = 100_000;
             let mut counts = vec![0usize; (hi - lo + 1) as usize];
             for _ in 0..n {

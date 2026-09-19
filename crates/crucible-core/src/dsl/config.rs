@@ -211,6 +211,10 @@ mod tests {
         assert_eq!(dragon.legendary_uses, 3);
         assert_eq!(dragon.legendary.len(), 3);
         assert_eq!(dragon.riders.len(), 1);
+        assert_eq!(
+            dragon.creature_type,
+            Some(crate::rules::creature::CreatureType::Dragon)
+        );
     }
 
     #[test]
@@ -223,6 +227,25 @@ mod tests {
         assert_eq!(ogre.hp, 68);
         assert_eq!(ogre.initiative, -1);
         assert_eq!(ogre.actions.len(), 2);
+        assert_eq!(
+            ogre.creature_type,
+            Some(crate::rules::creature::CreatureType::Giant)
+        );
+    }
+
+    #[test]
+    fn an_unknown_creature_type_is_rejected() {
+        let registry = FeatureRegistry::new();
+        let toml = r#"
+            [monster]
+            name = "Mystery"
+            ac = 10
+            hp = 10
+            creature_type = "Beholder-Kin"
+        "#;
+        let err = load_creature_from_str(toml, &registry)
+            .expect_err("an unrecognised creature type must be rejected, not silently dropped");
+        assert!(matches!(err, FeatureError::UnknownCreatureType(_)));
     }
 
     /// `[pc.resources.slots]` mirrors the existing `[pc.resources]`

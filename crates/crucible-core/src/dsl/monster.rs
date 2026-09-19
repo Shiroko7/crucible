@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::dsl::plugin::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
 use crate::rules::combat::Reduction;
-use crate::rules::creature::{Ability, Creature, DamageKind};
+use crate::rules::creature::{Ability, Creature, CreatureType, DamageKind};
 
 /// Structured representation of a Monster / NPC.
 #[derive(Debug, Clone, Deserialize)]
@@ -53,8 +53,13 @@ impl MonsterDefinition {
         let mut builder = CreatureBuilder::new(&self.name, self.ac, self.hp);
         builder.creature.initiative = self.initiative;
         builder.creature.legendary_uses = self.legendary_uses;
-        if let Some(creature_type) = &self.creature_type {
-            builder.set_creature_type(creature_type.clone());
+        // Apply the creature type - gates both a target-type-restricted
+        // spell (Hold Person) and `BonusDamageVsCreatureType` (a slaying
+        // weapon's bonus, a favoured-enemy bonus).
+        if let Some(type_name) = &self.creature_type {
+            let creature_type = CreatureType::parse(type_name)
+                .ok_or_else(|| FeatureError::UnknownCreatureType(type_name.clone()))?;
+            builder.set_creature_type(creature_type);
         }
 
         // Apply saves

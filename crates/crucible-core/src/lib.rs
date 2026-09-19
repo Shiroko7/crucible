@@ -36,8 +36,8 @@ pub use combat::{
     DamageRider, Defense, Landed, Outcomes, Reduction, RollMode, SaveModifier,
 };
 pub use creature::{
-    Ability, AttackTrigger, Condition, Cost, Creature, DamageKind, DamageRoll, Duration, Effect,
-    HealRoll, Move, Resource, Rider, SaveEffect, Strike, Uses,
+    Ability, AttackTrigger, Condition, Cost, Creature, CreatureType, DamageKind, DamageRoll,
+    Duration, Effect, HealRoll, Move, Resource, Rider, SaveEffect, Strike, Uses,
 };
 pub use dice::Pmf;
 pub use duel::{run, Outcome, Policy, Side};

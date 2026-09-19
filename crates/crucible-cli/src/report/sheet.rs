@@ -200,5 +200,16 @@ pub fn describe_trait(rider: &Rider) -> String {
         Rider::CunningStrike { dc } => {
             format!("cunning strike: spend sneak attack dice dc {dc}")
         }
+        Rider::BonusDamageVsCreatureType {
+            dice_count,
+            dice_sides,
+            bonus,
+            damage_kind,
+            creature_type,
+        } => format!(
+            "+{dice_count}d{dice_sides}{bonus:+} {} vs {}",
+            damage_kind.name(),
+            creature_type.name()
+        ),
     }
 }

@@ -13,7 +13,8 @@ pub use combatant::Creature;
 pub use damage::{DamageKind, DamageRoll};
 pub use rider::{AttackTrigger, Rider};
 pub use types::{
-    Ability, Condition, Cost, Duration, Resource, SpellCastingProfile, SpellSlots, SPELL_LEVELS,
+    Ability, Condition, Cost, CreatureType, Duration, Resource, SpellCastingProfile, SpellSlots,
+    SPELL_LEVELS,
 };
 
 #[cfg(test)]
@@ -384,5 +385,38 @@ mod tests {
         assert_eq!(Condition::parse("paralysed"), Some(Condition::Paralyzed));
         assert_eq!(Condition::parse("steady aim"), Some(Condition::SteadyAim));
         assert_eq!(Condition::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn creature_type_names_round_trip_through_parse() {
+        for t in [
+            CreatureType::Aberration,
+            CreatureType::Beast,
+            CreatureType::Celestial,
+            CreatureType::Construct,
+            CreatureType::Dragon,
+            CreatureType::Elemental,
+            CreatureType::Fey,
+            CreatureType::Fiend,
+            CreatureType::Giant,
+            CreatureType::Humanoid,
+            CreatureType::Monstrosity,
+            CreatureType::Ooze,
+            CreatureType::Plant,
+            CreatureType::Undead,
+        ] {
+            assert_eq!(CreatureType::parse(t.name()), Some(t));
+        }
+        assert_eq!(CreatureType::parse("Dragon"), Some(CreatureType::Dragon));
+        assert_eq!(CreatureType::parse("nonsense"), None);
+    }
+
+    /// A creature with no declared type gates out every
+    /// `BonusDamageVsCreatureType` rider, which is what a plain SRD monster
+    /// with no `creature_type` line should do.
+    #[test]
+    fn a_creature_with_no_declared_type_never_matches_a_creature_type_gate() {
+        let plain = dummy(15);
+        assert_eq!(plain.creature_type, None);
     }
 }

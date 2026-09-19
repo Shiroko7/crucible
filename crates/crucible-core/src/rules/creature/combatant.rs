@@ -5,7 +5,7 @@ use crate::rules::combat::Reduction;
 use super::action::Move;
 use super::damage::DamageKind;
 use super::rider::Rider;
-use super::types::{Ability, Resource, SpellCastingProfile, SpellSlots};
+use super::types::{Ability, CreatureType, Resource, SpellCastingProfile, SpellSlots};
 
 /// One side of a fight.
 ///
@@ -23,11 +23,14 @@ pub struct Creature {
     pub count: u32,
     pub ac: i32,
     pub hp: i32,
-    /// The statblock's type line - "Humanoid", "Dragon", "Giant" - used only
-    /// to gate spells whose targeting rules name a creature type (Hold
-    /// Person, Charm Person). `None` for anything that never stated one:
-    /// every player character, and any monster whose config omitted it.
-    pub creature_type: Option<String>,
+    /// The statblock's type line - Dragon, Giant, Undead - or `None` for
+    /// anything that never stated one: every player character, and any
+    /// monster whose config omitted it. Gates both spells whose targeting
+    /// rules name a creature type (Hold Person, Charm Person; see
+    /// [`Creature::is_creature_type`]) and
+    /// [`Rider::BonusDamageVsCreatureType`] - a target with no declared type
+    /// never matches either.
+    pub creature_type: Option<CreatureType>,
     pub initiative: i32,
     pub saves: [i32; 6],
     pub reductions: Vec<(DamageKind, Reduction)>,
@@ -108,8 +111,8 @@ impl Creature {
     /// something else, not off ones nobody labelled - every PC in this
     /// simulator, and a monster whose config simply left the field out.
     pub fn is_creature_type(&self, type_name: &str) -> bool {
-        match &self.creature_type {
-            Some(t) => t.eq_ignore_ascii_case(type_name),
+        match self.creature_type {
+            Some(t) => CreatureType::parse(type_name) == Some(t),
             None => true,
         }
     }
@@ -172,6 +175,11 @@ impl Creature {
     /// at `floor`.
     pub fn with_reliable_talent_floor(mut self, floor: i32) -> Self {
         self.reliable_talent_floor = Some(floor);
+        self
+    }
+
+    pub fn with_creature_type(mut self, creature_type: CreatureType) -> Self {
+        self.creature_type = Some(creature_type);
         self
     }
 }

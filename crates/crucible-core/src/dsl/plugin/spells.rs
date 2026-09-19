@@ -606,8 +606,8 @@ mod tests {
     use crate::prob::rng::Rng;
     use crate::rules::combat::Reduction;
     use crate::rules::creature::{
-        apply_healing, is_down, Ability, Creature, DamageKind, DamageRoll, SpellCastingProfile,
-        Strike, Uses,
+        apply_healing, is_down, Ability, Creature, CreatureType, DamageKind, DamageRoll,
+        SpellCastingProfile, Strike, Uses,
     };
     use crate::sim::duel::{run, run_teams, Budget, Policy};
 
@@ -953,7 +953,7 @@ mod tests {
         };
 
         let mut target = Creature::new("Guard", 12, 11);
-        target.creature_type = Some("Humanoid".to_string());
+        target.creature_type = Some(CreatureType::Humanoid);
         target.saves[Ability::Wis.index()] = 1;
 
         let exact = save.failure_chance(&target);
@@ -994,7 +994,7 @@ mod tests {
         ));
 
         let mut victim = Creature::new("Bandit", 10, 20);
-        victim.creature_type = Some("Humanoid".to_string());
+        victim.creature_type = Some(CreatureType::Humanoid);
         victim.saves[Ability::Wis.index()] = -50; // fails every Wisdom save, unconditionally
         victim.initiative = -100;
 
@@ -1030,7 +1030,7 @@ mod tests {
         caster.initiative = 100;
 
         let mut dragon = Creature::new("Wyrmling", 17, 60);
-        dragon.creature_type = Some("Dragon".to_string());
+        dragon.creature_type = Some(CreatureType::Dragon);
         dragon.saves[Ability::Wis.index()] = -50; // would always fail, if it were even caught
         dragon.initiative = -100;
 
@@ -1069,7 +1069,7 @@ mod tests {
         caster.initiative = 100;
 
         let mut victim = Creature::new("Bandit", 10, 20);
-        victim.creature_type = Some("Humanoid".to_string());
+        victim.creature_type = Some(CreatureType::Humanoid);
         victim.saves[Ability::Wis.index()] = -50;
         victim.initiative = -100;
 
@@ -1108,7 +1108,7 @@ mod tests {
                 caster.initiative = 100;
 
                 let mut victim = Creature::new("Bandit", 10, 20);
-                victim.creature_type = Some("Humanoid".to_string());
+                victim.creature_type = Some(CreatureType::Humanoid);
                 victim.saves[Ability::Wis.index()] = save_bonus;
                 victim.initiative = -100;
 
@@ -1158,7 +1158,7 @@ mod tests {
 
         fn victim() -> Creature {
             let mut v = Creature::new("Bandit", 10, 20);
-            v.creature_type = Some("Humanoid".to_string());
+            v.creature_type = Some(CreatureType::Humanoid);
             v.team = 1;
             v.initiative = -50;
             v.saves[Ability::Wis.index()] = -50; // never saves on its own
@@ -1193,7 +1193,7 @@ mod tests {
                     count: 1,
                 },
             ));
-            ally.creature_type = Some("Beast".to_string());
+            ally.creature_type = Some(CreatureType::Beast);
             ally.team = 1;
             ally.initiative = 50; // after the caster, before the victim
 
