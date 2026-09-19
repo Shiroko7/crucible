@@ -52,6 +52,16 @@
 //! - **Upcasting.** Every spell here is implemented at its base cast only;
 //!   scaling with a higher slot is skipped.
 //!
+//! Concentration spell plugins whose mechanism is an ongoing attack-roll and
+//! saving-throw modifier rather than a condition - Bless and Bane. Neither
+//! registers anything new: [`AttackModifier::BonusDice`] /
+//! [`AttackModifier::PenaltyDice`] and their [`SaveModifier`] siblings
+//! already exist for exactly this (see `rules::combat`'s module docs), and
+//! `sim::duel` already knows how to apply them for the duration of a
+//! concentration spell and strip them when concentration ends - see
+//! [`Effect::Buff`] and [`Effect::SaveOrModifier`]. This module only builds
+//! the two [`Move`]s that reach for that mechanism.
+//!
 //! Hold Person (SRD 5.2, 2024 rules): a 2nd-level spell that paralyzes a
 //! humanoid who fails a Wisdom saving throw, for as long as the caster keeps
 //! concentrating (up to 1 minute), repeating the save at the end of the
@@ -80,6 +90,7 @@
 //! reasons as the healing spells above: range/positioning is out of scope,
 //! and upcasting (catching more than one humanoid) is skipped.
 
+use crate::rules::combat::{AttackModifier, SaveModifier};
 use crate::rules::creature::{
     Ability, Condition, Cost, DamageKind, DamageRoll, Duration, Effect, HealRoll, Move, SaveEffect,
 };
@@ -364,6 +375,44 @@ impl FeaturePlugin for BlindnessDeafnessPlugin {
     }
 }
 
+/// Bless (1st level, concentration, up to 1 minute): up to three creatures -
+/// the caster included - each add `1d4` to every attack roll and every
+/// saving throw they make for the duration, their own concentration save
+/// among them. That last part is correct 5e text, not a bug: Bless can help
+/// a blessed caster hold their own concentration, and nothing here has to
+/// special-case "the target of the buff is also the one rolling the save"
+/// for that to happen - `sim::duel` resolves every saving throw a fighter
+/// makes through the same modifier list, its own concentration check
+/// included.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BlessPlugin;
+
+impl FeaturePlugin for BlessPlugin {
+    fn id(&self) -> &'static str {
+        "bless"
+    }
+
+    fn name(&self) -> &str {
+        "Bless"
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        builder.add_action(
+            Move::new(
+                "Bless",
+                Effect::Buff {
+                    attack_modifier: AttackModifier::BonusDice { count: 1, sides: 4 },
+                    save_modifier: SaveModifier::BonusDice { count: 1, sides: 4 },
+                    max_targets: Some(3),
+                },
+            )
+            .with_concentration()
+            .with_spell_level(1),
+        );
+        Ok(())
+    }
+}
+
 // --- Command -------------------------------------------------------------
 
 /// A one-word command Command can cast. The SRD lists five (Approach, Drop,
@@ -508,6 +557,44 @@ impl FeaturePlugin for MagicMissilePlugin {
             mv = mv.with_cost(cost);
         }
         builder.add_action(mv);
+        Ok(())
+    }
+}
+
+// --- Bane -------------------------------------------------------------
+
+/// Bane (1st level, concentration, up to 1 minute): up to three creatures
+/// each make a Charisma save against the caster's own spell save DC - read
+/// from [`crate::rules::creature::SpellCastingProfile`] at the moment the
+/// spell resolves, never a fixed number baked in here - or subtract `1d4`
+/// from every attack roll and every saving throw they make for the
+/// duration.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BanePlugin;
+
+impl FeaturePlugin for BanePlugin {
+    fn id(&self) -> &'static str {
+        "bane"
+    }
+
+    fn name(&self) -> &str {
+        "Bane"
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        builder.add_action(
+            Move::new(
+                "Bane",
+                Effect::SaveOrModifier {
+                    ability: Ability::Cha,
+                    attack_modifier: AttackModifier::PenaltyDice { count: 1, sides: 4 },
+                    save_modifier: SaveModifier::PenaltyDice { count: 1, sides: 4 },
+                    max_targets: Some(3),
+                },
+            )
+            .with_concentration()
+            .with_spell_level(1),
+        );
         Ok(())
     }
 }
@@ -1529,5 +1616,52 @@ mod tests {
                     .sum()
             });
         }
+    }
+
+    #[test]
+    fn bless_registers_a_concentration_action_with_bonus_dice_on_attacks_and_saves() {
+        let builder = CreatureBuilder::new("Cleric", 15, 30);
+        let built = builder
+            .apply_feature(&BlessPlugin)
+            .expect("bless applies")
+            .build()
+            .expect("builds");
+        assert_eq!(built.actions.len(), 1);
+        let m = &built.actions[0];
+        assert_eq!(m.name, "Bless");
+        assert!(m.concentration, "Bless requires concentration");
+        assert_eq!(m.spell_level, Some(1), "Bless spends a 1st-level slot");
+        assert_eq!(
+            m.effect,
+            Effect::Buff {
+                attack_modifier: AttackModifier::BonusDice { count: 1, sides: 4 },
+                save_modifier: SaveModifier::BonusDice { count: 1, sides: 4 },
+                max_targets: Some(3),
+            }
+        );
+    }
+
+    #[test]
+    fn bane_registers_a_concentration_action_gated_on_a_charisma_save() {
+        let builder = CreatureBuilder::new("Warlock", 15, 30);
+        let built = builder
+            .apply_feature(&BanePlugin)
+            .expect("bane applies")
+            .build()
+            .expect("builds");
+        assert_eq!(built.actions.len(), 1);
+        let m = &built.actions[0];
+        assert_eq!(m.name, "Bane");
+        assert!(m.concentration, "Bane requires concentration");
+        assert_eq!(m.spell_level, Some(1), "Bane spends a 1st-level slot");
+        assert_eq!(
+            m.effect,
+            Effect::SaveOrModifier {
+                ability: Ability::Cha,
+                attack_modifier: AttackModifier::PenaltyDice { count: 1, sides: 4 },
+                save_modifier: SaveModifier::PenaltyDice { count: 1, sides: 4 },
+                max_targets: Some(3),
+            }
+        );
     }
 }

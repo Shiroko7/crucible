@@ -137,6 +137,12 @@ impl FeatureRegistry {
             let cost = parse_spell_cost(val);
             Ok(Box::new(MagicMissilePlugin::new(cost)))
         });
+
+        // Bless (SRD 5.2, 1st level concentration)
+        self.register("bless", |_val| Ok(Box::new(BlessPlugin)));
+
+        // Bane (SRD 5.2, 1st level concentration)
+        self.register("bane", |_val| Ok(Box::new(BanePlugin)));
     }
 }
 

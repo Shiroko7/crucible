@@ -4,7 +4,7 @@ use crate::prob::dice::Pmf;
 use crate::prob::rng::Rng;
 use crate::rules::combat::{
     hit_outcomes_with, hit_outcomes_with_reaction, sample_hit_with, sample_hit_with_reaction,
-    AttackModifier, Landed, RollMode,
+    AttackModifier, Landed, RollMode, SaveModifier,
 };
 
 use super::combatant::Creature;
@@ -173,12 +173,15 @@ impl Strike {
     /// actually fired alongside the damage and how the attack landed, so the
     /// caller - `sim::duel`, which owns the per-round budget - can debit it
     /// only when it does.
+    #[allow(clippy::too_many_arguments)]
     pub fn sample_forcing_crit_with_reaction(
         &self,
         rng: &mut Rng,
         target: &Creature,
         mode: RollMode,
         force_crit: bool,
+        modifiers: &[AttackModifier],
+        extra_damage: &[DamageRoll],
         ac_bonus: i32,
         reaction_available: bool,
     ) -> (i32, Landed, bool) {
@@ -187,7 +190,7 @@ impl Strike {
             self.to_hit,
             mode,
             target.ac,
-            &[],
+            modifiers,
             ac_bonus,
             reaction_available,
         );
@@ -204,6 +207,7 @@ impl Strike {
         let total = self
             .damage
             .iter()
+            .chain(extra_damage)
             .map(|roll| roll.sample(rng, crit, target.reduction(roll.kind)))
             .sum();
         (total, landed, consumed)
@@ -480,6 +484,39 @@ pub enum Effect {
     /// Several effects in one move. A Multiattack of two claws and a bite, or
     /// a monk replacing one of its attacks with a breath weapon.
     Sequence(Vec<Effect>),
+    /// An unconditional buff to some of the user's own side: each of up to
+    /// `max_targets` allies - the user included - gains `attack_modifier` on
+    /// its attack rolls and `save_modifier` on its saving throws, including
+    /// its own concentration save - correct 5e behaviour for Bless, not a
+    /// bug, since `sim::duel` resolves every saving throw a fighter makes
+    /// through the same modifier list. Lasts until this move's concentration
+    /// ends, so a move using this should also set [`Move::concentration`].
+    ///
+    /// Bless is `Buff { attack_modifier: BonusDice(1d4), save_modifier:
+    /// BonusDice(1d4), max_targets: Some(3) }`.
+    Buff {
+        attack_modifier: AttackModifier,
+        save_modifier: SaveModifier,
+        max_targets: Option<u32>,
+    },
+    /// Up to `max_targets` of the opposing side each make an `ability` save
+    /// against the caster's own spell save DC (read from
+    /// [`crate::rules::creature::SpellCastingProfile`] at the moment this
+    /// resolves rather than a number carried on the move, so this can never
+    /// drift into a second, stale copy of what that profile already
+    /// computes) or take `attack_modifier` on attack rolls and
+    /// `save_modifier` on saving throws for the duration. As with
+    /// [`Effect::Buff`], the move should set [`Move::concentration`].
+    ///
+    /// Bane is `SaveOrModifier { ability: Cha, attack_modifier:
+    /// PenaltyDice(1d4), save_modifier: PenaltyDice(1d4), max_targets:
+    /// Some(3) }`.
+    SaveOrModifier {
+        ability: Ability,
+        attack_modifier: AttackModifier,
+        save_modifier: SaveModifier,
+        max_targets: Option<u32>,
+    },
 }
 
 impl Effect {
@@ -492,10 +529,13 @@ impl Effect {
         match self {
             Effect::Strikes { strike, count } => strike.mean_damage(target) * f64::from(*count),
             Effect::Save(save) => save.damage_pmf(target).mean(),
-            Effect::Stance { .. } => 0.0,
             // Heals nothing, damages nothing: it has its own accounting.
             Effect::Heal(_) => 0.0,
             Effect::AutoHit { .. } => self.damage_pmf(target).mean(),
+            // None of these deal damage - a Stance changes footing, Buff/
+            // SaveOrModifier alter attack rolls and saves rather than
+            // dealing damage themselves.
+            Effect::Stance { .. } | Effect::Buff { .. } | Effect::SaveOrModifier { .. } => 0.0,
             Effect::Sequence(parts) => parts.iter().map(|p| p.mean_damage(target)).sum(),
         }
     }
@@ -512,11 +552,13 @@ impl Effect {
                 acc
             }
             Effect::Save(save) => save.damage_pmf(target),
-            Effect::Stance { .. } => Pmf::constant(0),
             Effect::Heal(_) => Pmf::constant(0),
             Effect::AutoHit { damage } => damage.iter().fold(Pmf::constant(0), |acc, roll| {
                 acc.convolve(&roll.pmf(false, target.reduction(roll.kind)))
             }),
+            Effect::Stance { .. } | Effect::Buff { .. } | Effect::SaveOrModifier { .. } => {
+                Pmf::constant(0)
+            }
             Effect::Sequence(parts) => parts.iter().fold(Pmf::constant(0), |acc, p| {
                 acc.convolve(&p.damage_pmf(target))
             }),
@@ -613,6 +655,14 @@ pub struct Move {
     /// Irrelevant to how the move actually resolves - only which list it
     /// ends up in.
     pub kind: MoveKind,
+    /// The spell slot level this move spends, if any - 1st through 9th.
+    /// Distinct from `cost`: a slot is drawn from the caster's
+    /// [`crate::rules::creature::SpellSlots`], nine independent counters,
+    /// never a named [`crate::rules::creature::Resource`] pool, so a move
+    /// can spend both a slot and a resource without either accounting
+    /// system needing to know about the other. `None` for anything that is
+    /// not a spell.
+    pub spell_level: Option<u32>,
 }
 
 impl Move {
@@ -626,6 +676,7 @@ impl Move {
             effect,
             concentration: false,
             kind: MoveKind::Standard,
+            spell_level: None,
         }
     }
 
@@ -661,11 +712,19 @@ impl Move {
         self
     }
 
+    /// Spend one slot of `level` (1st through 9th) from the caster's
+    /// [`crate::rules::creature::SpellSlots`] to use this move.
+    pub fn with_spell_level(mut self, level: u32) -> Self {
+        self.spell_level = Some(level);
+        self
+    }
+
     /// A move that spends nothing is one a hoarding policy will still take.
     pub fn is_free(&self) -> bool {
         matches!(self.uses, Uses::Unlimited)
             && self.cost.is_none()
             && self.spell_slot_level.is_none()
+            && self.spell_level.is_none()
     }
 
     /// Spend this move's spell slot, if it has one, from `caster`'s own
