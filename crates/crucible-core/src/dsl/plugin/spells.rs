@@ -213,13 +213,13 @@ impl FeaturePlugin for HoldPersonPlugin {
                 dc,
                 damage: Vec::new(),
                 half_on_success: false,
-                on_failure: Some((
+                on_failure: vec![(
                     Condition::Paralyzed,
                     Duration::SaveEndTurn {
                         ability: Ability::Wis,
                         dc,
                     },
-                )),
+                )],
                 max_targets: Some(MAX_TARGETS),
                 requires_type: Some(TARGET_TYPE.to_string()),
             }),
@@ -353,6 +353,7 @@ impl FeaturePlugin for BlindnessDeafnessPlugin {
                     },
                 )],
                 max_targets: Some(1),
+                requires_type: None,
             }),
         );
         if let Some(cost) = cost {
@@ -462,6 +463,7 @@ impl FeaturePlugin for CommandPlugin {
                 half_on_success: false,
                 on_failure: self.word.on_failure(),
                 max_targets: Some(1),
+                requires_type: None,
             }),
         );
         if let Some(cost) = cost {
@@ -808,13 +810,13 @@ mod tests {
                 assert_eq!(save.requires_type.as_deref(), Some("Humanoid"));
                 assert_eq!(
                     save.on_failure,
-                    Some((
+                    vec![(
                         Condition::Paralyzed,
                         Duration::SaveEndTurn {
                             ability: Ability::Wis,
                             dc: 14,
                         },
-                    ))
+                    )]
                 );
             }
             other => panic!("expected a Save effect, got {other:?}"),
