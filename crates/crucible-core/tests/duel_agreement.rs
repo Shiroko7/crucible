@@ -133,7 +133,7 @@ fn a_saving_throw_samples_like_its_exact_distribution() {
         dc,
         damage: vec![DamageRoll::new(17, 6, 0, DamageKind::Fire)],
         half_on_success: half,
-        on_failure: None,
+        on_failure: vec![],
         max_targets: None,
         requires_type: None,
     };
@@ -185,7 +185,7 @@ fn evasion_and_resistance_together_sample_like_the_exact_shape() {
         dc: 21,
         damage: vec![DamageRoll::new(17, 6, 0, DamageKind::Fire)],
         half_on_success: true,
-        on_failure: None,
+        on_failure: vec![],
         max_targets: None,
         requires_type: None,
     };

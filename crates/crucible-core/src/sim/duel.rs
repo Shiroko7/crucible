@@ -315,6 +315,19 @@ impl<'a> Fighter<'a> {
         self.has(Condition::incapacitated)
     }
 
+    /// Loses its turn entirely - what `turn` checks before letting a
+    /// creature act.
+    ///
+    /// Incapacitated (Stunned, Paralyzed) is one way to lose a turn.
+    /// [`Condition::Compelled`] (Command) is a deliberately separate second
+    /// one: it steals the same turn without any of Incapacitated's other
+    /// side effects, which is exactly why `legendary` below keeps checking
+    /// `incapacitated()` alone rather than this - Command must never cost a
+    /// legendary action, only the compelled creature's own turn.
+    fn loses_turn(&self) -> bool {
+        self.incapacitated() || self.has(|c| matches!(c, Condition::Compelled))
+    }
+
     /// Is this creature willing to spend a finite resource right now?
     ///
     /// One predicate for both hoarding policies, which differ only in when they
@@ -735,7 +748,7 @@ impl<'a> Fight<'a> {
         // legendary actions come back then too.
         refresh(&mut self.fighters[me], rng);
 
-        if self.fighters[me].incapacitated() {
+        if self.fighters[me].loses_turn() {
             if let Some(l) = log.as_mut() {
                 let names: Vec<&str> = self.fighters[me]
                     .conditions
@@ -1228,9 +1241,11 @@ impl<'a> Fight<'a> {
                     let dealt = save.sample_known(rng, against, saved, evasion);
                     self.fighters[me].dealt += i64::from(dealt);
                     self.apply_damage(rng, i, dealt);
-                    if let (false, Some((condition, duration))) = (saved, save.on_failure) {
-                        self.apply_condition(i, condition, expiry(me, i, duration));
-                        landed_conditions.push((i, condition));
+                    if !saved {
+                        for &(condition, duration) in &save.on_failure {
+                            self.apply_condition(i, condition, expiry(me, i, duration));
+                            landed_conditions.push((i, condition));
+                        }
                     }
                     if record {
                         let how = match (saved, resisted) {
@@ -1238,9 +1253,12 @@ impl<'a> Fight<'a> {
                             (true, false) => "saved",
                             _ => "failed",
                         };
-                        let extra = match (saved, save.on_failure) {
-                            (false, Some((condition, _))) => format!(" and {}", condition.name()),
-                            _ => String::new(),
+                        let extra = if !saved && !save.on_failure.is_empty() {
+                            let names: Vec<&str> =
+                                save.on_failure.iter().map(|&(c, _)| c.name()).collect();
+                            format!(" and {}", names.join(" and "))
+                        } else {
+                            String::new()
                         };
                         notes.push(format!(
                             "{} {how} for {dealt}{extra}",
@@ -1275,6 +1293,28 @@ impl<'a> Fight<'a> {
                     } else {
                         format!("heals {healed}")
                     });
+                }
+            }
+            Effect::AutoHit { damage } => {
+                // No attack roll and no save: every dart just lands.
+                // Retargeting on a mid-resolution kill mirrors `Strikes` -
+                // Magic Missile's darts do not stop because an earlier one
+                // dropped the target.
+                let mut current_target = target;
+                for roll in damage {
+                    if !self.fighters[current_target].alive() {
+                        let Some(new_target) = self.pick_target(me) else {
+                            break;
+                        };
+                        current_target = new_target;
+                    }
+                    let against = self.fighters[current_target].creature;
+                    let dealt = roll.sample(rng, false, against.reduction(roll.kind));
+                    self.fighters[me].dealt += i64::from(dealt);
+                    self.fighters[current_target].hp -= dealt;
+                    if record {
+                        notes.push(dealt.to_string());
+                    }
                 }
             }
             Effect::Sequence(parts) => {
@@ -2262,7 +2302,7 @@ mod tests {
                 dc: 30,
                 damage: vec![DamageRoll::new(0, 6, 60, DamageKind::Fire)],
                 half_on_success: false,
-                on_failure: None,
+                on_failure: vec![],
                 max_targets: None,
                 requires_type: None,
             }),
@@ -2497,7 +2537,7 @@ mod tests {
                 dc: 99,
                 damage: vec![DamageRoll::new(0, 6, 10, DamageKind::Fire)],
                 half_on_success: true,
-                on_failure: None,
+                on_failure: vec![],
                 max_targets: None,
                 requires_type: None,
             }),
@@ -2783,7 +2823,7 @@ mod tests {
                     dc: 99, // never saved
                     damage: vec![],
                     half_on_success: false,
-                    on_failure: Some((condition, Duration::ApplierTurn)),
+                    on_failure: vec![(condition, Duration::ApplierTurn)],
                     max_targets: None,
                     requires_type: None,
                 }),

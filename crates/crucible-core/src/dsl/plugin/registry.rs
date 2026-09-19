@@ -4,10 +4,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::rogue::*;
-use super::spells::{CureWoundsPlugin, HealingWordPlugin, HoldPersonPlugin};
+use super::spells::*;
 use super::standard::*;
 use super::traits::{FeatureError, FeaturePlugin, FeatureResult};
 use crate::rules::creature::Ability;
+
+/// Read a spell plugin's optional `resource` (a pool name) and `cost` (an
+/// amount, default 1) TOML params into a [`SpellCost`].
+///
+/// Shared by every spell factory below so "how it's paid for" stays a
+/// declared parameter rather than a name a plugin invents itself: a caster's
+/// TOML names whichever pool it already declared under `[*.resources]` -
+/// a real slot pool or a wand's own charges - and leaving `resource` off
+/// entirely makes the cast free.
+fn parse_spell_cost(val: &toml::Value) -> Option<SpellCost> {
+    let resource = val.get("resource").and_then(|v| v.as_str())?;
+    let amount = val.get("cost").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+    Some(SpellCost::new(resource, amount))
+}
 
 pub type PluginFactory =
     Arc<dyn Fn(&toml::Value) -> FeatureResult<Box<dyn FeaturePlugin>> + Send + Sync>;
@@ -100,6 +114,29 @@ impl FeatureRegistry {
 
         // Hold Person
         self.register("hold_person", |_val| Ok(Box::new(HoldPersonPlugin::new())));
+
+        // Blindness/Deafness (SRD 5.2, 2nd level)
+        self.register("blindness_deafness", |val| {
+            let deafen = val.get("deafen").and_then(|v| v.as_bool()).unwrap_or(false);
+            let cost = parse_spell_cost(val);
+            Ok(Box::new(BlindnessDeafnessPlugin::new(deafen, cost)))
+        });
+
+        // Command (SRD 5.2, 1st level)
+        self.register("command", |val| {
+            let word_str = val.get("word").and_then(|v| v.as_str()).unwrap_or("grovel");
+            let word = CommandWord::parse(word_str).ok_or_else(|| {
+                FeatureError::InvalidConfiguration(format!("unknown command word '{word_str}'"))
+            })?;
+            let cost = parse_spell_cost(val);
+            Ok(Box::new(CommandPlugin::new(word, cost)))
+        });
+
+        // Magic Missile (SRD 5.2, 1st level)
+        self.register("magic_missile", |val| {
+            let cost = parse_spell_cost(val);
+            Ok(Box::new(MagicMissilePlugin::new(cost)))
+        });
     }
 }
 
@@ -145,6 +182,81 @@ mod tests {
         let params: toml::Value = toml::from_str("plugin = \"sneak_attack\"").unwrap();
         assert!(matches!(
             registry.build_plugin("sneak_attack", &params),
+            Err(FeatureError::InvalidConfiguration(_))
+        ));
+    }
+
+    use crate::dsl::plugin::CreatureBuilder;
+    use crate::rules::creature::{Ability, Condition, Duration, Effect, SpellCastingProfile};
+
+    fn spellcaster() -> CreatureBuilder {
+        let mut builder = CreatureBuilder::new("Wizard", 12, 30);
+        builder.set_spellcasting(SpellCastingProfile::new(Ability::Int, 4, 3));
+        builder
+    }
+
+    #[test]
+    fn magic_missile_builds_from_toml_and_spends_a_named_pool() {
+        let registry = FeatureRegistry::new();
+        let mut builder = spellcaster();
+        builder.ensure_resource("spell_slots_1", 4);
+
+        let params: toml::Value =
+            toml::from_str("plugin = \"magic_missile\"\nresource = \"spell_slots_1\"").unwrap();
+        let plugin = registry
+            .build_plugin("magic_missile", &params)
+            .expect("magic_missile builds from toml");
+        assert_eq!(plugin.id(), "magic_missile");
+        plugin.apply(&mut builder).unwrap();
+
+        let cost = builder.creature.actions[0].cost.expect("cost resolved");
+        assert_eq!(
+            builder.creature.resources[cost.resource].name,
+            "spell_slots_1"
+        );
+        assert_eq!(cost.amount, 1);
+    }
+
+    #[test]
+    fn blindness_deafness_builds_from_toml_with_a_choice_of_condition() {
+        let registry = FeatureRegistry::new();
+        let mut builder = spellcaster();
+
+        let params: toml::Value =
+            toml::from_str("plugin = \"blindness_deafness\"\ndeafen = true").unwrap();
+        let plugin = registry
+            .build_plugin("blindness_deafness", &params)
+            .expect("blindness_deafness builds from toml");
+        plugin.apply(&mut builder).unwrap();
+
+        let Effect::Save(save) = &builder.creature.actions[0].effect else {
+            panic!("expected a Save effect");
+        };
+        assert_eq!(save.on_failure[0].0, Condition::Deafened);
+    }
+
+    #[test]
+    fn command_builds_from_toml_and_rejects_an_unknown_word() {
+        let registry = FeatureRegistry::new();
+        let mut builder = spellcaster();
+
+        let params: toml::Value = toml::from_str("plugin = \"command\"\nword = \"halt\"").unwrap();
+        let plugin = registry
+            .build_plugin("command", &params)
+            .expect("command builds from toml");
+        plugin.apply(&mut builder).unwrap();
+        let Effect::Save(save) = &builder.creature.actions[0].effect else {
+            panic!("expected a Save effect");
+        };
+        assert_eq!(
+            save.on_failure,
+            vec![(Condition::Compelled, Duration::ApplierTurn)]
+        );
+
+        let bad_params: toml::Value =
+            toml::from_str("plugin = \"command\"\nword = \"flee\"").unwrap();
+        assert!(matches!(
+            registry.build_plugin("command", &bad_params),
             Err(FeatureError::InvalidConfiguration(_))
         ));
     }

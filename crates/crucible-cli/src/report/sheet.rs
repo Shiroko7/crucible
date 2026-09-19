@@ -136,6 +136,7 @@ pub fn body(effect: &Effect) -> String {
         ),
         Effect::Stance { condition } => condition.name().to_string(),
         Effect::Heal(roll) => format!("heal {}d{}{:+}", roll.count, roll.sides, roll.bonus),
+        Effect::AutoHit { damage } => format!("{}x auto-hit", damage.len()),
         Effect::Sequence(parts) => parts.iter().map(body).collect::<Vec<_>>().join(" + "),
     }
 }

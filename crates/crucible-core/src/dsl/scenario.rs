@@ -401,7 +401,7 @@ fn parse_body<'a>(
     let mut save: Option<(Ability, i32)> = None;
     let mut half_on_success = false;
     let mut stance: Option<Condition> = None;
-    let mut on_failure: Option<(Condition, Duration)> = None;
+    let mut on_failure: Vec<(Condition, Duration)> = Vec::new();
     let mut max_targets: Option<u32> = None;
     let mut damage: Vec<DamageRoll> = Vec::new();
     let mut out = Body::default();
@@ -429,7 +429,7 @@ fn parse_body<'a>(
                 );
             }
             "on" if arg(&words, 1, clause)?.eq_ignore_ascii_case("fail") => {
-                on_failure = Some(parse_on_fail(&words, clause)?);
+                on_failure.push(parse_on_fail(&words, clause)?);
             }
             "on" => out.riders.push(parse_on_hit(&words, clause, owner)?),
             "save" => {
