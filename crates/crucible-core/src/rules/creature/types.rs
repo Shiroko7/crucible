@@ -89,6 +89,16 @@ pub enum Condition {
     /// take away legendary actions, since Command's text only ever reaches
     /// the target's own next turn.
     Compelled,
+    /// Steady Aim (2024 Rogue 2): advantage on the creature's own attack
+    /// rolls, and its speed drops to 0, both for the rest of the turn.
+    ///
+    /// The advantage half is [`Condition::advantage_on_attacks`], the mirror
+    /// of [`Condition::disadvantage_on_attacks`] that nothing needed until
+    /// now. The speed half is [`Condition::zeroes_speed`] - there is no
+    /// movement model here to apply it against (see `DESIGN.md`'s
+    /// "Positioning is the gap that matters"), so it is exposed generically
+    /// rather than acted on, ready for whenever one exists.
+    SteadyAim,
 }
 
 impl Condition {
@@ -102,6 +112,7 @@ impl Condition {
             "paralyzed" | "paralysed" => Self::Paralyzed,
             "deafened" | "deafen" => Self::Deafened,
             "compelled" | "compel" => Self::Compelled,
+            "steady_aim" | "steady aim" => Self::SteadyAim,
             _ => return None,
         })
     }
@@ -116,6 +127,7 @@ impl Condition {
             Self::Paralyzed => "paralyzed",
             Self::Deafened => "deafened",
             Self::Compelled => "compelled",
+            Self::SteadyAim => "steady_aim",
         }
     }
 
@@ -144,6 +156,21 @@ impl Condition {
     /// Does this creature's own attack roll suffer?
     pub fn disadvantage_on_attacks(self) -> bool {
         matches!(self, Self::Prone | Self::Poisoned | Self::Blinded)
+    }
+
+    /// Does this creature's own attack roll benefit? Steady Aim - the mirror
+    /// of [`Condition::disadvantage_on_attacks`], and cancelled by it the same
+    /// way any other advantage and disadvantage cancel.
+    pub fn advantage_on_attacks(self) -> bool {
+        matches!(self, Self::SteadyAim)
+    }
+
+    /// Does this condition drop the creature's speed to 0? Steady Aim.
+    /// Nothing reads this yet - there is no movement model in this engine -
+    /// so this exists purely to expose the flag for whenever one shows up,
+    /// rather than leaving Steady Aim's speed clause unmodelled entirely.
+    pub fn zeroes_speed(self) -> bool {
+        matches!(self, Self::SteadyAim)
     }
 
     pub fn auto_fails(self, ability: Ability) -> bool {

@@ -168,6 +168,14 @@ impl FeatureRegistry {
                 proficiency_bonus,
             )))
         });
+
+        // Steady Aim (2024 Rogue 2)
+        self.register("steady_aim", |_val| Ok(Box::new(SteadyAimPlugin::new())));
+
+        // Cunning Action (2024 Rogue 2)
+        self.register("cunning_action", |_val| {
+            Ok(Box::new(CunningActionPlugin::new()))
+        });
     }
 }
 
@@ -328,5 +336,30 @@ mod tests {
             registry.build_plugin("cunning_strike", &missing_dex),
             Err(FeatureError::InvalidConfiguration(_))
         ));
+    }
+
+    #[test]
+    fn steady_aim_builds_from_toml_with_no_parameters() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str("plugin = \"steady_aim\"").unwrap();
+        let plugin = registry
+            .build_plugin("steady_aim", &params)
+            .expect("steady_aim builds");
+        assert_eq!(plugin.id(), "steady_aim");
+        assert_eq!(plugin.name(), "Steady Aim");
+    }
+
+    #[test]
+    fn cunning_action_builds_from_toml_with_no_parameters() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str("plugin = \"cunning_action\"").unwrap();
+        let plugin = registry
+            .build_plugin("cunning_action", &params)
+            .expect("cunning_action builds");
+        assert_eq!(plugin.id(), "cunning_action");
+        assert_eq!(plugin.name(), "Cunning Action");
+        let mut builder = crate::dsl::plugin::CreatureBuilder::new("Rogue", 15, 40);
+        plugin.apply(&mut builder).unwrap();
+        assert_eq!(builder.creature.bonus_actions.len(), 2);
     }
 }
