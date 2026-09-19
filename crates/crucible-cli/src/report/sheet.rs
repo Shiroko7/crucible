@@ -137,6 +137,22 @@ pub fn body(effect: &Effect) -> String {
         Effect::Stance { condition } => condition.name().to_string(),
         Effect::Heal(roll) => format!("heal {}d{}{:+}", roll.count, roll.sides, roll.bonus),
         Effect::AutoHit { damage } => format!("{}x auto-hit", damage.len()),
+        Effect::Buff { max_targets, .. } => match max_targets {
+            Some(n) => format!("buff {n} targets"),
+            None => "buff all".to_string(),
+        },
+        Effect::SaveOrModifier {
+            ability,
+            max_targets,
+            ..
+        } => format!(
+            "{} save or debuff{}",
+            ability.name(),
+            match max_targets {
+                Some(n) => format!(" {n} targets"),
+                None => " all".to_string(),
+            }
+        ),
         Effect::Sequence(parts) => parts.iter().map(body).collect::<Vec<_>>().join(" + "),
     }
 }

@@ -36,7 +36,7 @@
 //! throw is the only control over that.
 
 use crate::prob::rng::Rng;
-use crate::rules::combat::{Landed, RollMode};
+use crate::rules::combat::{sample_save_with, AttackModifier, Landed, RollMode, SaveModifier};
 use crate::rules::creature::{
     apply_healing, Ability, AttackTrigger, Condition, Cost, Creature, Duration, Effect, Move,
     Rider, SpellSlots, Uses,
@@ -253,6 +253,15 @@ struct Fighter<'a> {
     /// The one spell this creature is concentrating on, if any. See
     /// [`ActiveConcentration`].
     concentration: Option<ActiveConcentration>,
+    /// Ongoing attack-roll modifiers from a maintained buff (Bless, Bane),
+    /// applied to every attack roll this fighter makes until
+    /// [`Fight::end_concentration`] removes them - see [`Effect::Buff`] and
+    /// [`Effect::SaveOrModifier`].
+    attack_modifiers: Vec<AttackModifier>,
+    /// As `attack_modifiers`, for saving throws - including this fighter's
+    /// own concentration save, since [`saving_throw`] is the one place both
+    /// go through.
+    save_modifiers: Vec<SaveModifier>,
     once_per_turn_spent: bool,
     dealt: i64,
     /// Resource points and limited uses burnt. This is the second column of the
@@ -293,6 +302,8 @@ impl<'a> Fighter<'a> {
             rider_uses: creature.riders.iter().map(|r| r.initial_uses()).collect(),
             conditions: Vec::new(),
             concentration: None,
+            attack_modifiers: Vec::new(),
+            save_modifiers: Vec::new(),
             once_per_turn_spent: false,
             dealt: 0,
             spent: 0,
@@ -367,6 +378,13 @@ impl<'a> Fighter<'a> {
     /// Is a slot of exactly `level` available and something this policy is
     /// willing to spend? A spell slot is exactly the kind of finite resource
     /// `will_spend` already gates `cost` behind.
+    ///
+    /// Two independent fields on `Move` name a spell-slot cost -
+    /// `spell_slot_level` (Healing Word/Cure Wounds/Hold Person's own line)
+    /// and `spell_level` (Bless/Bane's) - both spending from this same
+    /// `spell_slots` pool. A given `Move` only ever sets one of the two, so
+    /// callers check (and spend) against both fields; this one shared method
+    /// is what each of those checks calls.
     fn can_cast(&self, level: Option<u32>) -> bool {
         match level {
             None => true,
@@ -374,11 +392,21 @@ impl<'a> Fighter<'a> {
         }
     }
 
-    /// Spend a slot of `level`, counting it the same way `pay` counts a
-    /// resource cost.
+    /// Spend a slot of `level` (the `spell_slot_level` field's shape),
+    /// counting it the same way `pay` counts a resource cost.
     fn cast_spell_slot(&mut self, level: Option<u32>) {
         if let Some(lvl) = level {
             self.spell_slots.cast(lvl);
+            self.spent += 1;
+        }
+    }
+
+    /// Spend one slot at `spell_level` (the `spell_level` field's shape),
+    /// counting it against `spent` like any other burnt resource. A no-op
+    /// for a move with no spell cost.
+    fn cast(&mut self, spell_level: Option<u32>) {
+        if let Some(level) = spell_level {
+            self.spell_slots.cast(level);
             self.spent += 1;
         }
     }
@@ -433,6 +461,16 @@ enum ConcentrationEffect {
     Condition {
         targets: Vec<usize>,
         condition: Condition,
+    },
+    /// A per-target attack-roll and saving-throw modifier maintained by
+    /// Bless or Bane - see [`Effect::Buff`] and [`Effect::SaveOrModifier`].
+    /// Ending concentration removes exactly these two modifiers from
+    /// exactly these targets, the same "clear what this held" contract as
+    /// [`ConcentrationEffect::Condition`] above.
+    Modifiers {
+        targets: Vec<usize>,
+        attack_modifier: AttackModifier,
+        save_modifier: SaveModifier,
     },
 }
 
@@ -794,11 +832,13 @@ impl<'a> Fight<'a> {
             if !slot.states(&self.fighters[me])[pick].available()
                 || !self.fighters[me].can_pay(chosen.cost)
                 || !self.fighters[me].can_cast(chosen.spell_slot_level)
+                || !self.fighters[me].can_cast(chosen.spell_level)
             {
                 continue;
             }
             self.fighters[me].pay(chosen.cost);
             self.fighters[me].cast_spell_slot(chosen.spell_slot_level);
+            self.fighters[me].cast(chosen.spell_level);
             self.fighters[me].spend_move(slot, pick, chosen.uses);
             self.apply(chosen, rng, me, target, record, &mut line);
         }
@@ -936,6 +976,7 @@ impl<'a> Fight<'a> {
                     slot.states(f)[i].available()
                         && f.can_pay(m.cost)
                         && f.can_cast(m.spell_slot_level)
+                        && f.can_cast(m.spell_level)
                 })
             });
             if pick.is_none() || still_legal {
@@ -964,7 +1005,11 @@ impl<'a> Fight<'a> {
             .zip(slot.states(f))
             .enumerate()
         {
-            if state.available() && f.can_pay(m.cost) && f.can_cast(m.spell_slot_level) {
+            if state.available()
+                && f.can_pay(m.cost)
+                && f.can_cast(m.spell_slot_level)
+                && f.can_cast(m.spell_level)
+            {
                 out.push(Some(i));
             }
         }
@@ -1063,6 +1108,7 @@ impl<'a> Fight<'a> {
 
         self.fighters[me].legendary_left -= 1;
         self.fighters[me].pay(chosen.cost);
+        self.fighters[me].cast(chosen.spell_level);
         self.fighters[me].spend_move(Slot::Legendary, pick, chosen.uses);
         self.apply(chosen, rng, me, target, record, &mut line);
 
@@ -1098,6 +1144,7 @@ impl<'a> Fight<'a> {
         }
         let mut notes: Vec<String> = Vec::new();
         let mut landed: Vec<(usize, Condition)> = Vec::new();
+        let mut concentration_effect: Option<ConcentrationEffect> = None;
         self.resolve(
             &m.effect,
             rng,
@@ -1107,9 +1154,12 @@ impl<'a> Fight<'a> {
             record,
             &mut notes,
             &mut landed,
+            &mut concentration_effect,
         );
         if m.concentration {
-            if let Some(&(_, condition)) = landed.first() {
+            if let Some(effect) = concentration_effect {
+                self.fighters[me].concentration = Some(ActiveConcentration { effect });
+            } else if let Some(&(_, condition)) = landed.first() {
                 self.fighters[me].concentration = Some(ActiveConcentration {
                     effect: ConcentrationEffect::Condition {
                         targets: landed.iter().map(|&(t, _)| t).collect(),
@@ -1142,6 +1192,7 @@ impl<'a> Fight<'a> {
         record: bool,
         notes: &mut Vec<String>,
         landed_conditions: &mut Vec<(usize, Condition)>,
+        concentration_effect: &mut Option<ConcentrationEffect>,
     ) {
         match effect {
             Effect::Strikes { strike, count } => {
@@ -1154,6 +1205,11 @@ impl<'a> Fight<'a> {
                 );
                 // Paralyzed: any hit against it is an automatic critical hit.
                 let mut force_crit = self.fighters[current_target].has(Condition::auto_crits);
+                // Ongoing attack-roll modifiers this attacker is carrying -
+                // Bless, Bane. Cloned once: they do not change mid-move, and
+                // `self.fighters` cannot stay borrowed here across the
+                // mutable borrows the loop below takes for `current_target`.
+                let modifiers = self.fighters[me].attack_modifiers.clone();
                 for _ in 0..*count {
                     if !self.fighters[current_target].alive() {
                         let Some(new_target) = self.pick_target(me) else {
@@ -1179,6 +1235,8 @@ impl<'a> Fight<'a> {
                         against,
                         mode,
                         force_crit,
+                        &modifiers,
+                        &[],
                         ac_bonus,
                         reaction_available,
                     );
@@ -1317,6 +1375,83 @@ impl<'a> Fight<'a> {
                     }
                 }
             }
+            Effect::Buff {
+                attack_modifier,
+                save_modifier,
+                max_targets,
+            } => {
+                // No positioning, so "up to N of the user's own side" is the
+                // user first - a caster overwhelmingly means to bless itself
+                // - then fills the rest by roster order.
+                let side = self.fighters[me].side;
+                let mut caught: Vec<usize> = vec![me];
+                caught.extend((0..self.fighters.len()).filter(|&i| {
+                    i != me && self.fighters[i].side == side && self.fighters[i].alive()
+                }));
+                if let Some(max) = max_targets {
+                    caught.truncate(*max as usize);
+                }
+                for &i in &caught {
+                    self.fighters[i].attack_modifiers.push(*attack_modifier);
+                    self.fighters[i].save_modifiers.push(*save_modifier);
+                }
+                if record {
+                    let names: Vec<&str> = caught
+                        .iter()
+                        .map(|&i| self.fighters[i].creature.name.as_str())
+                        .collect();
+                    notes.push(format!("buffs {}", names.join(", ")));
+                }
+                *concentration_effect = Some(ConcentrationEffect::Modifiers {
+                    targets: caught,
+                    attack_modifier: *attack_modifier,
+                    save_modifier: *save_modifier,
+                });
+            }
+            Effect::SaveOrModifier {
+                ability,
+                attack_modifier,
+                save_modifier,
+                max_targets,
+            } => {
+                // Same pessimistic "every enemy up to the cap" reading as
+                // Effect::Save - no positioning to choose among them.
+                let side = self.fighters[me].side;
+                let mut caught: Vec<usize> = (0..self.fighters.len())
+                    .filter(|&i| self.fighters[i].side != side && self.fighters[i].alive())
+                    .collect();
+                if let Some(max) = max_targets {
+                    caught.truncate(*max as usize);
+                }
+                // The caster's own spell save DC, computed fresh from its
+                // `SpellCastingProfile` rather than a number carried on the
+                // move - see `Effect::SaveOrModifier`'s docs.
+                let dc = self.fighters[me].creature.spell_save_dc().expect(
+                    "a move using Effect::SaveOrModifier requires its caster to have a spellcasting profile",
+                );
+                let mut debuffed = Vec::new();
+                for i in caught {
+                    let (saved, resisted) = saving_throw(&mut self.fighters, rng, i, *ability, dc);
+                    if !saved {
+                        self.fighters[i].attack_modifiers.push(*attack_modifier);
+                        self.fighters[i].save_modifiers.push(*save_modifier);
+                        debuffed.push(i);
+                    }
+                    if record {
+                        let how = match (saved, resisted) {
+                            (true, true) => "legendary resistance",
+                            (true, false) => "saved",
+                            _ => "failed",
+                        };
+                        notes.push(format!("{} {how}", self.fighters[i].creature.name));
+                    }
+                }
+                *concentration_effect = Some(ConcentrationEffect::Modifiers {
+                    targets: debuffed,
+                    attack_modifier: *attack_modifier,
+                    save_modifier: *save_modifier,
+                });
+            }
             Effect::Sequence(parts) => {
                 for part in parts {
                     self.resolve(
@@ -1328,6 +1463,7 @@ impl<'a> Fight<'a> {
                         record,
                         notes,
                         landed_conditions,
+                        concentration_effect,
                     );
                 }
             }
@@ -1440,6 +1576,18 @@ impl<'a> Fight<'a> {
                     }
                 }
             }
+            ConcentrationEffect::Modifiers {
+                targets,
+                attack_modifier,
+                save_modifier,
+            } => {
+                for t in targets {
+                    if let Some(f) = self.fighters.get_mut(t) {
+                        f.attack_modifiers.retain(|&m| m != attack_modifier);
+                        f.save_modifiers.retain(|&m| m != save_modifier);
+                    }
+                }
+            }
         }
     }
 }
@@ -1531,7 +1679,11 @@ impl Policy {
         let bloodied = f.bloodied();
         let mut best: Option<(usize, (f64, f64))> = None;
         for (i, (m, state)) in moves.iter().zip(states).enumerate() {
-            if !state.available() || !f.can_pay(m.cost) || !f.can_cast(m.spell_slot_level) {
+            if !state.available()
+                || !f.can_pay(m.cost)
+                || !f.can_cast(m.spell_slot_level)
+                || !f.can_cast(m.spell_level)
+            {
                 continue;
             }
             // A hoarding policy passes over anything with a price on it, not just
@@ -1571,11 +1723,14 @@ impl Policy {
 }
 
 /// How much of a finite resource a move burns, for a policy that wants to burn
-/// them. A pool cost counts by its size; any private budget counts as one.
+/// them. A pool cost counts by its size; any private budget counts as one; a
+/// spell slot counts by its level, since a Nova table reaches for its highest
+/// slot first.
 fn spend_weight(m: &Move) -> u32 {
     m.cost.map_or(0, |c| c.amount)
         + u32::from(!matches!(m.uses, Uses::Unlimited))
         + m.spell_slot_level.unwrap_or(0)
+        + m.spell_level.unwrap_or(0)
 }
 
 /// The 5e stacking rule: any advantage and any disadvantage cancel to a flat
@@ -1608,7 +1763,12 @@ fn saving_throw(
 ) -> (bool, bool) {
     let f = &fighters[who];
     let auto_fail = f.has(|c| c.auto_fails(ability));
-    let rolled = !auto_fail && rng.die(20) + f.creature.save(ability) >= dc;
+    // `save_modifiers` covers every saving throw `who` makes, this one
+    // included - so a blessed creature's own concentration check picks up
+    // its `+1d4` the same way any other save does, with no special case
+    // needed here for that being "the same creature".
+    let rolled =
+        !auto_fail && sample_save_with(rng, f.creature.save(ability), dc, &f.save_modifiers);
     if rolled {
         return (true, false);
     }
@@ -1756,9 +1916,10 @@ pub fn run_teams(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::combat::Reduction;
+    use crate::rules::combat::{save_success_chance, Reduction};
     use crate::rules::creature::{
-        Ability, DamageKind, DamageRoll, HealRoll, Resource, SaveEffect, Strike,
+        Ability, DamageKind, DamageRoll, HealRoll, Resource, SaveEffect, SpellCastingProfile,
+        Strike,
     };
 
     fn puncher(name: &str, ac: i32, hp: i32, to_hit: i32, bonus: i32) -> Creature {
@@ -2866,6 +3027,9 @@ mod tests {
                 assert_eq!(*condition, Condition::Blinded);
                 assert_eq!(*targets, vec![1]);
             }
+            ConcentrationEffect::Modifiers { .. } => {
+                panic!("expected a Condition concentration effect")
+            }
         }
     }
 
@@ -3051,6 +3215,7 @@ mod tests {
             true,
             &mut notes,
             &mut Vec::new(),
+            &mut None,
         );
 
         assert!((4..=7).contains(&fight.fighters[1].hp));
@@ -3089,6 +3254,7 @@ mod tests {
             true,
             &mut notes,
             &mut Vec::new(),
+            &mut None,
         );
 
         assert_eq!(
@@ -3098,6 +3264,396 @@ mod tests {
         assert!(
             notes.iter().all(|n| !n.contains("revives")),
             "was never down, so nothing to revive: {notes:?}"
+        );
+    }
+
+    fn bless_move() -> Move {
+        Move::new(
+            "Bless",
+            Effect::Buff {
+                attack_modifier: AttackModifier::BonusDice { count: 1, sides: 4 },
+                save_modifier: SaveModifier::BonusDice { count: 1, sides: 4 },
+                max_targets: Some(3),
+            },
+        )
+        .with_concentration()
+        .with_spell_level(1)
+    }
+
+    fn bane_move() -> Move {
+        Move::new(
+            "Bane",
+            Effect::SaveOrModifier {
+                ability: Ability::Cha,
+                attack_modifier: AttackModifier::PenaltyDice { count: 1, sides: 4 },
+                save_modifier: SaveModifier::PenaltyDice { count: 1, sides: 4 },
+                max_targets: Some(3),
+            },
+        )
+        .with_concentration()
+        .with_spell_level(1)
+    }
+
+    /// Bless buffs up to three creatures on the caster's own side - the
+    /// caster included, and first, since a caster overwhelmingly means to
+    /// bless itself - and spends a 1st-level slot to do it. A fourth ally
+    /// beyond the cap gets nothing.
+    #[test]
+    fn bless_buffs_up_to_three_allies_including_the_caster_and_spends_a_slot() {
+        let mut caster = Creature::new("caster", 10, 50);
+        caster.spell_slots.set_max(1, 2);
+        caster.actions.push(bless_move());
+        let ally1 = Creature::new("ally1", 10, 50);
+        let ally2 = Creature::new("ally2", 10, 50);
+        let ally3 = Creature::new("ally3", 10, 50); // beyond Bless's cap of three
+        let enemy = Creature::new("enemy", 10, 50);
+
+        let roster = [
+            (&caster, Side::A),
+            (&ally1, Side::A),
+            (&ally2, Side::A),
+            (&ally3, Side::A),
+            (&enemy, Side::B),
+        ];
+        let mut rng = Rng::new(200);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        fight.take_turn(1, 0, &mut rng, &mut log, None);
+
+        assert_eq!(
+            fight.fighters[0].spell_slots.available(1),
+            1,
+            "casting Bless spends one 1st-level slot"
+        );
+        for i in 0..3 {
+            assert_eq!(
+                fight.fighters[i].attack_modifiers,
+                vec![AttackModifier::BonusDice { count: 1, sides: 4 }],
+                "fighter {i} should carry Bless's attack bonus"
+            );
+            assert_eq!(
+                fight.fighters[i].save_modifiers,
+                vec![SaveModifier::BonusDice { count: 1, sides: 4 }],
+                "fighter {i} should carry Bless's save bonus"
+            );
+        }
+        assert!(
+            fight.fighters[3].attack_modifiers.is_empty(),
+            "the fourth ally is beyond Bless's cap of three targets"
+        );
+        assert!(fight.fighters[3].save_modifiers.is_empty());
+
+        let active = fight.fighters[0]
+            .concentration
+            .as_ref()
+            .expect("Bless is a concentration spell");
+        match &active.effect {
+            ConcentrationEffect::Modifiers { targets, .. } => assert_eq!(*targets, vec![0, 1, 2]),
+            ConcentrationEffect::Condition { .. } => {
+                panic!("expected a Modifiers concentration effect")
+            }
+        }
+    }
+
+    /// Bane forces a Charisma save against the caster's own spell save DC -
+    /// only the targets that fail it carry the penalty, and the ones that
+    /// succeed are untouched.
+    #[test]
+    fn bane_debuffs_only_the_targets_that_fail_their_charisma_save() {
+        let mut caster = Creature::new("caster", 10, 50);
+        caster.spell_slots.set_max(1, 1);
+        caster.spellcasting = Some(SpellCastingProfile::new(Ability::Cha, 4, 3)); // dc 15
+        caster.actions.push(bane_move());
+
+        let mut weak_save = Creature::new("weak", 10, 50);
+        weak_save.saves[Ability::Cha.index()] = -100; // always fails
+        let mut strong_save = Creature::new("strong", 10, 50);
+        strong_save.saves[Ability::Cha.index()] = 100; // always succeeds
+
+        let roster = [
+            (&caster, Side::A),
+            (&weak_save, Side::B),
+            (&strong_save, Side::B),
+        ];
+        let mut rng = Rng::new(201);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        fight.take_turn(1, 0, &mut rng, &mut log, None);
+
+        assert_eq!(
+            fight.fighters[0].spell_slots.available(1),
+            0,
+            "casting Bane spends one 1st-level slot"
+        );
+        assert_eq!(
+            fight.fighters[1].attack_modifiers,
+            vec![AttackModifier::PenaltyDice { count: 1, sides: 4 }],
+            "the creature that failed its save should carry Bane's penalty"
+        );
+        assert_eq!(
+            fight.fighters[1].save_modifiers,
+            vec![SaveModifier::PenaltyDice { count: 1, sides: 4 }]
+        );
+        assert!(
+            fight.fighters[2].attack_modifiers.is_empty(),
+            "the creature that succeeded its save should be unaffected"
+        );
+        assert!(fight.fighters[2].save_modifiers.is_empty());
+
+        let active = fight.fighters[0]
+            .concentration
+            .as_ref()
+            .expect("Bane is a concentration spell");
+        match &active.effect {
+            ConcentrationEffect::Modifiers { targets, .. } => assert_eq!(*targets, vec![1]),
+            ConcentrationEffect::Condition { .. } => {
+                panic!("expected a Modifiers concentration effect")
+            }
+        }
+    }
+
+    /// Bane's DC is read from the caster's own `SpellCastingProfile` at the
+    /// moment it resolves, never a fixed number on the move - raising the
+    /// caster's spellcasting stat alone, with nothing else different, turns
+    /// a save that always succeeds into one that always fails.
+    #[test]
+    fn banes_save_dc_tracks_the_casters_spellcasting_profile_not_a_fixed_number() {
+        let failed = |profile: SpellCastingProfile| -> bool {
+            let mut caster = Creature::new("caster", 10, 50);
+            caster.spell_slots.set_max(1, 1);
+            caster.spellcasting = Some(profile);
+            caster.actions.push(bane_move());
+            // A save bonus high enough that whether it succeeds is decided
+            // entirely by the DC, not by the die roll underneath it.
+            let mut target = Creature::new("target", 10, 50);
+            target.saves[Ability::Cha.index()] = 25;
+
+            let roster = [(&caster, Side::A), (&target, Side::B)];
+            let mut rng = Rng::new(202);
+            let mut log = no_log();
+            let mut fight = Fight::new(
+                &mut rng,
+                &roster,
+                [Policy::InOrder; 2],
+                5,
+                Budget::default(),
+                &mut log,
+            );
+            fight.take_turn(1, 0, &mut rng, &mut log, None);
+            !fight.fighters[1].attack_modifiers.is_empty()
+        };
+
+        // dc 10 vs a +25 save: needed <= 1, so it always succeeds regardless
+        // of the roll.
+        let weak = SpellCastingProfile::new(Ability::Cha, 0, 2);
+        assert!(
+            !failed(weak),
+            "a DC of 10 against a +25 save must always succeed"
+        );
+
+        // dc 46 vs the same +25 save: needed >= 21, so it always fails
+        // regardless of the roll - nothing changed except the profile.
+        let strong = SpellCastingProfile::new(Ability::Cha, 20, 18);
+        assert!(
+            failed(strong),
+            "a DC of 46 against a +25 save must always fail"
+        );
+    }
+
+    /// A caster with no 1st-level slots left cannot cast Bless again -
+    /// `can_cast` gates a spell slot exactly like `can_pay` gates a
+    /// resource-pool cost.
+    #[test]
+    fn a_caster_with_no_slots_left_cannot_cast_bless_again() {
+        let mut caster = Creature::new("caster", 10, 50);
+        caster.spell_slots.set_max(1, 1);
+        caster.actions.push(bless_move());
+        let enemy = Creature::new("enemy", 10, 50);
+        let roster = [(&caster, Side::A), (&enemy, Side::B)];
+        let mut rng = Rng::new(203);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        fight.take_turn(1, 0, &mut rng, &mut log, None);
+        assert_eq!(fight.fighters[0].spell_slots.available(1), 0);
+        assert!(
+            !fight.fighters[0].attack_modifiers.is_empty(),
+            "sanity check: the first cast should have landed"
+        );
+
+        // Simulate the first Bless having already ended, then try again with
+        // no slots left.
+        fight.fighters[0].concentration = None;
+        fight.fighters[0].attack_modifiers.clear();
+        fight.fighters[0].save_modifiers.clear();
+
+        fight.take_turn(2, 0, &mut rng, &mut log, None);
+        assert!(
+            fight.fighters[0].attack_modifiers.is_empty(),
+            "no slot left, so Bless should not have been cast a second time"
+        );
+        assert!(fight.fighters[0].concentration.is_none());
+    }
+
+    /// Starting Bless ends whatever the caster was concentrating on before -
+    /// even a Condition-based spell, the sibling direction to
+    /// `a_second_concentration_spell_ends_the_first`, which only covers two
+    /// Condition-based spells.
+    #[test]
+    fn casting_bless_ends_a_prior_condition_based_concentration() {
+        let mut caster = Creature::new("caster", 10, 100);
+        caster.spell_slots.set_max(1, 1);
+        caster.actions.push(bless_move());
+        let enemy = Creature::new("enemy", 10, 100);
+        let roster = [(&caster, Side::A), (&enemy, Side::B)];
+        let mut rng = Rng::new(204);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        fight.fighters[1]
+            .conditions
+            .push((Condition::Poisoned, Expiry::TurnStart(1)));
+        fight.fighters[0].concentration = Some(ActiveConcentration {
+            effect: ConcentrationEffect::Condition {
+                targets: vec![1],
+                condition: Condition::Poisoned,
+            },
+        });
+
+        fight.take_turn(1, 0, &mut rng, &mut log, None);
+
+        assert!(
+            !fight.fighters[1].has(|c| c == Condition::Poisoned),
+            "the old concentration effect must be cleared when Bless starts a new one"
+        );
+        let active = fight.fighters[0]
+            .concentration
+            .as_ref()
+            .expect("now concentrating on Bless");
+        match &active.effect {
+            ConcentrationEffect::Modifiers { .. } => {}
+            ConcentrationEffect::Condition { .. } => {
+                panic!("expected the new Modifiers effect, not the old Condition one")
+            }
+        }
+    }
+
+    /// A failed concentration save clears Bless/Bane's ongoing modifiers
+    /// from every target that had them - the `Modifiers` sibling of
+    /// `a_failed_concentration_save_clears_the_effect_from_every_target`,
+    /// which only covers the `Condition` case.
+    #[test]
+    fn a_failed_concentration_save_clears_bless_or_banes_modifiers_from_every_target() {
+        let mut caster = Creature::new("caster", 10, 100);
+        caster.saves[Ability::Con.index()] = -100; // never saves
+        let a = Creature::new("a", 10, 100);
+        let b = Creature::new("b", 10, 100);
+
+        let roster = [(&caster, Side::A), (&a, Side::B), (&b, Side::B)];
+        let mut rng = Rng::new(205);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        let attack_modifier = AttackModifier::PenaltyDice { count: 1, sides: 4 };
+        let save_modifier = SaveModifier::PenaltyDice { count: 1, sides: 4 };
+        fight.fighters[1].attack_modifiers.push(attack_modifier);
+        fight.fighters[1].save_modifiers.push(save_modifier);
+        fight.fighters[2].attack_modifiers.push(attack_modifier);
+        fight.fighters[2].save_modifiers.push(save_modifier);
+        fight.fighters[0].concentration = Some(ActiveConcentration {
+            effect: ConcentrationEffect::Modifiers {
+                targets: vec![1, 2],
+                attack_modifier,
+                save_modifier,
+            },
+        });
+
+        fight.concentration_check(&mut rng, 0, 100); // dc 50, and the save always fails
+        assert!(fight.fighters[0].concentration.is_none());
+        assert!(fight.fighters[1].attack_modifiers.is_empty());
+        assert!(fight.fighters[1].save_modifiers.is_empty());
+        assert!(fight.fighters[2].attack_modifiers.is_empty());
+        assert!(fight.fighters[2].save_modifiers.is_empty());
+    }
+
+    /// `saving_throw` is what `concentration_check` calls for a creature's
+    /// own Con save, so a fighter carrying Bless's save bonus - from
+    /// blessing itself - sees it raise that save's success rate exactly as
+    /// `save_success_chance` predicts. This is "Bless applies to its own
+    /// concentration save" made concrete and checked for exact agreement,
+    /// not just plausibility.
+    #[test]
+    fn a_blessed_fighters_own_saving_throw_including_a_concentration_check_gets_the_bonus_die() {
+        let caster = Creature::new("caster", 10, 100);
+        let other = Creature::new("other", 10, 100);
+        let roster = [(&caster, Side::A), (&other, Side::B)];
+        let mut rng = Rng::new(206);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+        fight.fighters[0]
+            .save_modifiers
+            .push(SaveModifier::BonusDice { count: 1, sides: 4 });
+
+        let (save_bonus, dc) = (0, 14);
+        let modifiers = [SaveModifier::BonusDice { count: 1, sides: 4 }];
+        let exact = save_success_chance(save_bonus, dc, &modifiers);
+        let n = 100_000;
+        let mut successes = 0usize;
+        for _ in 0..n {
+            let (saved, _) = saving_throw(&mut fight.fighters, &mut rng, 0, Ability::Con, dc);
+            if saved {
+                successes += 1;
+            }
+        }
+        let got = successes as f64 / n as f64;
+        let tol = 5.0 * (exact * (1.0 - exact) / n as f64).sqrt() + 1e-4;
+        assert!(
+            (got - exact).abs() < tol,
+            "P(save succeeds) sampled {got:.5}, exact {exact:.5}, tol {tol:.5}"
         );
     }
 }

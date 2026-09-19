@@ -32,8 +32,8 @@ pub use analysis::{evaluate, sustained_rounds_to_kill, Summary};
 pub use combat::{
     damage_pmf, hit_outcomes, hit_outcomes_with, hit_outcomes_with_reaction, outcomes,
     resolve_mode, sample_attacks_to_kill, sample_damage, sample_hit, sample_hit_with,
-    sample_hit_with_reaction, Attack, AttackModifier, DamageRider, Defense, Landed, Outcomes,
-    Reduction, RollMode,
+    sample_hit_with_reaction, sample_save_with, save_success_chance, Attack, AttackModifier,
+    DamageRider, Defense, Landed, Outcomes, Reduction, RollMode, SaveModifier,
 };
 pub use creature::{
     Ability, AttackTrigger, Condition, Cost, Creature, DamageKind, DamageRoll, Duration, Effect,

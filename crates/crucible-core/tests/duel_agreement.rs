@@ -350,6 +350,8 @@ fn a_reactive_ac_boost_agrees_with_the_exact_path_on_a_multi_type_strike() {
                     &defender,
                     RollMode::Normal,
                     false,
+                    &[],
+                    &[],
                     ac_bonus,
                     available,
                 )

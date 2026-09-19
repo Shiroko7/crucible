@@ -380,6 +380,9 @@ fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> {
         // `Standard` until one is added. `FastHandsPlugin` only ever sees a
         // `Move` built in Rust, not through this parser.
         kind: MoveKind::Standard,
+        // Same gap as `concentration` above: no clause yet for spending a
+        // spell slot from a hand-written scenario move.
+        spell_level: None,
     })
 }
 
