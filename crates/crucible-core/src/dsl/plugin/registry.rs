@@ -8,7 +8,7 @@ use super::rogue::*;
 use super::spells::*;
 use super::standard::*;
 use super::traits::{FeatureError, FeaturePlugin, FeatureResult};
-use crate::rules::creature::{Ability, SPELL_LEVELS};
+use crate::rules::creature::{Ability, DamageKind, SPELL_LEVELS};
 
 /// Read a spell plugin's optional `resource` (a pool name) and `cost` (an
 /// amount, default 1) TOML params into a [`SpellCost`].
@@ -278,6 +278,72 @@ impl FeatureRegistry {
                 slots,
                 ability,
                 attack_bonus,
+            )))
+        });
+
+        // True Strike (2024 cantrip): a weapon attack using the caster's own
+        // SpellCastingProfile, plus scaling Radiant dice - every number here
+        // is a TOML parameter, see `spells::TrueStrikePlugin`.
+        self.register("true_strike", |val| {
+            let damage_kind = |key: &str, default: Option<&str>| -> FeatureResult<DamageKind> {
+                let word = match (val.get(key).and_then(|v| v.as_str()), default) {
+                    (Some(word), _) => word,
+                    (None, Some(default)) => default,
+                    (None, None) => {
+                        return Err(FeatureError::InvalidConfiguration(format!(
+                            "true_strike needs a `{key}`"
+                        )))
+                    }
+                };
+                DamageKind::parse(word).ok_or_else(|| FeatureError::UnknownDamageKind(word.to_string()))
+            };
+
+            let weapon_dice_count = val
+                .get("weapon_dice_count")
+                .and_then(|v| v.as_integer())
+                .ok_or_else(|| {
+                    FeatureError::InvalidConfiguration(
+                        "true_strike needs a `weapon_dice_count` (the wielded weapon's own dice count)"
+                            .to_string(),
+                    )
+                })? as u32;
+            let weapon_dice_sides = val
+                .get("weapon_dice_sides")
+                .and_then(|v| v.as_integer())
+                .ok_or_else(|| {
+                    FeatureError::InvalidConfiguration(
+                        "true_strike needs a `weapon_dice_sides` (the wielded weapon's own die size)"
+                            .to_string(),
+                    )
+                })? as u32;
+            let weapon_damage_kind = damage_kind("weapon_damage_kind", None)?;
+            let finesse_or_ranged = val
+                .get("finesse_or_ranged")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let radiant_dice_count = val
+                .get("radiant_dice_count")
+                .and_then(|v| v.as_integer())
+                .ok_or_else(|| {
+                    FeatureError::InvalidConfiguration(
+                        "true_strike needs a `radiant_dice_count` (its cantrip-scaling tier's bonus dice, 2 at the base tier)"
+                            .to_string(),
+                    )
+                })? as u32;
+            let radiant_dice_sides = val
+                .get("radiant_dice_sides")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(6) as u32;
+            let radiant_damage_kind = damage_kind("radiant_damage_kind", Some("radiant"))?;
+
+            Ok(Box::new(TrueStrikePlugin::new(
+                weapon_dice_count,
+                weapon_dice_sides,
+                weapon_damage_kind,
+                finesse_or_ranged,
+                radiant_dice_count,
+                radiant_dice_sides,
+                radiant_damage_kind,
             )))
         });
     }
@@ -582,6 +648,80 @@ mod tests {
         assert!(matches!(
             registry.build_plugin("prestige_spellcasting", &params),
             Err(FeatureError::InvalidConfiguration(_))
+        ));
+    }
+
+    /// `weapon_dice_count`/`weapon_dice_sides` and `radiant_dice_count` are
+    /// the whole point of making True Strike a plugin rather than a
+    /// hardcoded 1d8 rapier at the base 2d6 tier - a different weapon or a
+    /// higher cantrip-scaling tier is just different TOML, not a code change.
+    #[test]
+    fn true_strike_reads_its_parameters_from_toml_and_applies() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str(
+            r#"
+                plugin = "true_strike"
+                weapon_dice_count = 1
+                weapon_dice_sides = 8
+                weapon_damage_kind = "piercing"
+                finesse_or_ranged = true
+                radiant_dice_count = 2
+            "#,
+        )
+        .unwrap();
+        let plugin = registry
+            .build_plugin("true_strike", &params)
+            .expect("true_strike builds from toml");
+        assert_eq!(plugin.id(), "true_strike");
+        assert_eq!(plugin.name(), "True Strike");
+
+        let mut builder = crate::dsl::plugin::CreatureBuilder::new("Caster", 15, 30);
+        builder.set_spellcasting(crate::rules::creature::SpellCastingProfile::new(
+            Ability::Wis,
+            4,
+            3,
+        ));
+        plugin
+            .apply(&mut builder)
+            .expect("spellcasting is declared");
+
+        let action = builder.creature.actions.last().expect("action added");
+        assert_eq!(action.name, "True Strike");
+    }
+
+    #[test]
+    fn true_strike_requires_its_weapon_and_radiant_dice() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str(
+            r#"
+                plugin = "true_strike"
+                weapon_damage_kind = "piercing"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            registry.build_plugin("true_strike", &params),
+            Err(FeatureError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn true_strike_requires_spellcasting_to_already_be_declared_on_the_creature() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str(
+            r#"
+                weapon_dice_count = 1
+                weapon_dice_sides = 8
+                weapon_damage_kind = "piercing"
+                radiant_dice_count = 2
+            "#,
+        )
+        .unwrap();
+        let plugin = registry.build_plugin("true_strike", &params).unwrap();
+        let mut builder = crate::dsl::plugin::CreatureBuilder::new("Not Yet A Caster", 15, 30);
+        assert!(matches!(
+            plugin.apply(&mut builder),
+            Err(FeatureError::PrerequisiteNotMet(_))
         ));
     }
 }
