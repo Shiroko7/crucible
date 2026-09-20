@@ -3747,7 +3747,6 @@ mod tests {
         );
     }
 
-
     // -- Condition::Suppressed: the limited-use debuff trigger mechanism ---
     //
     // Four effects, and their expiry: blocking a Spell-tagged move, blocking
