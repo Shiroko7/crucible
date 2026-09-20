@@ -217,6 +217,7 @@ mod tests {
             dragon.creature_type,
             Some(crate::rules::creature::CreatureType::Dragon)
         );
+        assert_eq!(dragon.size, crate::rules::creature::Size::Huge);
     }
 
     #[test]
@@ -233,6 +234,7 @@ mod tests {
             ogre.creature_type,
             Some(crate::rules::creature::CreatureType::Giant)
         );
+        assert_eq!(ogre.size, crate::rules::creature::Size::Large);
     }
 
     #[test]
@@ -248,6 +250,35 @@ mod tests {
         let err = load_creature_from_str(toml, &registry)
             .expect_err("an unrecognised creature type must be rejected, not silently dropped");
         assert!(matches!(err, FeatureError::UnknownCreatureType(_)));
+    }
+
+    #[test]
+    fn a_monster_with_no_declared_size_defaults_to_medium() {
+        let registry = FeatureRegistry::new();
+        let toml = r#"
+            [monster]
+            name = "Bandit"
+            ac = 12
+            hp = 11
+        "#;
+        let bandit =
+            load_creature_from_str(toml, &registry).expect("a monster with no size parses");
+        assert_eq!(bandit.size, crate::rules::creature::Size::Medium);
+    }
+
+    #[test]
+    fn an_unknown_size_is_rejected() {
+        let registry = FeatureRegistry::new();
+        let toml = r#"
+            [monster]
+            name = "Mystery"
+            ac = 10
+            hp = 10
+            size = "Colossal"
+        "#;
+        let err = load_creature_from_str(toml, &registry)
+            .expect_err("an unrecognised size must be rejected, not silently dropped");
+        assert!(matches!(err, FeatureError::UnknownSize(_)));
     }
 
     /// `[pc.resources.slots]` mirrors the existing `[pc.resources]`

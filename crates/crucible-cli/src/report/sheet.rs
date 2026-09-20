@@ -211,5 +211,12 @@ pub fn describe_trait(rider: &Rider) -> String {
             damage_kind.name(),
             creature_type.name()
         ),
+        Rider::CunningStrikeTrip => {
+            "cunning strike: trip (1d6, dex save vs cunning strike dc or prone)".to_string()
+        }
+        Rider::CunningStrikeWithdraw => {
+            "cunning strike: withdraw (1d6, move half speed without opportunity attacks)"
+                .to_string()
+        }
     }
 }
