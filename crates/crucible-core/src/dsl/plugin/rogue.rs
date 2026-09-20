@@ -1086,4 +1086,79 @@ mod tests {
             );
         }
     }
+
+    /// ITM-01 composed with ROG-03: a Rogue who also carries the generic
+    /// immunity-downgrade trait can actually poison a poison-immune target
+    /// through Cunning Strike Poison, where without that trait the same
+    /// option would leave it entirely unaffected.
+    ///
+    /// This is the acceptance test for the two features working together,
+    /// not just side by side: `cunning_strike_poison` builds exactly the
+    /// `Rider::SaveOrCondition` a failed Constitution save turns into
+    /// Poisoned, and `saving_throw_against_condition` is what actually
+    /// resolves that save against a target's condition immunity - see
+    /// `crate::rules::creature::rider` for both.
+    #[test]
+    fn cunning_strike_poison_can_land_on_an_immune_target_with_the_downgrade_trait() {
+        use crate::rules::creature::{saving_throw_against_condition, Creature};
+
+        let mut immune_target = Creature::new("Zombie", 8, 22);
+        immune_target.condition_immunities.push(Condition::Poisoned);
+
+        let plain_rogue = Creature::new("Rogue", 15, 40);
+        let corrosive_rogue = Creature::new("Rogue", 15, 40).with_rider(Rider::DowngradeImmunity {
+            damage: None,
+            condition: Some(Condition::Poisoned),
+        });
+
+        let dc = CunningStrikePlugin::new(4, 3).dc();
+        let full = DamageRider::new(4, 6);
+        let (_, effect) = cunning_strike_poison(full, dc).expect("4 dice afford 1d6");
+        let Rider::SaveOrCondition {
+            ability,
+            dc,
+            condition,
+            ..
+        } = effect
+        else {
+            panic!("cunning_strike_poison must build a SaveOrCondition effect");
+        };
+        assert_eq!(condition, Condition::Poisoned);
+
+        // Without the downgrade trait: the zombie's immunity is untouched,
+        // so it is unaffected outright, however the dice would have landed.
+        let mut rng = Rng::new(5300);
+        for _ in 0..1000 {
+            assert!(
+                saving_throw_against_condition(
+                    &mut rng,
+                    &immune_target,
+                    &plain_rogue,
+                    ability,
+                    dc,
+                    condition
+                ),
+                "a Rogue without the downgrade trait can never poison an immune target"
+            );
+        }
+
+        // With the downgrade trait: the free pass is gone, and across enough
+        // attempts the save is actually failed at least once - the target
+        // can genuinely be poisoned by Cunning Strike Poison now.
+        let mut rng = Rng::new(5301);
+        let failed_at_least_once = (0..1000).any(|_| {
+            !saving_throw_against_condition(
+                &mut rng,
+                &immune_target,
+                &corrosive_rogue,
+                ability,
+                dc,
+                condition,
+            )
+        });
+        assert!(
+            failed_at_least_once,
+            "a Rogue with the downgrade trait must be able to land Poisoned on an immune target"
+        );
+    }
 }
