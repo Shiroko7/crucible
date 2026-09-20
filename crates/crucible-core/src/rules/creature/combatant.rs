@@ -41,6 +41,12 @@ pub struct Creature {
     /// [`Rider::resolve_cunning_strike_trip`].
     pub size: Size,
     pub saves: [i32; 6],
+    /// Raw ability scores (Strength through Charisma), not save or check
+    /// bonuses - those live in `saves`. Zeroed for a creature that never
+    /// declares any, which is fine for anything that only ever needs the
+    /// bonuses; a prerequisite check gated on a raw score (a prestige
+    /// feature's ability minimums, say) is the reason this exists at all.
+    pub abilities: [i32; 6],
     pub reductions: Vec<(DamageKind, Reduction)>,
     /// Conditions this creature is flatly immune to - a construct's or an
     /// undead's usual immunity to Poisoned, say. A flat list rather than a
@@ -87,6 +93,7 @@ impl Creature {
             initiative: 0,
             size: Size::default(),
             saves: [0; 6],
+            abilities: [0; 6],
             reductions: Vec::new(),
             condition_immunities: Vec::new(),
             resources: Vec::new(),
@@ -103,6 +110,12 @@ impl Creature {
 
     pub fn save(&self, ability: Ability) -> i32 {
         self.saves[ability.index()]
+    }
+
+    /// This creature's raw ability score, as opposed to [`Creature::save`]'s
+    /// bonus.
+    pub fn ability_score(&self, ability: Ability) -> i32 {
+        self.abilities[ability.index()]
     }
 
     pub fn reduction(&self, kind: DamageKind) -> Reduction {
