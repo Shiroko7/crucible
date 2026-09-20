@@ -189,10 +189,21 @@ impl FeaturePlugin for ReliableTalentPlugin {
 /// carries its own ability modifier and proficiency bonus instead of a single
 /// precomputed number: a magic item or a level-up changes one of the inputs
 /// without this plugin's shape changing.
+///
+/// `item_bonus` is that same idea applied to equipment specifically (ITM-06):
+/// a flat bonus from a magic item that sharpens Cunning Strike's DC, kept as
+/// its own field rather than folded into `dex_modifier` so a later item swap
+/// changes one number without touching the character's actual Dexterity.
+/// This needed no new engine mechanism at all - [`SpellCastingProfile`]
+/// already carries an `item_bonus` of exactly this shape via
+/// [`SpellCastingProfile::with_item_bonus`], and [`CunningStrikePlugin::dc`]
+/// already builds one of those on the fly, so raising the DC is just another
+/// constructor parameter passed through to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CunningStrikePlugin {
     pub dex_modifier: i32,
     pub proficiency_bonus: i32,
+    pub item_bonus: i32,
 }
 
 impl CunningStrikePlugin {
@@ -200,21 +211,32 @@ impl CunningStrikePlugin {
         Self {
             dex_modifier,
             proficiency_bonus,
+            item_bonus: 0,
         }
     }
 
-    /// The Cunning Strike DC: `8 + Dexterity modifier + proficiency bonus`.
+    /// As [`CunningStrikePlugin::new`], with a flat item bonus to the DC -
+    /// see the field doc on [`CunningStrikePlugin::item_bonus`].
+    pub fn with_item_bonus(mut self, item_bonus: i32) -> Self {
+        self.item_bonus = item_bonus;
+        self
+    }
+
+    /// The Cunning Strike DC: `8 + Dexterity modifier + proficiency bonus +
+    /// item bonus`.
     ///
     /// That is exactly [`SpellCastingProfile::save_dc`]'s `8 + ability
-    /// modifier + proficiency bonus` shape, reused here rather than
-    /// reimplemented - constructed on the fly and keyed to
+    /// modifier + proficiency bonus + item bonus` shape, reused here rather
+    /// than reimplemented - constructed on the fly and keyed to
     /// [`Ability::Dex`] specifically, never read off `creature.spellcasting`.
     /// Cunning Strike is not spellcasting: it uses this same formula even for
     /// a Rogue with no spellcasting profile at all (every base Rogue) and
     /// even for one whose actual spellcasting ability is something else
     /// entirely (an Arcane Trickster's Intelligence).
     pub fn dc(&self) -> i32 {
-        SpellCastingProfile::new(Ability::Dex, self.dex_modifier, self.proficiency_bonus).save_dc()
+        SpellCastingProfile::new(Ability::Dex, self.dex_modifier, self.proficiency_bonus)
+            .with_item_bonus(self.item_bonus)
+            .save_dc()
     }
 }
 
@@ -755,6 +777,28 @@ mod tests {
         // generic over the ability: a higher proficiency bonus at a later
         // tier raises the DC by exactly that much.
         assert_eq!(CunningStrikePlugin::new(4, 6).dc(), 18);
+    }
+
+    /// ITM-06: a magic item's flat bonus raises the Cunning Strike DC by
+    /// exactly its own value, composed on top of the printed formula rather
+    /// than replacing any part of it - and a plugin built with no item bonus
+    /// at all is unaffected, so the new field cannot silently change existing
+    /// behaviour.
+    #[test]
+    fn an_item_bonus_raises_the_cunning_strike_dc_by_exactly_its_own_value() {
+        let base = CunningStrikePlugin::new(4, 3);
+        assert_eq!(base.dc(), 15, "no item bonus yet");
+        assert_eq!(base.item_bonus, 0);
+
+        let plus_one = base.with_item_bonus(1);
+        assert_eq!(plus_one.dc(), 16);
+        let plus_two = base.with_item_bonus(2);
+        assert_eq!(plus_two.dc(), 17);
+
+        // Composes with the rest of the formula rather than overriding it:
+        // a higher proficiency bonus and an item bonus both raise the DC,
+        // additively.
+        assert_eq!(CunningStrikePlugin::new(4, 6).with_item_bonus(2).dc(), 20);
     }
 
     #[test]

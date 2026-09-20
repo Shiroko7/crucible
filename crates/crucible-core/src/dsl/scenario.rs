@@ -30,6 +30,8 @@
 //! trait: spell 1
 //! trait: resistance fire, cold
 //! trait: downgrade immunity poison damage, poisoned condition
+//! trait: empower weapon 2d6 poison on poisoned
+//! trait: injury poison con dc 13 disadvantage str
 //! action: Greatclub | strikes 1 | hit +6 | 2d8+4 bludgeoning
 //! action: Staff | strikes 2 | hit +9 | 1d8+6 bludgeoning
 //!              | on hit save con dc 16 stunned once cost focus 1
@@ -512,7 +514,85 @@ fn parse_trait(value: &str) -> Result<TraitEffect, String> {
                 condition,
             }))
         }
+        // `empower weapon 2d6 poison on poisoned` - an attacker-side buff,
+        // dormant until this creature inflicts the named condition on a
+        // target via a weapon attack, after which its weapon attacks carry
+        // the extra dice for the rest of the encounter. Generic over the
+        // trigger condition and the damage type; nothing here is specific to
+        // poison.
+        "empower" => {
+            let weapon_word = arg(&words, 1, value)?;
+            if !weapon_word.eq_ignore_ascii_case("weapon") {
+                return Err(format!("expected `empower weapon ...`, got `{value}`"));
+            }
+            let (dice, sides, bonus) = parse_dice(arg(&words, 2, value)?)?;
+            let kind_word = arg(&words, 3, value)?;
+            let damage_kind = DamageKind::parse(kind_word)
+                .ok_or_else(|| format!("unknown damage type `{kind_word}` in `{value}`"))?;
+            let on_word = arg(&words, 4, value)?;
+            if !on_word.eq_ignore_ascii_case("on") {
+                return Err(format!("expected `on <condition>` in `{value}`"));
+            }
+            let condition_word = arg(&words, 5, value)?;
+            let trigger = Condition::parse(condition_word)
+                .ok_or_else(|| format!("unknown condition `{condition_word}` in `{value}`"))?;
+            Ok(TraitEffect::Rider(Rider::ConditionTriggeredWeaponDamage {
+                trigger,
+                dice_count: dice,
+                dice_sides: sides,
+                bonus,
+                damage_kind,
+            }))
+        }
+        // `injury poison con dc 13 disadvantage str [until victim|applier]` -
+        // a consumable injury poison coating a weapon: the next hit forces a
+        // saving throw, and a failure burdens the target's own future saves
+        // of a second, independently chosen ability with Disadvantage for the
+        // stated duration. Generic over both abilities; nothing here is tied
+        // to a specific poison's name or flavour.
+        "injury" => {
+            let poison_word = arg(&words, 1, value)?;
+            if !poison_word.eq_ignore_ascii_case("poison") {
+                return Err(format!("expected `injury poison ...`, got `{value}`"));
+            }
+            let ability = Ability::parse(arg(&words, 2, value)?)
+                .ok_or_else(|| format!("unknown ability in `{value}`"))?;
+            if !arg(&words, 3, value)?.eq_ignore_ascii_case("dc") {
+                return Err(format!("expected `dc <n>` in `{value}`"));
+            }
+            let dc = number(arg(&words, 4, value)?)?;
+            if !arg(&words, 5, value)?.eq_ignore_ascii_case("disadvantage") {
+                return Err(format!("expected `disadvantage <ability>` in `{value}`"));
+            }
+            let debuffed_ability = Ability::parse(arg(&words, 6, value)?)
+                .ok_or_else(|| format!("unknown ability in `{value}`"))?;
+            let duration = parse_until_duration(&words, 7, value)?;
+            Ok(TraitEffect::Rider(Rider::InjuryPoison {
+                ability,
+                dc,
+                debuffed_ability,
+                duration,
+            }))
+        }
         other => Err(format!("unknown trait `{other}`")),
+    }
+}
+
+/// `until victim|theirs|their` or `until applier|mine|my`, defaulting to
+/// [`Duration::ApplierTurn`] when nothing follows - the same two-case
+/// duration tail [`parse_on_fail`] parses, factored out so a second trait
+/// (`injury poison`) does not repeat it.
+fn parse_until_duration(words: &[&str], at: usize, clause: &str) -> Result<Duration, String> {
+    match words.get(at).map(|w| w.to_ascii_lowercase()) {
+        None => Ok(Duration::ApplierTurn),
+        Some(w) if w == "until" => {
+            match arg(words, at + 1, clause)?.to_ascii_lowercase().as_str() {
+                "victim" | "theirs" | "their" => Ok(Duration::VictimTurn),
+                "applier" | "mine" | "my" => Ok(Duration::ApplierTurn),
+                other => Err(format!("`until {other}` is not a duration")),
+            }
+        }
+        Some(other) => Err(format!("unexpected `{other}` in `{clause}`")),
     }
 }
 
@@ -669,15 +749,7 @@ fn parse_body<'a>(
 fn parse_on_fail(words: &[&str], clause: &str) -> Result<(Condition, Duration), String> {
     let name = arg(words, 2, clause)?;
     let condition = Condition::parse(name).ok_or_else(|| format!("unknown condition `{name}`"))?;
-    let duration = match words.get(3).map(|w| w.to_ascii_lowercase()) {
-        None => Duration::ApplierTurn,
-        Some(w) if w == "until" => match arg(words, 4, clause)?.to_ascii_lowercase().as_str() {
-            "victim" | "theirs" | "their" => Duration::VictimTurn,
-            "applier" | "mine" | "my" => Duration::ApplierTurn,
-            other => return Err(format!("`until {other}` is not a duration")),
-        },
-        Some(other) => return Err(format!("unexpected `{other}` in `{clause}`")),
-    };
+    let duration = parse_until_duration(words, 3, clause)?;
     Ok((condition, duration))
 }
 
@@ -1079,6 +1151,102 @@ trait: flight 60
 
         let bad_type = parse_trait_external("downgrade immunity poison sparkly").unwrap_err();
         assert!(bad_type.contains("sparkly"), "{bad_type}");
+    }
+
+    /// The generic condition-triggered weapon damage buff (ITM-06): parsed
+    /// entirely from the trait string, with no item or poison name anywhere
+    /// near the parser.
+    #[test]
+    fn condition_triggered_weapon_damage_trait_parses() {
+        let text = "
+creature: x
+hp: 10
+trait: empower weapon 2d6 poison on poisoned
+";
+        let c = &parse(text).unwrap()[0];
+        assert_eq!(
+            c.riders,
+            vec![Rider::ConditionTriggeredWeaponDamage {
+                trigger: Condition::Poisoned,
+                dice_count: 2,
+                dice_sides: 6,
+                bonus: 0,
+                damage_kind: DamageKind::Poison,
+            }]
+        );
+    }
+
+    #[test]
+    fn condition_triggered_weapon_damage_trait_rejects_garbage() {
+        let bad_head = parse_trait_external("empower 2d6 poison on poisoned").unwrap_err();
+        assert!(bad_head.contains("weapon"), "{bad_head}");
+
+        let bad_damage =
+            parse_trait_external("empower weapon 2d6 sparkly on poisoned").unwrap_err();
+        assert!(bad_damage.contains("sparkly"), "{bad_damage}");
+
+        let missing_on = parse_trait_external("empower weapon 2d6 poison poisoned").unwrap_err();
+        assert!(missing_on.contains("on"), "{missing_on}");
+
+        let bad_condition =
+            parse_trait_external("empower weapon 2d6 poison on confused").unwrap_err();
+        assert!(bad_condition.contains("confused"), "{bad_condition}");
+    }
+
+    /// The generic consumable injury poison trait (ITM-06): a save-forcing
+    /// hit that, on a failure, burdens a second ability's future saves with
+    /// disadvantage - fully parameterized, with no poison's name in the
+    /// parser either.
+    #[test]
+    fn injury_poison_trait_parses_with_and_without_a_duration() {
+        let default_duration = parse_trait_external("injury poison con dc 13 disadvantage str")
+            .expect("parses without an explicit duration");
+        assert_eq!(
+            default_duration,
+            TraitEffect::Rider(Rider::InjuryPoison {
+                ability: Ability::Con,
+                dc: 13,
+                debuffed_ability: Ability::Str,
+                duration: Duration::ApplierTurn,
+            })
+        );
+
+        let until_victim =
+            parse_trait_external("injury poison con dc 13 disadvantage str until victim")
+                .expect("parses with an explicit duration");
+        assert_eq!(
+            until_victim,
+            TraitEffect::Rider(Rider::InjuryPoison {
+                ability: Ability::Con,
+                dc: 13,
+                debuffed_ability: Ability::Str,
+                duration: Duration::VictimTurn,
+            })
+        );
+    }
+
+    #[test]
+    fn injury_poison_trait_rejects_garbage() {
+        let bad_head = parse_trait_external("injury con dc 13 disadvantage str").unwrap_err();
+        assert!(bad_head.contains("poison"), "{bad_head}");
+
+        let bad_ability =
+            parse_trait_external("injury poison sparkly dc 13 disadvantage str").unwrap_err();
+        assert!(bad_ability.contains("ability"), "{bad_ability}");
+
+        let missing_dc = parse_trait_external("injury poison con 13 disadvantage str").unwrap_err();
+        assert!(missing_dc.contains("dc"), "{missing_dc}");
+
+        let missing_disadvantage = parse_trait_external("injury poison con dc 13 str").unwrap_err();
+        assert!(
+            missing_disadvantage.contains("disadvantage"),
+            "{missing_disadvantage}"
+        );
+
+        let bad_duration =
+            parse_trait_external("injury poison con dc 13 disadvantage str until nobody")
+                .unwrap_err();
+        assert!(bad_duration.contains("until"), "{bad_duration}");
     }
 
     /// A monk's turn, which is what forced resource pools and on-hit riders to
