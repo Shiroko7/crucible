@@ -88,10 +88,14 @@ impl PlayerCharacter {
             builder.add_reduction(kind, Reduction::Vulnerable);
         }
 
-        // Apply trait strings
+        // Apply trait strings: each is a Rider, or a flat passive stat bonus
+        // applied straight onto the creature (AC, saves, spellcasting item
+        // bonus, resistance) - see `dsl::scenario::TraitEffect`.
         for trait_line in &self.traits {
-            let rider = super::config::parse_trait_str(trait_line)?;
-            builder.add_rider(rider);
+            let effect = super::config::parse_trait_str(trait_line)?;
+            effect
+                .apply(&mut builder.creature)
+                .map_err(FeatureError::InvalidConfiguration)?;
         }
 
         // Apply registered feature plugins via monadic bind
