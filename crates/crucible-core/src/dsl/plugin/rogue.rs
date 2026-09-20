@@ -785,7 +785,6 @@ mod tests {
         assert_eq!(after_both_options.spend(3), None);
     }
 
-
     #[test]
     fn applying_steady_aim_registers_a_bonus_action_that_applies_its_condition() {
         let builder = CreatureBuilder::new("Rogue", 15, 40);
