@@ -175,7 +175,7 @@ fn save_modifier_pmf(modifiers: &[SaveModifier]) -> Pmf {
 }
 
 /// The sampled counterpart of [`save_modifier_pmf`].
-fn sample_save_modifier_bonus(rng: &mut Rng, modifiers: &[SaveModifier]) -> i32 {
+pub(crate) fn sample_save_modifier_bonus(rng: &mut Rng, modifiers: &[SaveModifier]) -> i32 {
     modifiers
         .iter()
         .map(|m| match *m {

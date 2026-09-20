@@ -114,11 +114,13 @@ impl FeaturePlugin for FastHandsPlugin {
                 builder.add_bonus_action(self.item_move.clone());
                 Ok(())
             }
-            MoveKind::Standard => Err(FeatureError::InvalidConfiguration(format!(
-                "Fast Hands only promotes a Use an Object or magic item move to a bonus \
-                 action; '{}' is tagged Standard",
-                self.item_move.name
-            ))),
+            MoveKind::Standard | MoveKind::Spell => {
+                Err(FeatureError::InvalidConfiguration(format!(
+                    "Fast Hands only promotes a Use an Object or magic item move to a bonus \
+                 action; '{}' is tagged neither",
+                    self.item_move.name
+                )))
+            }
         }
     }
 }
@@ -548,6 +550,17 @@ mod tests {
         let err = builder
             .apply_feature(&FastHandsPlugin::new(item_move(MoveKind::Standard)))
             .expect_err("a move not tagged ObjectUse or MagicItem must not be silently promoted");
+        assert!(matches!(err, FeatureError::InvalidConfiguration(_)));
+    }
+
+    /// Casting a spell is not "Use an Object or a magic item" either - Fast
+    /// Hands still has nothing to say about it.
+    #[test]
+    fn fast_hands_rejects_a_spell_move() {
+        let builder = CreatureBuilder::new("Thief", 15, 40);
+        let err = builder
+            .apply_feature(&FastHandsPlugin::new(item_move(MoveKind::Spell)))
+            .expect_err("a spell-tagged move must not be silently promoted either");
         assert!(matches!(err, FeatureError::InvalidConfiguration(_)));
     }
 

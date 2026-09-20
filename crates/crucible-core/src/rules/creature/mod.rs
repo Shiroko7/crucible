@@ -379,6 +379,7 @@ mod tests {
             Condition::Deafened,
             Condition::Compelled,
             Condition::SteadyAim,
+            Condition::Suppressed,
         ] {
             assert_eq!(Condition::parse(c.name()), Some(c));
         }
@@ -418,5 +419,42 @@ mod tests {
     fn a_creature_with_no_declared_type_never_matches_a_creature_type_gate() {
         let plain = dummy(15);
         assert_eq!(plain.creature_type, None);
+    }
+
+    /// Suppressed is deliberately not incapacitating and does not touch
+    /// attack rolls at all - only the three questions a limited-use item's
+    /// debuff actually asks: can it cast or use an item, does it save worse,
+    /// does its own damage suffer.
+    #[test]
+    fn suppressed_only_blocks_magic_items_saves_and_own_damage() {
+        assert!(Condition::Suppressed.blocks_magic());
+        assert!(Condition::Suppressed.disadvantage_on_saves());
+        assert!(Condition::Suppressed.halves_own_damage());
+
+        assert!(!Condition::Suppressed.incapacitated());
+        assert!(!Condition::Suppressed.advantage_to_attackers());
+        assert!(!Condition::Suppressed.disadvantage_to_attackers());
+        assert!(!Condition::Suppressed.disadvantage_on_attacks());
+        assert!(!Condition::Suppressed.auto_fails(Ability::Str));
+        assert!(!Condition::Suppressed.auto_fails(Ability::Dex));
+        assert!(!Condition::Suppressed.blocks_riders());
+        assert!(!Condition::Suppressed.auto_crits());
+
+        // Nothing else answers "yes" to these by accident.
+        for c in [
+            Condition::Stunned,
+            Condition::Dodging,
+            Condition::Prone,
+            Condition::Poisoned,
+            Condition::Blinded,
+            Condition::Paralyzed,
+        ] {
+            assert!(!c.blocks_magic(), "{c:?} should not block magic");
+            assert!(
+                !c.disadvantage_on_saves(),
+                "{c:?} should not disadvantage saves"
+            );
+            assert!(!c.halves_own_damage(), "{c:?} should not halve own damage");
+        }
     }
 }
