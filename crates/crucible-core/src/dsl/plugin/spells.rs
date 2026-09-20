@@ -866,7 +866,9 @@ mod tests {
     use crate::dsl::plugin::rogue::SneakAttackPlugin;
     use crate::prob::dice::Pmf;
     use crate::prob::rng::Rng;
-    use crate::rules::combat::{damage_pmf, sample_damage, Attack, DamageRider, Defense, Reduction, RollMode};
+    use crate::rules::combat::{
+        damage_pmf, sample_damage, Attack, DamageRider, Defense, Reduction, RollMode,
+    };
     use crate::rules::creature::{
         apply_healing, is_down, Ability, Creature, CreatureType, DamageKind, DamageRoll, Rider,
         SpellCastingProfile, Strike, Uses,
