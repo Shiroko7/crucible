@@ -4,6 +4,7 @@
 //! features are modular plugins that transform a `CreatureBuilder` state monad.
 //! Missing mechanics are implemented as plugins; creatures themselves are data.
 
+pub mod casting;
 pub mod items;
 pub mod prestige_spellcasting;
 pub mod registry;
@@ -12,6 +13,7 @@ pub mod spells;
 pub mod standard;
 pub mod traits;
 
+pub use casting::*;
 pub use items::*;
 pub use prestige_spellcasting::*;
 pub use registry::FeatureRegistry;
