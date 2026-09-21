@@ -1213,11 +1213,7 @@ impl<'a> Fight<'a> {
             Effect::Strikes { strike, count } => {
                 let mut current_target = target;
                 let mut against = self.fighters[current_target].creature;
-                let mut mode = attack_mode(
-                    strike.mode,
-                    &self.fighters[me],
-                    &self.fighters[current_target],
-                );
+                let mut mode = self.attack_mode_consuming_mark(strike.mode, me, current_target);
                 // Paralyzed: any hit against it is an automatic critical hit.
                 let mut force_crit = self.fighters[current_target].has(Condition::auto_crits);
                 // Ongoing attack-roll modifiers this attacker is carrying -
@@ -1232,11 +1228,7 @@ impl<'a> Fight<'a> {
                         };
                         current_target = new_target;
                         against = self.fighters[current_target].creature;
-                        mode = attack_mode(
-                            strike.mode,
-                            &self.fighters[me],
-                            &self.fighters[current_target],
-                        );
+                        mode = self.attack_mode_consuming_mark(strike.mode, me, current_target);
                         force_crit = self.fighters[current_target].has(Condition::auto_crits);
                     }
                     let reaction =
@@ -1499,43 +1491,55 @@ impl<'a> Fight<'a> {
         landed_conditions: &mut Vec<(usize, Condition)>,
     ) {
         for rider in move_riders {
-            let Rider::SaveOrCondition {
-                ability,
-                dc,
-                condition,
-                duration,
-                cost,
-                once_per_turn,
-            } = rider
-            else {
-                continue;
-            };
-            if *once_per_turn && self.fighters[me].once_per_turn_spent {
-                continue;
-            }
-            if !self.fighters[me].can_pay(*cost) {
-                continue;
-            }
-            self.fighters[me].pay(*cost);
-            if *once_per_turn {
-                self.fighters[me].once_per_turn_spent = true;
-            }
-
-            let (saved, resisted) = saving_throw(&mut self.fighters, rng, target, *ability, *dc);
-            if !saved {
-                self.apply_condition(target, *condition, expiry(me, target, *duration));
-                landed_conditions.push((target, *condition));
-            }
-            if record {
-                notes.push(format!(
-                    "{} {}",
-                    condition.name(),
-                    match (saved, resisted) {
-                        (true, true) => "shrugged off (legendary resistance)",
-                        (true, false) => "saved",
-                        _ => "LANDED",
+            match rider {
+                Rider::SaveOrCondition {
+                    ability,
+                    dc,
+                    condition,
+                    duration,
+                    cost,
+                    once_per_turn,
+                } => {
+                    if *once_per_turn && self.fighters[me].once_per_turn_spent {
+                        continue;
                     }
-                ));
+                    if !self.fighters[me].can_pay(*cost) {
+                        continue;
+                    }
+                    self.fighters[me].pay(*cost);
+                    if *once_per_turn {
+                        self.fighters[me].once_per_turn_spent = true;
+                    }
+
+                    let (saved, resisted) =
+                        saving_throw(&mut self.fighters, rng, target, *ability, *dc);
+                    if !saved {
+                        self.apply_condition(target, *condition, expiry(me, target, *duration));
+                        landed_conditions.push((target, *condition));
+                    }
+                    if record {
+                        notes.push(format!(
+                            "{} {}",
+                            condition.name(),
+                            match (saved, resisted) {
+                                (true, true) => "shrugged off (legendary resistance)",
+                                (true, false) => "saved",
+                                _ => "LANDED",
+                            }
+                        ));
+                    }
+                }
+                Rider::ConditionOnHit {
+                    condition,
+                    duration,
+                } => {
+                    self.apply_condition(target, *condition, expiry(me, target, *duration));
+                    landed_conditions.push((target, *condition));
+                    if record {
+                        notes.push(format!("{} (no save)", condition.name()));
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -1549,6 +1553,32 @@ impl<'a> Fight<'a> {
         if condition.incapacitated() {
             self.end_concentration(victim);
         }
+    }
+
+    /// As [`attack_mode`], but also consumes [`Condition::Marked`] on
+    /// `target` if it carries one.
+    ///
+    /// The mark is used up by "the next attack roll made against this
+    /// target", not only a hit, so it has to be cleared here - the instant
+    /// it has been read into this roll's mode - rather than waiting for a
+    /// turn boundary the way every other condition's [`Expiry`] does.
+    ///
+    /// [`Effect::Strikes`] computes one roll mode per resolution and reuses
+    /// it across however many strikes a multiattack makes (see its loop
+    /// below), so a multiattack consumes the mark on its first swing and the
+    /// rest roll without it - the same one-shot-per-resolution
+    /// simplification the once-per-turn rider budget already makes.
+    fn attack_mode_consuming_mark(
+        &mut self,
+        base: RollMode,
+        attacker: usize,
+        target: usize,
+    ) -> RollMode {
+        let mode = attack_mode(base, &self.fighters[attacker], &self.fighters[target]);
+        self.fighters[target]
+            .conditions
+            .retain(|&(c, _)| c != Condition::Marked);
+        mode
     }
 
     /// Apply damage already run through resistance and reactions, then
@@ -4185,5 +4215,113 @@ mod tests {
                 .any(|l| l.starts_with("r2 ") && l.contains("Warded Reflex")),
             "once the debuff expires the target's item use is available again:\n{narration}"
         );
+    }
+
+    /// Guiding Bolt's mark: Advantage on the next attack roll against its
+    /// holder, from *any* attacker - not only whoever applied it - and used
+    /// up by that one roll rather than sitting around for the rest of the
+    /// fight.
+    #[test]
+    fn marked_grants_advantage_to_the_next_attack_by_any_attacker_then_clears() {
+        let caster = Creature::new("caster", 10, 20);
+        let target = Creature::new("target", 10, 20);
+        let bystander = Creature::new("bystander", 10, 20);
+        let roster = [
+            (&caster, Side::A),
+            (&target, Side::B),
+            (&bystander, Side::A),
+        ];
+        let mut rng = Rng::new(11);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::Greedy; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        fight.apply_condition(1, Condition::Marked, Expiry::TurnStart(1));
+
+        // A completely different attacker (index 2, not whoever applied the
+        // mark at index 0) still gets Advantage off it.
+        let mode = fight.attack_mode_consuming_mark(RollMode::Normal, 2, 1);
+        assert_eq!(mode, RollMode::Advantage);
+        assert!(
+            !fight.fighters[1].has(|c| c == Condition::Marked),
+            "the mark is consumed by that one attack roll"
+        );
+
+        // A further attack against the same target no longer benefits.
+        let mode = fight.attack_mode_consuming_mark(RollMode::Normal, 0, 1);
+        assert_eq!(mode, RollMode::Normal);
+    }
+
+    /// If nothing attacks the marked creature first, the mark still goes
+    /// away on its own - at the start of its holder's own next turn, the
+    /// same [`Expiry::TurnStart`] every other condition already clears on.
+    #[test]
+    fn marked_expires_at_the_start_of_its_holders_own_next_turn_if_never_used() {
+        let a = Creature::new("a", 10, 20);
+        let b = Creature::new("b", 10, 20);
+        let roster = [(&a, Side::A), (&b, Side::B)];
+        let mut rng = Rng::new(12);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::Greedy; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        fight.apply_condition(1, Condition::Marked, Expiry::TurnStart(1));
+        assert!(fight.fighters[1].has(|c| c == Condition::Marked));
+
+        fight.take_turn(1, 1, &mut rng, &mut log, None);
+        assert!(
+            !fight.fighters[1].has(|c| c == Condition::Marked),
+            "an unused mark should clear at the start of its holder's own next turn"
+        );
+    }
+
+    /// [`Rider::ConditionOnHit`] applies its condition unconditionally on a
+    /// hit - no saving throw rolled at all, unlike [`Rider::SaveOrCondition`].
+    #[test]
+    fn condition_on_hit_marks_its_target_unconditionally_with_no_save() {
+        let caster = Creature::new("caster", 10, 20);
+        let target = Creature::new("target", 10, 20);
+        let roster = [(&caster, Side::A), (&target, Side::B)];
+        let mut rng = Rng::new(13);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::Greedy; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        let riders = [Rider::ConditionOnHit {
+            condition: Condition::Marked,
+            duration: Duration::VictimTurn,
+        }];
+        let mut notes = Vec::new();
+        let mut landed_conditions = Vec::new();
+        fight.fire_on_hit(
+            &mut rng,
+            0,
+            1,
+            &riders,
+            false,
+            &mut notes,
+            &mut landed_conditions,
+        );
+
+        assert!(fight.fighters[1].has(|c| c == Condition::Marked));
+        assert_eq!(landed_conditions, vec![(1, Condition::Marked)]);
     }
 }

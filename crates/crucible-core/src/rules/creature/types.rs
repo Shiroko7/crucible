@@ -232,6 +232,17 @@ pub enum Condition {
     /// tagged [`crate::rules::creature::MoveKind::Spell`] or
     /// [`crate::rules::creature::MoveKind::MagicItem`].
     Suppressed,
+    /// Outlined by a fading light: no effect on its own actions or saves, but
+    /// the next attack roll made against it - by anyone, not only whoever
+    /// applied it - has advantage.
+    ///
+    /// Guiding Bolt's mark. Unlike every other condition here, it is not
+    /// cleared only at a turn boundary: `sim::duel`'s attack resolution
+    /// consumes it the moment that next roll happens, so it clears whichever
+    /// comes first - a roll against its holder, or the start of the holder's
+    /// own next turn (its usual [`Duration::VictimTurn`] expiry, for the
+    /// "never got attacked" case).
+    Marked,
 }
 
 impl Condition {
@@ -247,6 +258,7 @@ impl Condition {
             "compelled" | "compel" => Self::Compelled,
             "steady_aim" | "steady aim" => Self::SteadyAim,
             "suppressed" => Self::Suppressed,
+            "marked" => Self::Marked,
             _ => return None,
         })
     }
@@ -263,6 +275,7 @@ impl Condition {
             Self::Compelled => "compelled",
             Self::SteadyAim => "steady_aim",
             Self::Suppressed => "suppressed",
+            Self::Marked => "marked",
         }
     }
 
@@ -280,7 +293,7 @@ impl Condition {
     pub fn advantage_to_attackers(self) -> bool {
         matches!(
             self,
-            Self::Stunned | Self::Prone | Self::Blinded | Self::Paralyzed
+            Self::Stunned | Self::Prone | Self::Blinded | Self::Paralyzed | Self::Marked
         )
     }
 
