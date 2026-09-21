@@ -254,7 +254,7 @@ fn mean_damage_matches_a_hand_calculation() {
 /// The same `AttackModifier`/damage-rider hook `exact_vs_sampled.rs` checks
 /// against the single-pool [`crucible_core::rules::Attack`], checked again here
 /// against a multi-type [`Strike`] - Bless on the roll, Sneak Attack's dice on
-/// the damage - since that is the type `sim::duel` actually resolves against,
+/// the damage - since that is the type `sim::fight` actually resolves against,
 /// and a hook that only worked on the standalone test fixture would not be a
 /// hook at all.
 #[test]
@@ -309,7 +309,7 @@ fn attack_modifiers_and_damage_riders_agree_on_a_multi_type_strike() {
 /// finalized rather than a modifier folded into the roll like
 /// [`AttackModifier`] or a rider appended to the damage like the sneak
 /// attack case above, so it gets its own agreement check - on the same
-/// multi-type [`Strike`] `sim::duel` actually resolves against, the same way
+/// multi-type [`Strike`] `sim::fight` actually resolves against, the same way
 /// the case above does for `AttackModifier`/`DamageRider`.
 #[test]
 fn a_reactive_ac_boost_agrees_with_the_exact_path_on_a_multi_type_strike() {

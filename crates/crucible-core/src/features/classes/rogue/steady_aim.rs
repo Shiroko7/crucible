@@ -14,7 +14,7 @@ use crate::rules::Condition;
 /// yourself that lasts until the start of your own next turn." Whichever
 /// attack is resolved while [`Condition::SteadyAim`] is active gets
 /// [`RollMode::Advantage`](crate::rules::RollMode::Advantage) from
-/// it - see `sim::duel`'s `attack_mode`, which reads
+/// it - see `sim::fight`'s `attack_mode`, which reads
 /// [`Condition::advantage_on_attacks`] the same way it already read
 /// [`Condition::disadvantage_on_attacks`] for Poisoned and Blinded. The speed
 /// clause is [`Condition::zeroes_speed`]: nothing in this engine has a
@@ -22,7 +22,7 @@ use crate::rules::Condition;
 /// that matters"), so that flag is tracked and exposed generically rather
 /// than acted on.
 ///
-/// The move is marked [`Move::before_action`], so `sim::duel` resolves it
+/// The move is marked [`Move::before_action`], so `sim::fight` resolves it
 /// before the same turn's action - the attack it exists to set up - and the
 /// attack roll uses the advantage up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -90,7 +90,7 @@ mod tests {
             "Steady Aim is taken before the attack it sets up"
         );
         // Zero damage in its own right - the advantage it grants only shows
-        // up on whatever attack rolls against it, which `sim::duel`'s
+        // up on whatever attack rolls against it, which `sim::fight`'s
         // `attack_mode` and `Condition::advantage_on_attacks` cover.
         let dummy = crate::creature::Creature::new("dummy", 10, 10);
         assert_eq!(steady_aim.effect.mean_damage(&dummy), 0.0);

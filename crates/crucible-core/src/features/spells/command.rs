@@ -37,7 +37,7 @@ impl CommandWord {
     /// with `Duration::ApplierTurn` - the engine's handle on "obeys a
     /// directive on its own very next turn" (see that variant's own doc) and
     /// denies the rest of that turn's action economy via
-    /// `sim::duel::Fighter::loses_turn`, without touching legendary actions.
+    /// `sim::fight::Fighter::loses_turn`, without touching legendary actions.
     /// `ApplierTurn` rather than `VictimTurn` is deliberate: it is the
     /// mechanism Stunning Strike already proves bounds a condition to
     /// *exactly* the victim's next turn regardless of relative initiative
@@ -239,10 +239,10 @@ mod tests {
     /// An end-to-end fight, not just the `Move` shape: Grovel really does
     /// cost the target its very next turn (via `turns_lost`) and really does
     /// leave it Prone, using the duel engine exactly as any other condition
-    /// does - the acceptance test for `sim::duel::Fighter::loses_turn`.
+    /// does - the acceptance test for `sim::fight::Fighter::loses_turn`.
     #[test]
     fn grovel_costs_the_target_its_next_turn_in_a_real_fight() {
-        use crate::sim::duel::{run, Policy};
+        use crate::sim::{run, Policy};
 
         let mut builder = caster(Ability::Wis, 5, 4); // DC 8 + 5 + 4 = 17
         builder.creature.initiative = 100;

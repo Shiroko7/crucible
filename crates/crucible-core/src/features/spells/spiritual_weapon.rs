@@ -14,24 +14,24 @@ use crate::rules::{DamageKind, DamageRoll};
 /// hardcoded number - and on every later round, an identical Bonus Action
 /// strike is available again at no further cost.
 ///
-/// Registers two Bonus Actions rather than one, which is exactly the split
-/// the mechanic itself needs: the *initial* cast pays a 2nd-level slot and
-/// can only ever be taken once (`Uses::Limited(1)` - a caster does not
-/// re-pay to keep swinging a weapon it has already summoned), while
-/// `"Spiritual Weapon (Strike Again)"` is unlimited and free. Both moves are
-/// otherwise identical, so a policy ranking by mean damage (every policy but
-/// `InOrder`, which just takes the first legal move in list order) prefers
-/// whichever it can currently afford, in list order: the paying move while
-/// the slot is unspent, the free one afterwards. That is "pay once, then
-/// repeat" with no new cross-move bookkeeping - see
-/// `sim::duel`'s own `spiritual_weapons_initial_cast_spends_a_slot_and_the_repeat_strike_does_not`
+/// Registers two Bonus Actions rather than one, which is exactly the split the
+/// mechanic itself needs: the *initial* cast pays a 2nd-level slot and can
+/// only ever be taken once (`Uses::Limited(1)` - a caster does not re-pay to
+/// keep swinging a weapon it has already summoned), while `"Spiritual Weapon
+/// (Strike Again)"` is unlimited and free. Both moves are otherwise identical,
+/// so a policy ranking by mean damage (every policy but `InOrder`, which just
+/// takes the first legal move in list order) prefers whichever it can
+/// currently afford, in list order: the paying move while the slot is unspent,
+/// the free one afterwards. That is "pay once, then repeat" with no new
+/// cross-move bookkeeping - see `sim::fight`'s own
+/// `spiritual_weapons_initial_cast_spends_a_slot_and_the_repeat_strike_does_not`
 /// test for the mechanism actually firing across rounds.
 ///
 /// Deliberately does **not** call [`Move::with_concentration`] on either
 /// move: unlike most spells that maintain a lasting effect, Spiritual
 /// Weapon does not require concentration at all (it lasts on its own for
 /// its duration), so summoning it never ends whatever the caster was
-/// already concentrating on - see `sim::duel`'s
+/// already concentrating on - see `sim::fight`'s
 /// `spiritual_weapon_coexists_with_an_active_concentration_spell_without_disturbing_it`
 /// test, which proves a `Hold`-style concentration effect survives a
 /// same-turn Spiritual Weapon cast untouched.
@@ -279,7 +279,7 @@ mod tests {
 
         // A caster with the marker rider and a plain caster without it -
         // read through `Creature::extra_damage_applies_to_spell_attacks`,
-        // the same accessor `sim::duel` would consult.
+        // the same accessor `sim::fight` would consult.
         let plain_caster = Creature::new("Plain Caster", 15, 40).with_rider(extension_rider());
         let extended_caster = Creature::new("Extended Caster", 15, 40)
             .with_rider(extension_rider())

@@ -48,7 +48,7 @@ pub enum Condition {
     /// from Incapacitated ([`Condition::incapacitated`]) because it carries
     /// none of that condition's side effects - attacks against a compelled
     /// creature gain no advantage, it does not auto-fail Strength or
-    /// Dexterity saves, and (see `sim::duel::Fight::legendary`) it does not
+    /// Dexterity saves, and (see `sim::fight::Fight::legendary`) it does not
     /// take away legendary actions, since Command's text only ever reaches
     /// the target's own next turn.
     Compelled,
@@ -57,7 +57,7 @@ pub enum Condition {
     ///
     /// The advantage half is [`Condition::advantage_on_attacks`], the mirror
     /// of [`Condition::disadvantage_on_attacks`], and like [`Condition::Marked`]
-    /// it is used up by the attack roll it helps - see `sim::duel`'s attack
+    /// it is used up by the attack roll it helps - see `sim::fight`'s attack
     /// resolution. The speed half is [`Condition::zeroes_speed`] - there is
     /// no movement model here to apply it against (see `DESIGN.md`'s
     /// "Positioning is the gap that matters"), so it is exposed generically
@@ -83,7 +83,7 @@ pub enum Condition {
     /// applied it - has advantage.
     ///
     /// Guiding Bolt's mark. Unlike most conditions here, it is not cleared
-    /// only at a turn boundary: `sim::duel`'s attack resolution consumes it
+    /// only at a turn boundary: `sim::fight`'s attack resolution consumes it
     /// the moment that next roll happens, so it clears whichever comes first -
     /// a roll against its holder, or the end of the applier's next turn (its
     /// [`Duration::ApplierNextTurnEnd`] expiry, for the "never got attacked"
@@ -224,7 +224,7 @@ impl Condition {
     /// ([`crate::creature::MoveKind::Spell`]) and activating a magic
     /// item ([`crate::creature::MoveKind::MagicItem`]). Whoever
     /// selects a move checks this before taking one of either kind - see
-    /// `sim::duel`'s move gating - this only answers the question.
+    /// `sim::fight`'s move gating - this only answers the question.
     pub fn blocks_magic(self) -> bool {
         matches!(self, Self::Suppressed)
     }
@@ -241,7 +241,7 @@ impl Condition {
     /// [`Condition::SaveDisadvantage`] only its own ability's. Composed with
     /// any other source of advantage or disadvantage on a save via the usual
     /// 5e cancellation rule rather than overriding it - see
-    /// `sim::duel::save_mode`, the same stacking `attack_mode` already
+    /// `sim::fight::save_mode`, the same stacking `attack_mode` already
     /// applies to attack rolls.
     pub fn disadvantage_on_save(self, ability: Ability) -> bool {
         match self {
@@ -254,7 +254,7 @@ impl Condition {
     /// Halves this creature's own outgoing damage, of any type, against
     /// anyone it attacks - the attacker-side counterpart to
     /// [`crate::rules::Reduction`], which only ever halves by the
-    /// *target's* damage type. See `sim::duel::halve_if_suppressed`.
+    /// *target's* damage type. See `sim::fight::halve_if_suppressed`.
     pub fn halves_own_damage(self) -> bool {
         matches!(self, Self::Suppressed)
     }
@@ -357,7 +357,7 @@ mod tests {
     }
 
     /// Compelled steals the turn Command spends it on (checked at the duel
-    /// layer, in `sim::duel::Fighter::loses_turn`) without carrying any of
+    /// layer, in `sim::fight::Fighter::loses_turn`) without carrying any of
     /// Incapacitated's other side effects - no advantage to attackers, no
     /// auto-failed Strength or Dexterity saves, and it must not block
     /// legendary actions the way real Incapacitated does.

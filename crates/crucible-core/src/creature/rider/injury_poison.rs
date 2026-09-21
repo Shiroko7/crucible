@@ -50,7 +50,7 @@ impl Rider {
 /// disadvantage-on-saves debuff for its stated `duration` is bookkeeping for
 /// whoever tracks conditions and effects over time to do with the `false`
 /// this returns on a failure - the same division [`Rider::SaveOrCondition`]'s
-/// own `duration` field already leaves to `sim::duel` rather than resolving
+/// own `duration` field already leaves to `sim::fight` rather than resolving
 /// itself.
 pub fn injury_poison_forcing_save(rng: &mut Rng, target: &Creature, rider: &Rider) -> Option<bool> {
     let (ability, dc, ..) = rider.injury_poison()?;

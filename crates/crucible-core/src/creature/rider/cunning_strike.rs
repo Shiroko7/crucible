@@ -36,7 +36,7 @@ impl Rider {
     /// failed save or `None` on a successful one.
     ///
     /// This rolls a bare save with `rng`, for resolving one attack outside a
-    /// fight. `sim::duel` makes the same choice and spend live, but rolls the
+    /// fight. `sim::fight` makes the same choice and spend live, but rolls the
     /// save through its own save handling - which also lets
     /// [`Rider::AlwaysSucceed`] buy back a failure and auto-fails Strength
     /// and Dexterity saves for an Incapacitated target.

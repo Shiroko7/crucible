@@ -17,7 +17,7 @@
 //! A slotted spell spends from the caster's own
 //! [`crate::rules::SpellSlots`] via
 //! [`crate::creature::Move::with_spell_slot`] - one pool per level,
-//! shared by every spell of that level, which `sim::duel` spends from and
+//! shared by every spell of that level, which `sim::fight` spends from and
 //! refuses to overdraw. The spells a build might instead power from
 //! somewhere else - Blindness/Deafness, Command and Magic Missile, which a
 //! wand or a once-a-rest feature can cast as easily as a slot can - take
@@ -30,7 +30,7 @@
 //! conscious" rule - so it is implemented once, in
 //! [`crate::rules::apply_healing`], and inherited by both healing
 //! spells (and anything else that ever heals) rather than re-implemented per
-//! spell. `sim::duel` aims a heal at the caster's own side: a downed ally
+//! spell. `sim::fight` aims a heal at the caster's own side: a downed ally
 //! first, otherwise whoever is missing the most hit points.
 //!
 //! Not modelled, on purpose:

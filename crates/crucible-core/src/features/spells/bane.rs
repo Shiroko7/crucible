@@ -5,7 +5,7 @@
 //! [`crate::rules::AttackModifier::BonusDice`] /
 //! [`crate::rules::AttackModifier::PenaltyDice`] and their
 //! [`crate::rules::SaveModifier`] siblings already exist for exactly this
-//! (see `rules::attack`'s module docs), and `sim::duel` already knows how to
+//! (see `rules::attack`'s module docs), and `sim::fight` already knows how to
 //! apply them for the duration of a concentration spell and strip them when
 //! concentration ends - see [`crate::creature::Effect::Buff`] and
 //! [`crate::creature::Effect::SaveOrModifier`]. This module only builds the

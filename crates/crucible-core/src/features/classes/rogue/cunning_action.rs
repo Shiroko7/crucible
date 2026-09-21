@@ -7,7 +7,7 @@ use crate::features::{CreatureBuilder, FeaturePlugin, FeatureRegistry, FeatureRe
 /// action as a bonus action instead of spending your action on it.
 ///
 /// Registered as two separate bonus-action [`Move`]s rather than one, because
-/// a [`crate::sim::duel::Plan`] only ever picks a single bonus action out of
+/// a [`crate::sim::Plan`] only ever picks a single bonus action out of
 /// the whole list regardless of how many are on it - offering both is exactly
 /// "either one, never both" with no extra bookkeeping needed.
 ///

@@ -13,7 +13,7 @@ use crate::rules::{
 ///
 /// Sneak Attack wants a finesse or ranged *weapon* (or, with a feature that
 /// extends it, a spell attack); a reaction like a shielding umbrella answers
-/// only a ranged *weapon* attack; the ally-adjacency proxy in `sim::duel`
+/// only a ranged *weapon* attack; the ally-adjacency proxy in `sim::fight`
 /// asks whether a creature's primary attack is melee. Four independent flags
 /// rather than one enum of four cases because they genuinely overlap: True
 /// Strike is a weapon attack made as part of casting a spell, so it is both.
@@ -150,7 +150,7 @@ impl Strike {
     /// target's plain [`Creature::reduction`], so an attacker-side trait that
     /// softens an immunity (see
     /// [`crate::creature::Rider::DowngradeImmunity`]) is honoured. This is the
-    /// exact counterpart of [`Strike::sample_from`], which `sim::duel` rolls.
+    /// exact counterpart of [`Strike::sample_from`], which `sim::fight` rolls.
     pub fn damage_pmf_from(
         &self,
         attacker: &Creature,
@@ -171,7 +171,7 @@ impl Strike {
     /// One sampled strike from `attacker` against `target`, distributed
     /// according to [`Strike::damage_pmf_from`] when no reaction is spent.
     ///
-    /// The single entry point `sim::duel` resolves every attack roll through:
+    /// The single entry point `sim::fight` resolves every attack roll through:
     /// `force_crit` for Paralyzed, `modifiers` for Bless/Bane, `extra_damage`
     /// for every damage rider that qualified for this one attack, and the
     /// defender's reactive AC boost
@@ -236,7 +236,7 @@ impl Strike {
     /// Both lists are decided by the caller for this one attack - see the
     /// module docs on [`crate::rules::AttackModifier`] - so many
     /// unrelated sources can be active on the same strike without this
-    /// function, or `sim::duel`, growing a branch per source.
+    /// function, or `sim::fight`, growing a branch per source.
     pub fn damage_pmf_with_modifiers(
         &self,
         target: &Creature,
@@ -487,7 +487,7 @@ impl SaveEffect {
     }
 
     /// As [`SaveEffect::sample_known`], with `target`'s reductions scoped to
-    /// `attacker` via [`Creature::reduction_from`] - the path `sim::duel`
+    /// `attacker` via [`Creature::reduction_from`] - the path `sim::fight`
     /// takes, so an attacker-side immunity downgrade applies to a save's
     /// damage exactly as it does to a hit's.
     pub fn sample_known_from(
@@ -550,7 +550,7 @@ pub enum Effect {
         condition: Condition,
     },
     /// Restores hit points to one of the user's own side - Healing Word, Cure
-    /// Wounds, a potion; `sim::duel` picks who, a downed ally first.
+    /// Wounds, a potion; `sim::fight` picks who, a downed ally first.
     /// The only effect that makes HP go up instead of down, which is why it
     /// contributes nothing to `mean_damage`/`damage_pmf` and gets its own
     /// `heal_pmf` instead.
@@ -574,7 +574,7 @@ pub enum Effect {
     /// `max_targets` allies - the user included - gains `attack_modifier` on
     /// its attack rolls and `save_modifier` on its saving throws, including
     /// its own concentration save - correct 5e behaviour for Bless, not a bug,
-    /// since `sim::duel` resolves every saving throw a fighter makes through
+    /// since `sim::fight` resolves every saving throw a fighter makes through
     /// the same modifier list. Lasts until this move's concentration ends, so
     /// a move using this should also set
     /// [`crate::creature::Move::concentration`].

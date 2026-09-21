@@ -75,8 +75,7 @@ pub fn parse_duration(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::creature::Effect;
-    use crate::creature::Rider;
+    use crate::creature::{Effect, Rider};
     use crate::dsl::scenario::parse;
 
     /// `until save` refers back to the move's own save wherever the clauses

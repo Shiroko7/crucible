@@ -1,4 +1,5 @@
-//! Read a scenario or formatted creature configuration, fight it many times, and report results.
+//! Read a scenario or formatted creature configuration, fight it many times,
+//! and report results.
 
 use crucible_core::creature::Creature;
 use crucible_core::dsl::scenario;

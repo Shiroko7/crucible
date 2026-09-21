@@ -10,7 +10,7 @@ use crate::rules::RollMode;
 /// makes, not only its attack rolls, and Bane's `-1d4` is the same shape as
 /// a penalty; both need somewhere to plug in that is not `AttackModifier`,
 /// because a saving throw has no advantage/disadvantage concept in this
-/// engine (see `sim::duel`) and dragging `ForceAdvantage`/`ForceDisadvantage`
+/// engine (see `sim::fight`) and dragging `ForceAdvantage`/`ForceDisadvantage`
 /// along as meaningless variants here would be worse than a second enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveModifier {
@@ -21,7 +21,7 @@ pub enum SaveModifier {
 }
 
 /// Exact distribution of everything a save modifier list adds to a d20's
-/// total - the save equivalent of [`modifier_pmf`].
+/// total - the save equivalent of `attack::modifier::modifier_pmf`.
 fn save_modifier_pmf(modifiers: &[SaveModifier]) -> Pmf {
     modifiers.iter().fold(Pmf::constant(0), |acc, m| match *m {
         SaveModifier::BonusDice { count, sides } => acc.convolve(&Pmf::pool(count, sides)),

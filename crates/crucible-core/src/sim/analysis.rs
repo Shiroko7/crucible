@@ -18,7 +18,7 @@ use crate::creature::{Creature, Move};
 use crate::prob::dice::Pmf;
 use crate::prob::exact::expected_attacks_to_kill;
 use crate::prob::rng::Rng;
-use crate::sim::duel::{run_teams, run_with, Budget, Outcome, Policy, Side};
+use crate::sim::{run_teams, run_with, Budget, Outcome, Policy, Side};
 
 /// The fraction of outcomes CVaR averages over.
 const TAIL: f64 = 0.10;

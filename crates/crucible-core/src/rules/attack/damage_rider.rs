@@ -89,7 +89,7 @@ impl DamageRider {
 /// Exact distribution of one damage rider's contribution to one hit, dice
 /// doubled on a crit exactly like the base pool.
 ///
-/// Floored at zero and reduced by *its own* effective [`Reduction`] -
+/// Floored at zero and reduced by *its own* effective [`crate::rules::Reduction`] -
 /// [`Defense::reduction_for`] - before it is convolved with anything else,
 /// the same per-component order [`crate::creature::Strike`] uses for
 /// a hit with more than one damage type. That is what lets a rider whose

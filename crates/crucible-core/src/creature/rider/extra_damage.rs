@@ -14,7 +14,7 @@ impl Rider {
     /// on a roll that is not at disadvantage, with either advantage or an
     /// ally next to the target. `used_this_turn` is the once-per-turn
     /// budget, tracked by the caller - the same shared per-creature flag
-    /// `sim::duel` already keeps for Stunning-Strike-style riders (see
+    /// `sim::fight` already keeps for Stunning-Strike-style riders (see
     /// `README.md`'s note that a creature gets one once-per-turn rider
     /// trigger per turn in total, not one per rider).
     ///
@@ -76,7 +76,7 @@ impl Rider {
 
     /// The same gate as [`Rider::extra_damage_for_with_spell_attack_extension`],
     /// read off a [`crate::creature::Strike`]'s [`AttackKind`] rather than an
-    /// [`Attack`]'s flags - the form `sim::duel` resolves every live attack
+    /// [`Attack`]'s flags - the form `sim::fight` resolves every live attack
     /// roll in. `mode` is the roll's final mode, after every source of
     /// advantage and disadvantage has cancelled.
     ///

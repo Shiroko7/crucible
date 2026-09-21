@@ -14,9 +14,9 @@
 //!   all, not caught-and-then-unaffected;
 //! - "repeating the save at the end of its turns" is
 //!   [`crate::rules::Duration::SaveEndTurn`], which already drives
-//!   `sim::duel`'s end-of-turn save loop for any condition that carries it;
+//!   `sim::fight`'s end-of-turn save loop for any condition that carries it;
 //! - "for as long as the caster concentrates" is
-//!   [`crate::creature::Move::concentration`] - `sim::duel`'s
+//!   [`crate::creature::Move::concentration`] - `sim::fight`'s
 //!   concentration tracker clears the condition from every target it is
 //!   maintaining the instant that ends, save or no save;
 //! - the auto-crit a Paralyzed target grants an attacker is
@@ -340,9 +340,9 @@ mod tests {
     }
 
     /// Hold Person's own repeat save is not academic: with a beatable Wisdom
-    /// save, the check `sim::duel`'s end-of-turn loop runs at the end of
+    /// save, the check `sim::fight`'s end-of-turn loop runs at the end of
     /// every one of the victim's turns actually clears the condition, the
-    /// same persistent-vs-easy contrast `sim::duel`'s own
+    /// same persistent-vs-easy contrast `sim::fight`'s own
     /// `a_repeatable_save_can_end_a_condition_the_turn_it_lands` draws for
     /// `Duration::SaveEndTurn` in general, reproduced here for the concrete
     /// spell rather than a synthetic rider.

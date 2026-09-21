@@ -35,7 +35,7 @@ pub enum AttackModifier {
 /// The 5e stacking rule for advantage and disadvantage applied to a modifier
 /// list: however many sources of each are present, they collapse to one flag
 /// apiece, and one of each cancels to a flat roll. This is the same rule
-/// `sim::duel` applies to a set of active conditions, applied here to a set
+/// `sim::fight` applies to a set of active conditions, applied here to a set
 /// of modifiers instead.
 pub fn resolve_mode(base: RollMode, modifiers: &[AttackModifier]) -> RollMode {
     let mut advantage = base == RollMode::Advantage;

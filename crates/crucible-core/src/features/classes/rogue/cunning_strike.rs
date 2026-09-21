@@ -16,7 +16,7 @@ use crate::rules::{Ability, Condition, DamageRider, Duration, SpellCastingProfil
 /// [`Rider::CunningStrike`] and [`crate::rules::DamageRider::spend`]),
 /// which with a Poisoner's Kit includes Poison. Trip and Withdraw are their
 /// own plugins, each reading this same DC. Which effect a given hit buys is
-/// chosen in the fight itself - see `sim::duel`'s Cunning Strike choice.
+/// chosen in the fight itself - see `sim::fight`'s Cunning Strike choice.
 ///
 /// `dex_modifier` and `proficiency_bonus` are plugin parameters rather than a
 /// baked-in `dc`, for the same reason [`crate::dsl::config::SpellcastingConfig`]

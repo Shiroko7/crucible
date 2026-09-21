@@ -285,7 +285,7 @@ pub fn hit_outcomes_with(
 /// cannot touch a natural 20 - that always crits regardless of AC, same as
 /// [`hit_outcomes_with`]. So whenever `available` is true, the whole
 /// distribution is exactly what fighting against `ac + ac_bonus` would give;
-/// `available` is decided by the caller - `sim::duel`, which tracks the
+/// `available` is decided by the caller - `sim::fight`, which tracks the
 /// per-round budget - and is `false` once the reaction is already spent this
 /// round.
 pub fn hit_outcomes_with_reaction(

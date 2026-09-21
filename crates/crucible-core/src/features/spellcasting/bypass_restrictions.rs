@@ -5,7 +5,7 @@
 //! silenced, or unable to speak or gesture, are the usual real-world
 //! examples. This module implements a limited-use charge that, when spent,
 //! marks one specific move-taking as exempt via
-//! [`Move::bypasses_casting_restrictions`]; `sim::duel`'s move gating reads
+//! [`Move::bypasses_casting_restrictions`]; `sim::fight`'s move gating reads
 //! that flag, letting the move through [`crate::rules::Condition::Silenced`].
 //!
 //! The charge budget reuses [`Uses::Limited`], the same "N per day" pattern
@@ -77,8 +77,8 @@ impl FeaturePlugin for BypassCastingRestrictionsPlugin {
 }
 
 /// A spell written in the scenario DSL, granted as a limited-use cast that
-/// bypasses casting restrictions - parsed when applied, like
-/// [`DeclaredFastHandsMove`].
+/// bypasses casting restrictions - parsed when applied, like Fast Hands'
+/// `DeclaredFastHandsMove`.
 #[derive(Debug, Clone)]
 struct DeclaredBypassCast {
     name: String,

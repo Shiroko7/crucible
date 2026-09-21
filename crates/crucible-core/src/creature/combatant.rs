@@ -9,12 +9,12 @@ use crate::rules::{
 ///
 /// `actions`, `bonus_actions` and `legendary` are ordered, and that order is
 /// itself the simplest policy: take the first usable one. See
-/// [`crate::sim::duel::Policy`].
+/// [`crate::sim::Policy`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Creature {
     pub name: String,
-    /// 0 or 1. Read by [`crate::sim::duel::run_teams`]; the one-against-one [`crate::sim::duel::run`]
-    /// ignores it and uses argument order instead.
+    /// 0 or 1. Read by [`crate::sim::run_teams`]; the one-against-one
+    /// [`crate::sim::run`] ignores it and uses argument order instead.
     pub team: u8,
     /// How many copies of this creature are in the fight. The loader expands it;
     /// nothing downstream sees a count greater than one.

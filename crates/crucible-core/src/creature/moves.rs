@@ -46,7 +46,7 @@ pub enum Uses {
 /// rather than silently promoting it - see `features::classes::rogue::thief` - and
 /// `Spell`/`MagicItem` for a condition like
 /// [`crate::rules::Condition::Suppressed`] that blocks casting and
-/// item activation, via `sim::duel`'s move gating.
+/// item activation, via `sim::fight`'s move gating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MoveKind {
     #[default]
@@ -82,7 +82,7 @@ pub struct Move {
     /// already concentrating on, before anything else happens - even if this
     /// cast goes on to land nothing. Whatever condition it then applies, on
     /// whichever targets, becomes the new thing concentration is
-    /// maintaining; see [`crate::sim::duel`] for how that is tracked and torn
+    /// maintaining; see `sim::fight` for how that is tracked and torn
     /// down. `false` for every ordinary move, which is why this defaults with
     /// the rest of [`Move::new`] rather than needing its own builder call.
     pub concentration: bool,

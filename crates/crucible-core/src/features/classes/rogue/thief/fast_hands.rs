@@ -15,7 +15,7 @@ use crate::features::{
 /// (see [`MoveKind`]); a creature's actual item-activation move is just
 /// another [`Move`], declared wherever the rest of its actions are. This
 /// plugin's whole job is to take that move and register it as a bonus
-/// action too: `crate::sim::duel` already picks one move from `actions` and,
+/// action too: `crate::sim::fight` already picks one move from `actions` and,
 /// independently, one from `bonus_actions` each turn, so having the same
 /// move available in both lists *is* the feature - no special-casing in the
 /// turn loop required. Whatever resource or `Uses` budget the move is under

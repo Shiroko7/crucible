@@ -5,7 +5,7 @@
 //! [`crate::rules::AttackModifier::BonusDice`] /
 //! [`crate::rules::AttackModifier::PenaltyDice`] and their
 //! [`crate::rules::SaveModifier`] siblings already exist for exactly this
-//! (see `rules::attack`'s module docs), and `sim::duel` already knows how to
+//! (see `rules::attack`'s module docs), and `sim::fight` already knows how to
 //! apply them for the duration of a concentration spell and strip them when
 //! concentration ends - see [`crate::creature::Effect::Buff`] and
 //! [`crate::creature::Effect::SaveOrModifier`]. This module only builds the
@@ -21,7 +21,7 @@ use crate::rules::{AttackModifier, SaveModifier};
 /// among them. That last part is correct 5e text, not a bug: Bless can help
 /// a blessed caster hold their own concentration, and nothing here has to
 /// special-case "the target of the buff is also the one rolling the save"
-/// for that to happen - `sim::duel` resolves every saving throw a fighter
+/// for that to happen - `sim::fight` resolves every saving throw a fighter
 /// makes through the same modifier list, its own concentration check
 /// included.
 #[derive(Debug, Clone, Copy, Default)]

@@ -100,7 +100,7 @@ pub enum Rider {
     /// hits this creature.
     ///
     /// Uncanny Dodge (2024 Rogue 5). Spent on the first hit that lands while
-    /// the reaction is available - see `sim::duel` - since the engine has no
+    /// the reaction is available - see `sim::fight` - since the engine has no
     /// way to foresee a bigger hit later in the round.
     HalveAttackDamage,
     /// Extra damage dice on a hit, gated on the attack roll having advantage
@@ -223,7 +223,7 @@ pub enum Rider {
     /// Guiding Bolt's mark:
     /// [`crate::rules::Condition::Marked`], granting Advantage to
     /// the next attack roll made against the target by anyone, cleared the
-    /// moment that roll happens (see `sim::duel::Fight`'s attack resolution)
+    /// moment that roll happens (see `sim::fight::Fight`'s attack resolution)
     /// or at the start of the target's own next turn, whichever comes first.
     /// Distinct from `SaveOrCondition` because nothing about the mark is
     /// resistible - it lands whenever the attack does - and it carries no
@@ -267,7 +267,7 @@ pub enum Rider {
     /// fired yet - that is per-fight state, not a creature's static kit, the
     /// same split [`Rider::AlwaysSucceed`]'s remaining uses and
     /// [`Rider::ReduceDamage`]'s per-round budget already draw between the
-    /// rider's fixed parameters and `sim::duel`'s own bookkeeping. See
+    /// rider's fixed parameters and `sim::fight`'s own bookkeeping. See
     /// [`Rider::arms_on_condition`] and [`Rider::weapon_damage_if_armed`],
     /// which take that armed/not-armed flag as a plain `bool` rather than
     /// storing it here.
@@ -318,7 +318,7 @@ impl Rider {
     /// Riders with a per-fight budget need somewhere to count it down:
     /// Legendary Resistance's uses, an injury poison's single dose.
     /// Reactions are not counted here - they share the creature's one
-    /// reaction per round, which `sim::duel` tracks itself.
+    /// reaction per round, which `sim::fight` tracks itself.
     pub fn initial_uses(&self) -> u32 {
         match self {
             Rider::AlwaysSucceed { uses } => *uses,
