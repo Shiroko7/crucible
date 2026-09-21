@@ -1,7 +1,6 @@
 //! Replayable example fight narrations.
 
 use crate::args::Args;
-
 use crucible_core::creature::Creature;
 use crucible_core::prob::Rng;
 use crucible_core::sim::{run_teams, Outcome, Policy, Side};

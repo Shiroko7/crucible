@@ -1,7 +1,6 @@
 //! Formats and prints the playstyle profile and monster sweep tables.
 
 use crate::args::Args;
-
 use crucible_core::creature::Creature;
 use crucible_core::sim::{evaluate_teams, Policy, Summary};
 pub fn print_profile(args: &Args, roster: &[&Creature]) {

@@ -120,7 +120,7 @@ pub fn parse(text: &str) -> Result<Vec<Creature>, ParseError> {
         }
 
         if key == "source" || key == "import" || key == "file" {
-            let registry = crate::dsl::plugin::FeatureRegistry::new();
+            let registry = crate::features::FeatureRegistry::new();
             let mut creature = crate::dsl::config::load_creature_from_file(&value, &registry)
                 .map_err(|e| fail(format!("failed to load creature from '{value}': {e}")))?;
             if let Some(team) = pending_team.take() {
@@ -313,8 +313,9 @@ pub enum TraitEffect {
     AcBonus(i32),
     /// A flat, always-on bonus to every saving throw.
     SavesBonus(i32),
-    /// A flat, always-on bonus to spell attack rolls and spell save DC,
-    /// added to the creature's existing [`crate::rules::SpellCastingProfile::item_bonus`].
+    /// A flat, always-on bonus to spell attack rolls and spell save DC, added
+    /// to the creature's existing
+    /// [`crate::rules::SpellCastingProfile::item_bonus`].
     SpellBonus(i32),
     /// Resistance to one or more damage types.
     Resistance(Vec<DamageKind>),

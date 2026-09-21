@@ -45,10 +45,11 @@ pub(crate) fn sample_save_modifier_bonus(rng: &mut Rng, modifiers: &[SaveModifie
 }
 
 /// P(a saving throw succeeds), exact: a flat d20 plus `save_bonus` against
-/// `dc`, with a [`SaveModifier`] list folded in by convolution. Saving
-/// throws have no natural-1/natural-20 rule in 5e, unlike attack rolls (see
-/// [`crate::rules::hit_outcomes_with`]), so every face of the d20 is treated the same -
-/// there is no separate crit/fumble carve-out to take out of the loop.
+/// `dc`, with a [`SaveModifier`] list folded in by convolution. Saving throws
+/// have no natural-1/natural-20 rule in 5e, unlike attack rolls (see
+/// [`crate::rules::hit_outcomes_with`]), so every face of the d20 is treated
+/// the same - there is no separate crit/fumble carve-out to take out of the
+/// loop.
 pub fn save_success_chance(save_bonus: i32, dc: i32, modifiers: &[SaveModifier]) -> f64 {
     let bonus = save_modifier_pmf(modifiers);
     let mut success = 0.0;
@@ -89,8 +90,9 @@ pub(crate) fn probability_at_least(mode: RollMode, needed: i32) -> f64 {
 /// do, so unlike an attack roll this is exactly `mode.roll(rng) + bonus >=
 /// dc` with no exception carved out.
 ///
-/// The generic mechanism [`crate::creature::Rider::InjuryPoison`]'s debuff half uses once it
-/// has taken hold: a target under it rolls its burdened ability's saves with
+/// The generic mechanism [`crate::creature::Rider::InjuryPoison`]'s debuff
+/// half uses once it has taken hold: a target under it rolls its burdened
+/// ability's saves with
 /// [`RollMode::Disadvantage`] through this same function rather than a
 /// special case.
 pub fn save_with_mode(rng: &mut Rng, mode: RollMode, bonus: i32, dc: i32) -> bool {

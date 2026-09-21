@@ -4,7 +4,7 @@
 //! equipment, resources, and pluggable features.
 
 use crate::creature::Creature;
-use crate::dsl::plugin::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
+use crate::features::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
 use crate::rules::{Ability, Condition, DamageKind, Reduction};
 use serde::Deserialize;
 use std::collections::HashMap;

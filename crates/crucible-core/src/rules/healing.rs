@@ -5,9 +5,9 @@ use crate::prob::{Pmf, Rng};
 /// A healing roll: dice plus a flat modifier, restoring hit points instead of
 /// removing them.
 ///
-/// Deliberately not a [`crate::rules::DamageRoll`] wearing a different sign: there is no
-/// damage type to resist, no crit to double the dice, and nothing reduces it.
-/// Keeping it a separate, smaller type means `Effect::Heal` cannot
+/// Deliberately not a [`crate::rules::DamageRoll`] wearing a different sign:
+/// there is no damage type to resist, no crit to double the dice, and nothing
+/// reduces it. Keeping it a separate, smaller type means `Effect::Heal` cannot
 /// accidentally inherit any of that machinery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HealRoll {
@@ -15,8 +15,8 @@ pub struct HealRoll {
     pub sides: u32,
     /// Baked in at construction time from whichever ability score fuels the
     /// cast - the caster's [`crate::rules::SpellCastingProfile`]
-    /// modifier, not a hardcoded number. See the plugins in
-    /// `dsl::plugin::spells`.
+    /// modifier, not a hardcoded number. See the healing spells in
+    /// `features::spells`.
     pub bonus: i32,
 }
 
@@ -70,4 +70,50 @@ pub fn apply_healing(current_hp: i32, max_hp: i32, amount: i32) -> (i32, bool) {
     let was_down = is_down(current_hp);
     let new_hp = (current_hp + amount.max(0)).min(max_hp);
     (new_hp, was_down && !is_down(new_hp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn healing_from_zero_revives_and_healing_from_positive_does_not() {
+        let (new_hp, revived) = apply_healing(0, 30, 5);
+        assert_eq!(new_hp, 5);
+        assert!(revived, "regaining HP from 0 wakes the creature up");
+
+        let (new_hp, revived) = apply_healing(12, 30, 5);
+        assert_eq!(new_hp, 17);
+        assert!(!revived, "never went down, so there is nothing to revive");
+    }
+
+    /// This engine never clamps HP at zero (a fighter's HP can read
+    /// negative from overkill damage), so "down" has to mean "at or below
+    /// zero", not "exactly zero".
+    #[test]
+    fn a_deeply_negative_target_still_revives_once_healed_past_zero() {
+        assert!(is_down(-15));
+        let (new_hp, revived) = apply_healing(-15, 30, 20);
+        assert_eq!(new_hp, 5);
+        assert!(revived);
+    }
+
+    /// Healing that does not clear zero leaves the creature down - reaching
+    /// exactly 0 is still "at 0 HP", not revived, matching 5e's own wording.
+    #[test]
+    fn healing_that_does_not_cross_zero_does_not_revive() {
+        let (new_hp, revived) = apply_healing(-15, 30, 10);
+        assert_eq!(new_hp, -5);
+        assert!(!revived);
+
+        let (new_hp, revived) = apply_healing(-10, 30, 10);
+        assert_eq!(new_hp, 0);
+        assert!(!revived, "landing exactly on 0 is still down");
+    }
+
+    #[test]
+    fn healing_never_exceeds_max_hp() {
+        let (new_hp, _) = apply_healing(28, 30, 100);
+        assert_eq!(new_hp, 30);
+    }
 }

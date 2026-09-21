@@ -2,7 +2,6 @@
 
 use crate::args::{Args, MONSTER_STYLES, PARTY_STYLES};
 use crate::report::sheet::strip_number;
-
 use crucible_core::creature::Creature;
 use crucible_core::sim::{evaluate_teams, Policy, Summary};
 /// Rebuild the roster with `copies` of each creature on the first side, or leave

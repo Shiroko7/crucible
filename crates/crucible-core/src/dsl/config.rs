@@ -2,9 +2,9 @@
 
 use super::monster::MonsterDefinition;
 use super::pc::PlayerCharacter;
-use super::plugin::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
 use super::scenario::TraitEffect;
 use crate::creature::{Creature, Move};
+use crate::features::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
 use crate::rules::{Ability, SpellCastingProfile};
 use serde::Deserialize;
 use std::collections::HashMap;

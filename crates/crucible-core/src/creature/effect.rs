@@ -174,9 +174,10 @@ impl Strike {
     /// The single entry point `sim::duel` resolves every attack roll through:
     /// `force_crit` for Paralyzed, `modifiers` for Bless/Bane, `extra_damage`
     /// for every damage rider that qualified for this one attack, and the
-    /// defender's reactive AC boost ([`crate::creature::Rider::ReactionOnTargeted`])
-    /// as `ac_bonus`/`reaction_available`. Returns the damage, how it landed,
-    /// and whether the reaction was actually spent.
+    /// defender's reactive AC boost
+    /// ([`crate::creature::Rider::ReactionOnTargeted`]) as
+    /// `ac_bonus`/`reaction_available`. Returns the damage, how it landed, and
+    /// whether the reaction was actually spent.
     #[allow(clippy::too_many_arguments)]
     pub fn sample_from(
         &self,
@@ -343,7 +344,8 @@ impl Strike {
     }
 
     /// Does this strike deal any of the listed types? Asked by
-    /// [`crate::creature::Rider::ReduceDamage`], which only triggers on some damage.
+    /// [`crate::creature::Rider::ReduceDamage`], which only triggers on some
+    /// damage.
     pub fn deals_any(&self, kinds: &[DamageKind]) -> bool {
         self.damage.iter().any(|r| kinds.contains(&r.kind))
     }
@@ -571,10 +573,11 @@ pub enum Effect {
     /// An unconditional buff to some of the user's own side: each of up to
     /// `max_targets` allies - the user included - gains `attack_modifier` on
     /// its attack rolls and `save_modifier` on its saving throws, including
-    /// its own concentration save - correct 5e behaviour for Bless, not a
-    /// bug, since `sim::duel` resolves every saving throw a fighter makes
-    /// through the same modifier list. Lasts until this move's concentration
-    /// ends, so a move using this should also set [`crate::creature::Move::concentration`].
+    /// its own concentration save - correct 5e behaviour for Bless, not a bug,
+    /// since `sim::duel` resolves every saving throw a fighter makes through
+    /// the same modifier list. Lasts until this move's concentration ends, so
+    /// a move using this should also set
+    /// [`crate::creature::Move::concentration`].
     ///
     /// Bless is `Buff { attack_modifier: BonusDice(1d4), save_modifier:
     /// BonusDice(1d4), max_targets: Some(3) }`.
@@ -587,10 +590,10 @@ pub enum Effect {
     /// against the caster's own spell save DC (read from
     /// [`crate::rules::SpellCastingProfile`] at the moment this
     /// resolves rather than a number carried on the move, so this can never
-    /// drift into a second, stale copy of what that profile already
-    /// computes) or take `attack_modifier` on attack rolls and
-    /// `save_modifier` on saving throws for the duration. As with
-    /// [`Effect::Buff`], the move should set [`crate::creature::Move::concentration`].
+    /// drift into a second, stale copy of what that profile already computes)
+    /// or take `attack_modifier` on attack rolls and `save_modifier` on saving
+    /// throws for the duration. As with [`Effect::Buff`], the move should set
+    /// [`crate::creature::Move::concentration`].
     ///
     /// Bane is `SaveOrModifier { ability: Cha, attack_modifier:
     /// PenaltyDice(1d4), save_modifier: PenaltyDice(1d4), max_targets:

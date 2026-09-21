@@ -4,7 +4,7 @@
 //! traits, actions, and legendary actions.
 
 use crate::creature::Creature;
-use crate::dsl::plugin::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
+use crate::features::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
 use crate::rules::{Ability, Condition, CreatureType, DamageKind, Reduction, Size};
 use serde::Deserialize;
 use std::collections::HashMap;

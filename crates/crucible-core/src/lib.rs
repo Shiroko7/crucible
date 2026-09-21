@@ -14,6 +14,7 @@
 
 pub mod creature;
 pub mod dsl;
+pub mod features;
 pub mod prob;
 pub mod rules;
 pub mod sim;

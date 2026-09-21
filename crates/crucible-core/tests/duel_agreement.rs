@@ -398,7 +398,7 @@ fn an_item_ac_bonus_trait_composes_into_ac_and_still_agrees_with_the_exact_path(
 /// is the number both paths already agree on.
 #[test]
 fn an_item_spell_dc_bonus_composes_and_still_agrees_with_the_exact_path() {
-    let registry = crucible_core::dsl::FeatureRegistry::new();
+    let registry = crucible_core::features::FeatureRegistry::new();
     let toml = r#"
         [pc]
         name = "Test Caster"

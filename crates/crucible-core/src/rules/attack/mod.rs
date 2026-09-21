@@ -396,8 +396,8 @@ fn base_pmf(attack: &Attack, defense: &Defense, dice_count: u32) -> Pmf {
 /// Exact distribution of damage dealt by a single attack, zero included.
 ///
 /// The base pool and each rider are floored and reduced independently, then
-/// summed - see `damage_rider::rider_component_pmf` for why that has to happen before
-/// the convolution rather than after it.
+/// summed - see `damage_rider::rider_component_pmf` for why that has to happen
+/// before the convolution rather than after it.
 pub fn damage_pmf(attack: &Attack, defense: &Defense) -> Pmf {
     let o = outcomes(attack, defense);
 

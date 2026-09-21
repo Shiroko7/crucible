@@ -10,13 +10,11 @@
 //! Ranges are kept small deliberately. These are correctness properties, and a
 //! bug that needs 40d12 to appear would appear at 4d12 too.
 
-use crucible_core::prob::Rng;
-use proptest::prelude::*;
-
-use crucible_core::prob::{expected_attacks_to_kill, kill_curve, Pmf};
+use crucible_core::prob::{expected_attacks_to_kill, kill_curve, Pmf, Rng};
 use crucible_core::rules::{
     damage_pmf, outcomes, sample_damage, Attack, Defense, Reduction, RollMode,
 };
+use proptest::prelude::*;
 fn any_mode() -> impl Strategy<Value = RollMode> {
     prop_oneof![
         Just(RollMode::Normal),

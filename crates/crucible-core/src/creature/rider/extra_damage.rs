@@ -644,7 +644,7 @@ mod tests {
 
     /// The exact and sampled paths agree across the weapon-attack, extended
     /// spell-attack, and unextended spell-attack cases - the same kind of
-    /// trigger matrix `dsl::plugin::rogue`'s sneak attack test covers for
+    /// trigger matrix `features::classes::rogue::sneak_attack`'s tests cover for
     /// the plain weapon-only gate, extended here to the new spell-attack
     /// cases.
     #[test]

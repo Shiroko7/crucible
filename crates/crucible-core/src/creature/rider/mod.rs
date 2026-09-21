@@ -120,22 +120,22 @@ pub enum Rider {
         dice_sides: u32,
         once_per_turn: bool,
     },
-    /// The 2024 Rogue's Cunning Strike (Rogue 5) is unlocked, at this save
-    /// DC: `8 + Dexterity modifier + proficiency bonus`, computed once by
-    /// [`crate::dsl::plugin::CunningStrikePlugin`] and never the creature's
-    /// spellcasting DC - Cunning Strike is not spellcasting, and a Rogue
-    /// without a caster subclass has no [`SpellCastingProfile`] to read one
-    /// from at all.
+    /// The 2024 Rogue's Cunning Strike (Rogue 5) is unlocked, at this save DC:
+    /// `8 + Dexterity modifier + proficiency bonus`, computed once by
+    /// [`crate::features::classes::rogue::CunningStrikePlugin`] and never the
+    /// creature's spellcasting DC - Cunning Strike is not spellcasting, and a
+    /// Rogue without a caster subclass has no [`SpellCastingProfile`] to read
+    /// one from at all.
     ///
     /// A pure marker, deliberately carrying no dice of its own: what it
     /// unlocks is spending part of a *qualifying Sneak Attack's* pool - the
     /// [`crate::rules::DamageRider`] [`Rider::extra_damage_for`] returns for
     /// [`Rider::ConditionalExtraDamage`] - on a rider effect instead of
-    /// rolling it for damage, [`crate::rules::DamageRider::spend`] dice at a time (1d6 per
-    /// the 2024 rules), each spend costed and combined by whoever resolves
-    /// the attack. Several spends can share one hit's pool as long as their
-    /// total fits, because [`crate::rules::DamageRider::spend`] is exactly the same
-    /// operation chained.
+    /// rolling it for damage, [`crate::rules::DamageRider::spend`] dice at a
+    /// time (1d6 per the 2024 rules), each spend costed and combined by
+    /// whoever resolves the attack. Several spends can share one hit's pool as
+    /// long as their total fits, because [`crate::rules::DamageRider::spend`]
+    /// is exactly the same operation chained.
     ///
     /// Which specific effects a spend buys - poison, a shove, breaking a
     /// grapple - is deliberately not here: this is the generic framework, and
@@ -158,10 +158,11 @@ pub enum Rider {
     /// `damage_kind` is parsed and validated same as every other damage
     /// component in this DSL, but - like [`Rider::ConditionalExtraDamage`]'s
     /// dice, which do not carry the weapon's own damage type either - the
-    /// [`crate::rules::DamageRider`] this contributes has no type of its own to compose with
-    /// `combat::damage_pmf`'s single [`crate::rules::Reduction`]. A
-    /// future type-aware resistance path on the exact/sampled attack model
-    /// would read it from here rather than needing a new field.
+    /// [`crate::rules::DamageRider`] this contributes has no type of its own
+    /// to compose with `combat::damage_pmf`'s single
+    /// [`crate::rules::Reduction`]. A future type-aware resistance path on the
+    /// exact/sampled attack model would read it from here rather than needing
+    /// a new field.
     BonusDamageVsCreatureType {
         dice_count: u32,
         dice_sides: u32,
@@ -242,11 +243,12 @@ pub enum Rider {
     /// is the "some builds grant a feature that lets a non-weapon spell
     /// attack also qualify" extension, gated the same way
     /// [`Rider::NothingOnSuccess`]'s evasion check is: a second rider in the
-    /// same list, queried by [`crate::creature::Creature::extra_damage_applies_to_spell_attacks`]
+    /// same list, queried by
+    /// [`crate::creature::Creature::extra_damage_applies_to_spell_attacks`]
     /// rather than a field added to `ConditionalExtraDamage` itself, so a
     /// creature can carry the extension without every existing
-    /// `ConditionalExtraDamage` construction site needing to know about it.
-    /// A no-op on its own; it only changes what
+    /// `ConditionalExtraDamage` construction site needing to know about it. A
+    /// no-op on its own; it only changes what
     /// [`Rider::extra_damage_for_with_spell_attack_extension`] does with a
     /// sibling `ConditionalExtraDamage` rider.
     ExtraDamageAppliesToSpellAttacks,
@@ -270,10 +272,10 @@ pub enum Rider {
     /// which take that armed/not-armed flag as a plain `bool` rather than
     /// storing it here.
     ///
-    /// `damage_kind` is recorded and validated like any other damage
-    /// component in this DSL, but - like [`Rider::ConditionalExtraDamage`]'s
-    /// dice - the [`crate::rules::DamageRider`] this contributes has no type of its own to
-    /// compose with `combat::damage_pmf`'s single
+    /// `damage_kind` is recorded and validated like any other damage component
+    /// in this DSL, but - like [`Rider::ConditionalExtraDamage`]'s dice - the
+    /// [`crate::rules::DamageRider`] this contributes has no type of its own
+    /// to compose with `combat::damage_pmf`'s single
     /// [`crate::rules::Reduction`]; a future type-aware resistance
     /// path on the exact/sampled attack model would read it from here.
     ConditionTriggeredWeaponDamage {
@@ -283,17 +285,19 @@ pub enum Rider {
         bonus: i32,
         damage_kind: DamageKind,
     },
-    /// A consumable injury poison coating a weapon: the next weapon hit
-    /// forces `ability`/`dc` as a saving throw, and a failure burdens the
-    /// target's own future `debuffed_ability` saving throws with
-    /// [`crate::rules::RollMode::Disadvantage`] - [`Condition::SaveDisadvantage`] - and
-    /// applies `condition` too if there is one (most such poisons also leave
-    /// the target Poisoned), both for `duration`.
+    /// A consumable injury poison coating a weapon: the next weapon hit forces
+    /// `ability`/`dc` as a saving throw, and a failure burdens the target's
+    /// own future `debuffed_ability` saving throws with
+    /// [`crate::rules::RollMode::Disadvantage`] -
+    /// [`Condition::SaveDisadvantage`] - and applies `condition` too if there
+    /// is one (most such poisons also leave the target Poisoned), both for
+    /// `duration`.
     ///
     /// See [`injury_poison_forcing_save`] for the forcing save, and
-    /// [`crate::rules::save_with_mode`] for the generic "roll a save under a [`crate::rules::RollMode`]"
-    /// mechanism the resulting debuff itself uses once applied - the same
-    /// [`crate::rules::RollMode`] an attack roll already rolls under, generalised to saves.
+    /// [`crate::rules::save_with_mode`] for the generic "roll a save under a
+    /// [`crate::rules::RollMode`]" mechanism the resulting debuff itself uses
+    /// once applied - the same [`crate::rules::RollMode`] an attack roll
+    /// already rolls under, generalised to saves.
     ///
     /// Generic over both abilities and never named after a specific poison:
     /// `ability`/`dc` is typically a Constitution save against a poison, and

@@ -9,7 +9,7 @@
 //! that flag, letting the move through [`crate::rules::Condition::Silenced`].
 //!
 //! The charge budget reuses [`Uses::Limited`], the same "N per day" pattern
-//! [`super::standard::LegendaryResistancePlugin`] and every other
+//! [`crate::features::monsters::LegendaryResistancePlugin`] and every other
 //! finite-use rider or move in this engine already use rather than
 //! inventing a parallel resource system. This engine has no day/rest
 //! tracking across encounters - `README.md` scopes everything to a single
@@ -19,8 +19,11 @@
 //! [`crate::creature::Creature`] config every time it is called, so
 //! the charge is back at full the moment a new encounter starts.
 
-use super::traits::{CreatureBuilder, FeaturePlugin, FeatureResult};
-use crate::creature::{Move, Uses};
+use crate::creature::{Move, MoveKind, Uses};
+use crate::dsl::scenario;
+use crate::features::{
+    CreatureBuilder, FeatureError, FeaturePlugin, FeatureRegistry, FeatureResult,
+};
 
 /// Grants a creature a limited-use option to take `base_move` flagged as
 /// exempt from whatever casting-restriction mechanism exists or comes to
@@ -28,19 +31,15 @@ use crate::creature::{Move, Uses};
 ///
 /// `base_move` supplies everything about the cast itself - its name, effect,
 /// cost and whether it needs concentration - so this plugin only adds the
-/// exemption flag and its own charge budget on top of it, the same
-/// separation [`super::standard::ActionPlugin`] keeps between "what the move
-/// does" (the caller's problem) and "how it gets onto the creature" (this
-/// plugin's). `base_move`'s own `uses` is replaced by the `uses`-charge
+/// exemption flag and its own charge budget on top of it: "what the move
+/// does" is the caller's problem, "how it gets onto the creature" is this
+/// plugin's. `base_move`'s own `uses` is replaced by the `uses`-charge
 /// budget: the point of this feature is that it is *rarer* than the ordinary
 /// way to take the same cast, not that it has none.
 ///
 /// Registered as an Action, matching how a spell is ordinarily cast; nothing
-/// about the mechanism is action-specific, but this branch's
-/// [`CreatureBuilder`] has no slot-agnostic "add this move somewhere"
-/// entry point yet, and every other single-move-granting plugin here
-/// (`ActionPlugin`, `BonusActionPlugin`) picks a fixed slot for the same
-/// reason.
+/// about the mechanism is action-specific, but [`CreatureBuilder`] has no
+/// slot-agnostic "add this move somewhere" entry point yet.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BypassCastingRestrictionsPlugin {
     pub base_move: Move,
@@ -77,13 +76,69 @@ impl FeaturePlugin for BypassCastingRestrictionsPlugin {
     }
 }
 
+/// A spell written in the scenario DSL, granted as a limited-use cast that
+/// bypasses casting restrictions - parsed when applied, like
+/// [`DeclaredFastHandsMove`].
+#[derive(Debug, Clone)]
+struct DeclaredBypassCast {
+    name: String,
+    effect: String,
+    uses: u32,
+}
+
+impl FeaturePlugin for DeclaredBypassCast {
+    fn id(&self) -> &'static str {
+        "bypasses_casting_restrictions"
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        let mut m = scenario::parse_move_external(
+            &format!("{} | {}", self.name, self.effect),
+            &builder.creature,
+        )
+        .map_err(FeatureError::InvalidConfiguration)?;
+        m.kind = MoveKind::Spell;
+        BypassCastingRestrictionsPlugin::new(m, self.uses).apply(builder)
+    }
+}
+
+pub(super) fn register(registry: &mut FeatureRegistry) {
+    // A limited-use way to cast a spell without components, getting
+    // through a silence (AT-04's Tricky Spells, Subtle Spell): the spell
+    // itself written in the scenario DSL, on its own charge budget.
+    registry.register("bypasses_casting_restrictions", |val| {
+        let name = val.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+            FeatureError::InvalidConfiguration(
+                "bypasses_casting_restrictions needs a `name`".to_string(),
+            )
+        })?;
+        let effect = val.get("effect").and_then(|v| v.as_str()).ok_or_else(|| {
+            FeatureError::InvalidConfiguration(
+                "bypasses_casting_restrictions needs an `effect` (the spell, in the scenario DSL)"
+                    .to_string(),
+            )
+        })?;
+        let uses = val.get("uses").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+        Ok(Box::new(DeclaredBypassCast {
+            name: name.to_string(),
+            effect: effect.to_string(),
+            uses,
+        }))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::creature::{Creature, Effect, Strike};
-    use crate::prob::rng::Rng;
-    use crate::rules::{DamageKind, DamageRoll};
-    use crate::sim::duel::{run, Policy};
+    use crate::creature::Creature;
+    use crate::creature::{Effect, Strike};
+    use crate::prob::Rng;
+    use crate::rules::{Ability, DamageKind, DamageRoll, SpellCastingProfile};
+    use crate::sim::{run, Policy};
 
     fn spell_move() -> Move {
         Move::new(
@@ -199,5 +254,34 @@ mod tests {
         assert_eq!(base.uses, Uses::Unlimited);
         assert!(!base.bypasses_casting_restrictions);
         assert_eq!(plugin.base_move, base);
+    }
+
+    fn spellcaster() -> CreatureBuilder {
+        let mut builder = CreatureBuilder::new("Wizard", 12, 30);
+        builder.set_spellcasting(SpellCastingProfile::new(Ability::Int, 4, 3));
+        builder
+    }
+
+    #[test]
+    fn a_components_free_cast_builds_from_toml() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str(
+            r#"
+                plugin = "bypasses_casting_restrictions"
+                name = "Quiet Bolt"
+                effect = "ranged | hit +7 | 4d6 radiant"
+                uses = 1
+            "#,
+        )
+        .unwrap();
+        let plugin = registry
+            .build_plugin("bypasses_casting_restrictions", &params)
+            .unwrap();
+        let mut builder = spellcaster();
+        plugin.apply(&mut builder).unwrap();
+        let m = &builder.creature.actions[0];
+        assert!(m.bypasses_casting_restrictions);
+        assert_eq!(m.kind, MoveKind::Spell);
+        assert_eq!(m.uses, crate::creature::Uses::Limited(1));
     }
 }

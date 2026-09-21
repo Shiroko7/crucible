@@ -70,7 +70,7 @@ pub enum Condition {
     /// ([`Condition::halves_own_damage`]).
     ///
     /// The bundle a limited-use item's forced save applies on a failure (see
-    /// [`crate::dsl::plugin::LimitedUseDebuffItemPlugin`]), kept as one
+    /// [`crate::features::items::LimitedUseDebuffItemPlugin`]), kept as one
     /// condition rather than three separately-tracked effects because all
     /// three share exactly one applier, one victim and one duration. Unlike
     /// Stunned or Paralyzed, this does **not** incapacitate: the creature

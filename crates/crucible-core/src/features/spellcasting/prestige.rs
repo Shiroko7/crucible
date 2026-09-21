@@ -7,14 +7,17 @@
 //! damage dice to prove the base class has progressed far enough to qualify.
 //!
 //! Every number here - which two abilities gate it and by how much, the
-//! sneak-attack-dice minimum, the granted slot table, and the granted
-//! casting ability and proficiency bonus - belongs to whichever specific
-//! build's TOML supplies it, the same way [`super::rogue::SneakAttackPlugin`]'s
-//! `dice_count` belongs to the rogue wearing it rather than to the plugin.
-//! None of it is hardcoded here.
+//! sneak-attack-dice minimum, the granted slot table, and the granted casting
+//! ability and proficiency bonus - belongs to whichever specific build's TOML
+//! supplies it, the same way
+//! [`crate::features::classes::rogue::SneakAttackPlugin`]'s `dice_count`
+//! belongs to the rogue wearing it rather than to the plugin. None of it is
+//! hardcoded here.
 
-use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
 use crate::creature::Rider;
+use crate::features::{
+    CreatureBuilder, FeatureError, FeaturePlugin, FeatureRegistry, FeatureResult,
+};
 use crate::rules::{Ability, SpellCastingProfile, SPELL_LEVELS};
 
 /// One entry-prerequisite check against a raw ability score already recorded
@@ -162,6 +165,101 @@ impl FeaturePlugin for PrestigeSpellcastingPlugin {
 
         Ok(())
     }
+}
+
+pub(super) fn register(registry: &mut FeatureRegistry) {
+    // Prestige / secondary spellcasting grant: a build-specific entry
+    // gate over a build-specific slot table and casting bonus - every
+    // field is a TOML parameter, see `prestige_spellcasting`.
+    registry.register("prestige_spellcasting", |val| {
+        let name = val
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Prestige Spellcasting")
+            .to_string();
+
+        let ability_requirement = |n: u32| -> FeatureResult<AbilityRequirement> {
+            let ability_key = format!("ability_{n}");
+            let min_key = format!("ability_{n}_min");
+            let ability_str = val.get(&ability_key).and_then(|v| v.as_str()).ok_or_else(|| {
+                FeatureError::InvalidConfiguration(format!(
+                    "prestige_spellcasting needs a `{ability_key}` (which ability score this entry requirement checks)"
+                ))
+            })?;
+            let ability = Ability::parse(ability_str)
+                .ok_or_else(|| FeatureError::UnknownAbility(ability_str.to_string()))?;
+            let minimum = val.get(&min_key).and_then(|v| v.as_integer()).ok_or_else(|| {
+                FeatureError::InvalidConfiguration(format!(
+                    "prestige_spellcasting needs a `{min_key}` (the minimum score required to qualify)"
+                ))
+            })? as i32;
+            Ok(AbilityRequirement::new(ability, minimum))
+        };
+        let ability_requirements = [ability_requirement(1)?, ability_requirement(2)?];
+
+        let minimum_sneak_attack_dice = val
+            .get("min_sneak_attack_dice")
+            .and_then(|v| v.as_integer())
+            .ok_or_else(|| {
+                FeatureError::InvalidConfiguration(
+                    "prestige_spellcasting needs a `min_sneak_attack_dice` (the minimum existing Sneak-Attack-shaped rider dice count required to enter)"
+                        .to_string(),
+                )
+            })? as u32;
+
+        let spellcasting_ability_str = val
+            .get("spellcasting_ability")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                FeatureError::InvalidConfiguration(
+                    "prestige_spellcasting needs a `spellcasting_ability` (which score fuels the granted spellcasting)"
+                        .to_string(),
+                )
+            })?;
+        let ability = Ability::parse(spellcasting_ability_str)
+            .ok_or_else(|| FeatureError::UnknownAbility(spellcasting_ability_str.to_string()))?;
+
+        let proficiency_bonus = val
+            .get("proficiency_bonus")
+            .and_then(|v| v.as_integer())
+            .ok_or_else(|| {
+                FeatureError::InvalidConfiguration(
+                    "prestige_spellcasting needs a `proficiency_bonus` (the ability modifier comes from the creature's own score, and the save DC is derived from both)"
+                        .to_string(),
+                )
+            })? as i32;
+
+        let mut slots = [0u32; SPELL_LEVELS as usize];
+        if let Some(table) = val.get("slots").and_then(|v| v.as_table()) {
+            for (level_str, max_val) in table {
+                let level: u32 = level_str.parse().map_err(|_| {
+                    FeatureError::InvalidConfiguration(format!(
+                        "prestige_spellcasting slot level '{level_str}' is not a number 1-9"
+                    ))
+                })?;
+                if !(1..=SPELL_LEVELS).contains(&level) {
+                    return Err(FeatureError::InvalidConfiguration(format!(
+                        "prestige_spellcasting slot level must be 1-9, got {level}"
+                    )));
+                }
+                let max = max_val.as_integer().ok_or_else(|| {
+                    FeatureError::InvalidConfiguration(format!(
+                        "prestige_spellcasting slots.{level_str} must be an integer"
+                    ))
+                })? as u32;
+                slots[(level - 1) as usize] = max;
+            }
+        }
+
+        Ok(Box::new(PrestigeSpellcastingPlugin::new(
+            name,
+            ability_requirements,
+            minimum_sneak_attack_dice,
+            slots,
+            ability,
+            proficiency_bonus,
+        )))
+    });
 }
 
 #[cfg(test)]
@@ -385,5 +483,95 @@ mod tests {
 
         let err = plugin.apply(&mut builder).unwrap_err();
         assert!(matches!(err, FeatureError::PrerequisiteNotMet(_)));
+    }
+
+    /// Every number in this TOML is a stand-in - different ability names,
+    /// different thresholds, a different slot split and casting bonus than
+    /// any other test uses - which is the whole point of the plugin being
+    /// parameterized rather than hardcoded to one specific build.
+    fn prestige_spellcasting_toml() -> &'static str {
+        r#"
+            plugin = "prestige_spellcasting"
+            name = "Test Prestige Caster"
+            ability_1 = "dex"
+            ability_1_min = 13
+            ability_2 = "int"
+            ability_2_min = 13
+            min_sneak_attack_dice = 2
+            spellcasting_ability = "wis"
+            proficiency_bonus = 4
+
+            [slots]
+            1 = 4
+            2 = 3
+        "#
+    }
+
+    #[test]
+    fn prestige_spellcasting_reads_its_parameters_from_toml_and_applies() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str(prestige_spellcasting_toml()).unwrap();
+        let plugin = registry
+            .build_plugin("prestige_spellcasting", &params)
+            .expect("prestige_spellcasting builds from toml");
+        assert_eq!(plugin.id(), "prestige_spellcasting");
+        assert_eq!(plugin.name(), "Test Prestige Caster");
+
+        let mut builder = crate::features::CreatureBuilder::new("Qualifying Rogue", 15, 40);
+        builder.set_ability_score(Ability::Dex, 13);
+        builder.set_ability_score(Ability::Int, 13);
+        builder.set_ability_score(Ability::Wis, 20);
+        builder.add_rider(crate::creature::Rider::ConditionalExtraDamage {
+            dice_count: 2,
+            dice_sides: 6,
+            once_per_turn: true,
+        });
+
+        plugin.apply(&mut builder).expect("prerequisites are met");
+
+        assert_eq!(builder.creature.spell_slots.max(1), 4);
+        assert_eq!(builder.creature.spell_slots.max(2), 3);
+        let profile = builder.creature.spellcasting.expect("profile granted");
+        assert_eq!(profile.ability, Ability::Wis);
+        assert_eq!(profile.ability_modifier, 5);
+        assert_eq!(profile.attack_bonus(), 9);
+        assert_eq!(profile.save_dc(), 17);
+    }
+
+    #[test]
+    fn prestige_spellcasting_refuses_a_creature_that_does_not_qualify() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str(prestige_spellcasting_toml()).unwrap();
+        let plugin = registry
+            .build_plugin("prestige_spellcasting", &params)
+            .unwrap();
+
+        // No ability scores, no sneak attack dice at all: none of the three
+        // prerequisites hold.
+        let mut builder = crate::features::CreatureBuilder::new("Unqualified Rogue", 15, 40);
+        assert!(matches!(
+            plugin.apply(&mut builder),
+            Err(FeatureError::PrerequisiteNotMet(_))
+        ));
+        assert!(builder.creature.spellcasting.is_none());
+    }
+
+    #[test]
+    fn prestige_spellcasting_requires_both_ability_requirement_fields() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str(
+            r#"
+                ability_1 = "dex"
+                ability_1_min = 13
+                min_sneak_attack_dice = 2
+                spellcasting_ability = "wis"
+                proficiency_bonus = 4
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            registry.build_plugin("prestige_spellcasting", &params),
+            Err(FeatureError::InvalidConfiguration(_))
+        ));
     }
 }

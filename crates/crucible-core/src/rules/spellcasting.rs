@@ -11,11 +11,11 @@ pub const SPELL_LEVELS: u32 = 9;
 /// A caster's spell slot pools: one independent counter per level, 1st
 /// through 9th.
 ///
-/// Distinct from [`crate::creature::Resource`], which is a single named pool shared across
-/// several moves (focus, ki, sorcery points). A caster's slots are nine
-/// separate counters instead, each with its own maximum, and a slot spent at
-/// one level can never fill a different one - so this earns its own type
-/// rather than being nine `Resource`s wearing a trenchcoat.
+/// Distinct from [`crate::creature::Resource`], which is a single named pool
+/// shared across several moves (focus, ki, sorcery points). A caster's slots
+/// are nine separate counters instead, each with its own maximum, and a slot
+/// spent at one level can never fill a different one - so this earns its own
+/// type rather than being nine `Resource`s wearing a trenchcoat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct SpellSlots {
     max: [u32; SPELL_LEVELS as usize],

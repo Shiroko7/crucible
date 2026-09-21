@@ -1,4 +1,4 @@
-//! Traits and types for the Monad Plugin Architecture.
+//! Traits and types for the plugin architecture.
 //!
 //! A feature is a pluggable transformation over a combatant builder.
 //! The agent only implements new or missing features as plugins; PCs and

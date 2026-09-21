@@ -1,13 +1,12 @@
-//! Generic magic item mechanisms.
-//!
-//! Reusable engine-level plugins for the *shape* an item's activation takes,
-//! parameterised rather than hardcoded to any one published item. Non-SRD
-//! items are user-supplied data (see `README.md`'s "Content and
-//! Configuration"), so nothing in this module names one.
+//! A limited-use item that forces a save or suffer a debuff.
 
-use super::rogue::FastHandsPlugin;
-use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
 use crate::creature::{Effect, Move, MoveKind, SaveEffect, Uses};
+use crate::dsl::scenario;
+use crate::dsl::scenario::DurationSpec;
+use crate::features::classes::rogue::thief::FastHandsPlugin;
+use crate::features::{
+    CreatureBuilder, FeatureError, FeaturePlugin, FeatureRegistry, FeatureResult,
+};
 use crate::rules::{Ability, Condition, Duration};
 
 /// A limited-use item, activatable as a Bonus Action via Fast Hands, that
@@ -138,9 +137,57 @@ impl FeaturePlugin for LimitedUseDebuffItemPlugin {
     }
 }
 
+pub(super) fn register(registry: &mut FeatureRegistry) {
+    // A limited-use item that forces a save or a debuff, used through
+    // Fast Hands (ITM-05). `dc` left off means "against your spell save
+    // DC"; `duration` is written the way the scenario DSL writes one.
+    registry.register("limited_use_debuff_item", |val| {
+        let name = val.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+            FeatureError::InvalidConfiguration("limited_use_debuff_item needs a `name`".to_string())
+        })?;
+        let uses = val.get("uses").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+        let ability_str = val.get("ability").and_then(|v| v.as_str()).ok_or_else(|| {
+            FeatureError::InvalidConfiguration(
+                "limited_use_debuff_item needs the `ability` its save uses".to_string(),
+            )
+        })?;
+        let ability = Ability::parse(ability_str)
+            .ok_or_else(|| FeatureError::UnknownAbility(ability_str.to_string()))?;
+        let dc = val.get("dc").and_then(|v| v.as_integer()).map(|d| d as i32);
+        let phrase = val
+            .get("duration")
+            .and_then(|v| v.as_str())
+            .unwrap_or("until applier");
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        let (spec, used) = scenario::parse_duration(&words, 0, phrase)
+            .map_err(FeatureError::InvalidConfiguration)?;
+        if used != words.len() {
+            return Err(FeatureError::InvalidConfiguration(format!(
+                "`{phrase}` is not a duration"
+            )));
+        }
+        let duration = match (spec, dc) {
+            (DurationSpec::Fixed(d), _) => d,
+            (DurationSpec::UntilSave, Some(dc)) => {
+                crate::rules::Duration::SaveEndTurn { ability, dc }
+            }
+            (DurationSpec::UntilSave, None) => {
+                return Err(FeatureError::InvalidConfiguration(format!(
+                    "{name}: `until save` needs a fixed `dc` to repeat"
+                )))
+            }
+        };
+        Ok(Box::new(match dc {
+            Some(dc) => LimitedUseDebuffItemPlugin::new(name, uses, ability, dc, duration),
+            None => LimitedUseDebuffItemPlugin::against_spell_dc(name, uses, ability, duration),
+        }))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::SpellCastingProfile;
 
     fn plugin() -> LimitedUseDebuffItemPlugin {
         LimitedUseDebuffItemPlugin::new("Test Trinket", 1, Ability::Wis, 15, Duration::ApplierTurn)
@@ -243,5 +290,53 @@ mod tests {
             }
             other => panic!("expected a save effect, got {other:?}"),
         }
+    }
+
+    fn spellcaster() -> CreatureBuilder {
+        let mut builder = CreatureBuilder::new("Wizard", 12, 30);
+        builder.set_spellcasting(SpellCastingProfile::new(Ability::Int, 4, 3));
+        builder
+    }
+
+    #[test]
+    fn limited_use_debuff_item_builds_from_toml() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str(
+            r#"
+                plugin = "limited_use_debuff_item"
+                name = "Test Card"
+                ability = "wis"
+                duration = "for 1 minute"
+            "#,
+        )
+        .unwrap();
+        let plugin = registry
+            .build_plugin("limited_use_debuff_item", &params)
+            .unwrap();
+        let mut builder = spellcaster();
+        plugin.apply(&mut builder).unwrap();
+        let item = &builder.creature.bonus_actions[0];
+        assert_eq!(item.kind, MoveKind::MagicItem);
+        let Effect::Save(save) = &item.effect else {
+            panic!("expected a save");
+        };
+        assert_eq!(save.dc, 15, "the caster's own spell save DC");
+        assert_eq!(
+            save.on_failure,
+            vec![(Condition::Suppressed, Duration::Rounds(10))]
+        );
+
+        let repeat_without_dc: toml::Value = toml::from_str(
+            r#"
+                name = "Test Card"
+                ability = "wis"
+                duration = "until save"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            registry.build_plugin("limited_use_debuff_item", &repeat_without_dc),
+            Err(FeatureError::InvalidConfiguration(_))
+        ));
     }
 }

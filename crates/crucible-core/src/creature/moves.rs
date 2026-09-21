@@ -4,7 +4,8 @@
 use crate::creature::{Creature, Effect, Rider};
 
 /// A pool several moves draw on: focus points, ki, sorcery points, superiority
-/// dice. Distinct from [`crate::creature::Uses`], which is one move's private budget.
+/// dice. Distinct from [`crate::creature::Uses`], which is one move's private
+/// budget.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Resource {
     pub name: String,
@@ -42,7 +43,7 @@ pub enum Uses {
 /// variants exist only so a plugin, or a condition's move gating, can
 /// recognise "this move is RAW an Action" - `ObjectUse`/`MagicItem` for
 /// `FastHandsPlugin`, which rejects anything tagged `Standard` or `Spell`
-/// rather than silently promoting it - see `crate::dsl::plugin::rogue` - and
+/// rather than silently promoting it - see `features::classes::rogue::thief` - and
 /// `Spell`/`MagicItem` for a condition like
 /// [`crate::rules::Condition::Suppressed`] that blocks casting and
 /// item activation, via `sim::duel`'s move gating.
@@ -101,12 +102,12 @@ pub struct Move {
     /// every ordinary move.
     ///
     /// This engine has no restriction-checking condition to consult the flag
-    /// against yet - that is a separate, independent mechanism's concern -
-    /// so it exists here as a standalone primitive: whichever mechanism
-    /// checks "can this creature cast right now" can read it once it exists,
-    /// the same way a new [`crate::rules::Condition`] variant is added once and every call
-    /// site the compiler can find is updated to consult it. See
-    /// [`crate::dsl::plugin::casting::BypassCastingRestrictionsPlugin`] for
+    /// against yet - that is a separate, independent mechanism's concern - so
+    /// it exists here as a standalone primitive: whichever mechanism checks
+    /// "can this creature cast right now" can read it once it exists, the same
+    /// way a new [`crate::rules::Condition`] variant is added once and every
+    /// call site the compiler can find is updated to consult it. See
+    /// [`crate::features::spellcasting::BypassCastingRestrictionsPlugin`] for
     /// how a build grants a charge-gated option to set it, reusing
     /// [`Uses::Limited`] for the charge budget rather than inventing a
     /// parallel resource mechanism.
@@ -192,5 +193,34 @@ impl Move {
             None => true,
             Some(level) => caster.cast_spell(level),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A move with no `spell_slot_level` (every other move in the game so
+    /// far) must not be affected by this: `pay_spell_cost` is a no-op that
+    /// always succeeds.
+    #[test]
+    fn a_move_without_a_spell_slot_pays_nothing() {
+        let mut caster = Creature::new("Fighter", 16, 40);
+        let punch = Move::new(
+            "Punch",
+            Effect::Strikes {
+                strike: crate::creature::Strike::new(
+                    5,
+                    vec![crate::rules::DamageRoll::new(
+                        1,
+                        4,
+                        2,
+                        crate::rules::DamageKind::Bludgeoning,
+                    )],
+                ),
+                count: 1,
+            },
+        );
+        assert!(punch.pay_spell_cost(&mut caster));
     }
 }

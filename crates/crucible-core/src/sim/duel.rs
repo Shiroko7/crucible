@@ -4237,11 +4237,11 @@ mod tests {
     // --- Spiritual Weapon (SPL-02) ------------------------------------
     //
     // The moves built here mirror exactly what
-    // `dsl::plugin::spells::SpiritualWeaponPlugin` registers, but are
-    // constructed directly rather than imported from `dsl` - `sim` sits
-    // below `dsl` in the subsystem order (see `lib.rs`'s module docs), so a
-    // test that exercises the duel engine's own bookkeeping has no business
-    // depending on the DSL layer above it.
+    // `features::spells::SpiritualWeaponPlugin` registers, but are
+    // constructed directly rather than imported from `features` - `sim`
+    // sits below `features` in the subsystem order (see `lib.rs`'s module
+    // docs), so a test that exercises the duel engine's own bookkeeping has
+    // no business depending on the feature layer above it.
 
     /// The initial cast: a Bonus Action, a 2nd-level slot, and - critically
     /// for the "pay once, then repeat" shape - `Uses::Limited(1)` so it can

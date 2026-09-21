@@ -8,9 +8,9 @@ use crate::rules::{DamageKind, Defense};
 /// pool - Sneak Attack, a dragonslaying weapon's bonus against its favoured
 /// prey, a smite.
 ///
-/// Doubled on a crit exactly like the attack's own dice: a critical hit in
-/// 5e doubles all of the attack's damage dice, not only the weapon's.
-/// `bonus` is a flat addition and, like [`crate::rules::Attack::damage_bonus`], is never
+/// Doubled on a crit exactly like the attack's own dice: a critical hit in 5e
+/// doubles all of the attack's damage dice, not only the weapon's. `bonus` is
+/// a flat addition and, like [`crate::rules::Attack::damage_bonus`], is never
 /// doubled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DamageRider {
@@ -20,15 +20,15 @@ pub struct DamageRider {
     /// This rider's own damage type, when it is not the same as whatever the
     /// attack it rides on is already reduced as.
     ///
-    /// `None` - the default from [`DamageRider::new`] - means "reduced
-    /// exactly like the rest of this hit": [`Defense::reduction`], the same
-    /// single [`crate::rules::Reduction`] the base attack uses. That is the pre-existing
-    /// behaviour, and it is correct for a weapon-triggered rider (2024 Sneak
-    /// Attack's extra dice are the same damage type as the weapon that
-    /// qualified it). A rider whose damage type is pinned to something the
-    /// attack itself does not carry - the 5e rule that this kind of extra
-    /// damage matches the *spell's* damage type when a spell attack
-    /// triggered it, not a fixed default - sets `Some(kind)` instead; see
+    /// `None` - the default from [`DamageRider::new`] - means "reduced exactly
+    /// like the rest of this hit": [`Defense::reduction`], the same single
+    /// [`crate::rules::Reduction`] the base attack uses. That is the
+    /// pre-existing behaviour, and it is correct for a weapon-triggered rider
+    /// (2024 Sneak Attack's extra dice are the same damage type as the weapon
+    /// that qualified it). A rider whose damage type is pinned to something
+    /// the attack itself does not carry - the 5e rule that this kind of extra
+    /// damage matches the *spell's* damage type when a spell attack triggered
+    /// it, not a fixed default - sets `Some(kind)` instead; see
     /// [`crate::rules::Attack::spell_damage_kind`] and
     /// [`crate::creature::Rider::extra_damage_for_with_spell_attack_extension`].
     pub kind: Option<DamageKind>,
@@ -77,8 +77,9 @@ impl DamageRider {
         Some(self)
     }
 
-    /// Pin this rider's damage to `kind` rather than whatever [`crate::rules::Reduction`]
-    /// the rest of the attack uses - see [`DamageRider::kind`].
+    /// Pin this rider's damage to `kind` rather than whatever
+    /// [`crate::rules::Reduction`] the rest of the attack uses - see
+    /// [`DamageRider::kind`].
     pub fn with_kind(mut self, kind: DamageKind) -> Self {
         self.kind = Some(kind);
         self
