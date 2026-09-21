@@ -1,11 +1,8 @@
 //! Rogue class feature plugins.
 
-use crate::rules::combat::DamageRider;
-use crate::rules::creature::{
-    Ability, Condition, Duration, Effect, Move, MoveKind, Rider, SpellCastingProfile,
-};
-
 use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
+use crate::creature::{Effect, Move, MoveKind, Rider};
+use crate::rules::{Ability, Condition, DamageRider, Duration, SpellCastingProfile};
 
 /// Sneak Attack (2024 Rogue 1): once per turn, extra damage dice on a hit
 /// with a finesse or ranged weapon, if the attack has advantage or an ally
@@ -13,9 +10,9 @@ use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult}
 /// disadvantage, which cancels it even with an ally in place.
 ///
 /// The mechanism this registers - [`Rider::ConditionalExtraDamage`] - is a
-/// [`crate::rules::combat::DamageRider`] gated on flags read straight off the
-/// [`crate::rules::combat::Attack`] being resolved: [`Attack::mode`] for
-/// advantage/disadvantage, and [`Attack::ally_adjacent`] standing in for the
+/// [`crate::rules::DamageRider`] gated on flags read straight off the
+/// [`crate::rules::Attack`] being resolved: [`Attack::mode`] for
+/// advantage/disadvantage, and [`crate::rules::Attack::ally_adjacent`] standing in for the
 /// "an ally is next to the target" clause the engine has no positioning model
 /// to derive (see `DESIGN.md`). Whoever builds the attack for a given
 /// scenario or turn sets that flag the same way `mode` already gets set;
@@ -26,7 +23,7 @@ use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult}
 /// (a magic item's extra die, say) rather than replacing it, and because a
 /// rogue's level determines it (4d6 at level 7, 5d6 later, and so on).
 ///
-/// [`Attack::mode`]: crate::rules::combat::Attack
+/// [`Attack::mode`]: crate::rules::Attack
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SneakAttackPlugin {
     pub dice_count: u32,
@@ -128,10 +125,10 @@ impl FeaturePlugin for FastHandsPlugin {
 /// 10, for an ability check using a skill or tool the rogue is proficient
 /// in - a floor under the roll, not a reroll, so it can only ever help.
 ///
-/// This only sets [`crate::rules::creature::Creature::reliable_talent_floor`]
+/// This only sets [`crate::creature::Creature::reliable_talent_floor`]
 /// via [`CreatureBuilder::set_reliable_talent_floor`]; the "proficient" half
-/// of the rule is up to whoever builds the [`crate::rules::check::CheckRoll`]
-/// for a given check, via [`crate::rules::creature::Creature::check_floor`].
+/// of the rule is up to whoever builds the [`crate::rules::CheckRoll`]
+/// for a given check, via [`crate::creature::Creature::check_floor`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReliableTalentPlugin {
     pub floor: i32,
@@ -178,7 +175,7 @@ impl FeaturePlugin for ReliableTalentPlugin {
 ///
 /// This plugin is deliberately the whole framework and nothing else: it only
 /// unlocks the DC and the ability to spend from Sneak Attack's pool (see
-/// [`Rider::CunningStrike`] and [`crate::rules::combat::DamageRider::spend`]),
+/// [`Rider::CunningStrike`] and [`crate::rules::DamageRider::spend`]),
 /// which with a Poisoner's Kit includes Poison. Trip and Withdraw are their
 /// own plugins, each reading this same DC. Which effect a given hit buys is
 /// chosen in the fight itself - see `sim::duel`'s Cunning Strike choice.
@@ -263,7 +260,7 @@ impl FeaturePlugin for CunningStrikePlugin {
 /// exactly the mechanism Dodge already uses for "a condition you apply to
 /// yourself that lasts until the start of your own next turn." Whichever
 /// attack is resolved while [`Condition::SteadyAim`] is active gets
-/// [`RollMode::Advantage`](crate::rules::combat::RollMode::Advantage) from
+/// [`RollMode::Advantage`](crate::rules::RollMode::Advantage) from
 /// it - see `sim::duel`'s `attack_mode`, which reads
 /// [`Condition::advantage_on_attacks`] the same way it already read
 /// [`Condition::disadvantage_on_attacks`] for Poisoned and Blinded. The speed
@@ -458,9 +455,8 @@ pub fn cunning_strike_poison(sneak_attack: DamageRider, dc: i32) -> Option<(Dama
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsl::plugin::traits::CreatureBuilder;
     use crate::prob::rng::Rng;
-    use crate::rules::combat::{damage_pmf, sample_damage, Attack, DamageRider, Defense, RollMode};
+    use crate::rules::{damage_pmf, sample_damage, Attack, Defense, RollMode};
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-12
@@ -525,7 +521,7 @@ mod tests {
         // Advantage and disadvantage from unrelated sources have already
         // cancelled to Normal by the time `mode` is set on the attack (see
         // `resolve_mode`), so this is really the same case as the one above,
-        // stated for the situation combat.rs actually produces: a roll that
+        // stated for the situation `rules::attack` actually produces: a roll that
         // was going to have both never reaches here as `Advantage`.
         let attack = Attack::new(7, 1, 4, 3)
             .with_mode(RollMode::Disadvantage)
@@ -636,7 +632,7 @@ mod tests {
     }
 
     fn item_move(kind: MoveKind) -> Move {
-        use crate::rules::creature::Effect;
+        use crate::creature::Effect;
         Move::new("Potion of Healing", Effect::Sequence(Vec::new())).with_kind(kind)
     }
 
@@ -738,7 +734,7 @@ mod tests {
     /// of 10 always meets, once Reliable Talent is applied.
     #[test]
     fn reliable_talent_floor_feeds_check_roll_and_guarantees_success() {
-        use crate::rules::check::CheckRoll;
+        use crate::rules::CheckRoll;
 
         let built = CreatureBuilder::new("Rogue", 15, 40)
             .apply_feature(&ReliableTalentPlugin::new())
@@ -899,7 +895,7 @@ mod tests {
         // Zero damage in its own right - the advantage it grants only shows
         // up on whatever attack rolls against it, which `sim::duel`'s
         // `attack_mode` and `Condition::advantage_on_attacks` cover.
-        let dummy = crate::rules::creature::Creature::new("dummy", 10, 10);
+        let dummy = crate::creature::Creature::new("dummy", 10, 10);
         assert_eq!(steady_aim.effect.mean_damage(&dummy), 0.0);
         assert_eq!(steady_aim.effect.stance(), Some(Condition::SteadyAim));
     }
@@ -923,7 +919,7 @@ mod tests {
             vec!["Dash (Bonus Action)", "Disengage (Bonus Action)"]
         );
 
-        let dummy = crate::rules::creature::Creature::new("dummy", 10, 10);
+        let dummy = crate::creature::Creature::new("dummy", 10, 10);
         for m in &built.bonus_actions {
             // Both are free to take (no resource cost, unlimited uses) and
             // have no mechanical effect - there is no movement model for
@@ -965,7 +961,7 @@ mod tests {
     /// effects instead of "does nothing" placeholders.
     #[test]
     fn a_level_five_rogue_can_trip_and_withdraw_from_one_sneak_attack() {
-        use crate::rules::creature::{Condition, Size};
+        use crate::rules::{Condition, Size};
 
         let builder = CreatureBuilder::new("Rogue", 15, 40);
         let creature = builder
@@ -1142,10 +1138,10 @@ mod tests {
     /// `Rider::SaveOrCondition` a failed Constitution save turns into
     /// Poisoned, and `saving_throw_against_condition` is what actually
     /// resolves that save against a target's condition immunity - see
-    /// `crate::rules::creature::rider` for both.
+    /// `crate::creature::rider` for both.
     #[test]
     fn cunning_strike_poison_can_land_on_an_immune_target_with_the_downgrade_trait() {
-        use crate::rules::creature::{saving_throw_against_condition, Creature};
+        use crate::creature::{saving_throw_against_condition, Creature};
 
         let mut immune_target = Creature::new("Zombie", 8, 22);
         immune_target.condition_immunities.push(Condition::Poisoned);

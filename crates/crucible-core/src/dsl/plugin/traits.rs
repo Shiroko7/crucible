@@ -4,10 +4,8 @@
 //! The agent only implements new or missing features as plugins; PCs and
 //! creatures are data-driven configurations composed of these plugins.
 
-use crate::rules::combat::Reduction;
-use crate::rules::creature::{
-    Ability, Creature, CreatureType, DamageKind, Move, Resource, Rider, Size, SpellCastingProfile,
-};
+use crate::creature::{Creature, Move, Resource, Rider};
+use crate::rules::{Ability, CreatureType, DamageKind, Reduction, Size, SpellCastingProfile};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,14 +133,14 @@ impl CreatureBuilder {
 
     /// Set the floor Reliable Talent (or anything shaped like it) puts under
     /// a proficient ability check's raw d20 roll; see
-    /// [`crate::rules::creature::Creature::check_floor`].
+    /// [`crate::creature::Creature::check_floor`].
     pub fn set_reliable_talent_floor(&mut self, floor: i32) {
         self.creature.reliable_talent_floor = Some(floor);
     }
 
     /// Declare this creature's 5e type - Humanoid, Dragon, ... Gates both
     /// spells with a target-type restriction (Hold Person) and
-    /// [`crate::rules::creature::Rider::BonusDamageVsCreatureType`].
+    /// [`crate::creature::Rider::BonusDamageVsCreatureType`].
     pub fn set_creature_type(&mut self, creature_type: CreatureType) {
         self.creature.creature_type = Some(creature_type);
     }

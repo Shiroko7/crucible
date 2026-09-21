@@ -5,12 +5,10 @@
 //! items are user-supplied data (see `README.md`'s "Content and
 //! Configuration"), so nothing in this module names one.
 
-use crate::rules::creature::{
-    Ability, Condition, Duration, Effect, Move, MoveKind, SaveEffect, Uses,
-};
-
 use super::rogue::FastHandsPlugin;
 use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
+use crate::creature::{Effect, Move, MoveKind, SaveEffect, Uses};
+use crate::rules::{Ability, Condition, Duration};
 
 /// A limited-use item, activatable as a Bonus Action via Fast Hands, that
 /// forces a saving throw on a single target and, on a failure, applies a
@@ -20,7 +18,7 @@ use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult}
 ///   ([`MoveKind::Spell`], [`MoveKind::MagicItem`]) - see
 ///   [`Condition::blocks_magic`];
 /// - it has disadvantage on every saving throw it makes - see
-///   [`Condition::disadvantage_on_saves`];
+///   [`crate::rules::Condition::disadvantage_on_saves`];
 /// - any damage it deals, of any type, to anyone, is halved - see
 ///   [`Condition::halves_own_damage`].
 ///
@@ -48,7 +46,7 @@ use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult}
 ///
 /// `dc` is either a fixed number printed on the item, or `None` for an item
 /// whose save is "against your spell save DC" - read off the wielder's own
-/// [`crate::rules::creature::SpellCastingProfile`] when the plugin applies.
+/// [`crate::rules::SpellCastingProfile`] when the plugin applies.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LimitedUseDebuffItemPlugin {
     pub name: String,
@@ -143,7 +141,6 @@ impl FeaturePlugin for LimitedUseDebuffItemPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsl::plugin::traits::CreatureBuilder;
 
     fn plugin() -> LimitedUseDebuffItemPlugin {
         LimitedUseDebuffItemPlugin::new("Test Trinket", 1, Ability::Wis, 15, Duration::ApplierTurn)
@@ -188,7 +185,7 @@ mod tests {
     /// wielder without one is a configuration error rather than a DC of 0.
     #[test]
     fn a_spell_dc_item_reads_the_wielders_own_save_dc() {
-        use crate::rules::creature::SpellCastingProfile;
+        use crate::rules::SpellCastingProfile;
         let item = LimitedUseDebuffItemPlugin::against_spell_dc(
             "Test Card",
             1,

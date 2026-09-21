@@ -1,7 +1,6 @@
 //! Formats and prints the parsed creature sheet.
 
 use crucible_core::creature::{AttackTrigger, Creature, Effect, Move, MoveKind, Rider, Uses};
-
 /// Strip copy numbers like "Hero 3" back to "Hero", so resizing does not stack numbers.
 pub fn strip_number(name: &str) -> &str {
     match name.rsplit_once(' ') {
@@ -51,7 +50,7 @@ pub fn print_sheet(roster: &[&Creature]) {
                     "    {label:<10} {:<24} {:<46} {:>5.1} avg vs {}",
                     m.name,
                     describe(c, m),
-                    crucible_core::duel::expected_damage(c, m, against),
+                    crucible_core::sim::duel::expected_damage(c, m, against),
                     strip_number(&against.name)
                 );
             }

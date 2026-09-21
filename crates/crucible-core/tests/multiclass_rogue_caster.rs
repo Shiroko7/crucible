@@ -8,13 +8,11 @@
 //! What it proves is that each mechanism such a character leans on is not
 //! only loadable but *live* - that a real fight actually applies it.
 
-use crucible_core::creature::{AttackKind, MoveKind};
-use crucible_core::duel::{run_teams, Budget, Policy};
-use crucible_core::{
-    load_creature_from_str, Ability, Condition, Creature, DamageKind, Effect, FeatureRegistry,
-    Reduction, Rider, Rng,
-};
-
+use crucible_core::creature::{AttackKind, Creature, Effect, MoveKind, Rider};
+use crucible_core::dsl::{load_creature_from_str, FeatureRegistry};
+use crucible_core::prob::Rng;
+use crucible_core::rules::{Ability, Condition, DamageKind, Reduction};
+use crucible_core::sim::{run_teams, Budget, Policy};
 const BUILD: &str = r#"
 [pc]
 name = "Test Rogue-Caster"

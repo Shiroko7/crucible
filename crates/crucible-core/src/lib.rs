@@ -12,40 +12,8 @@
 //! - [`sim`]: Simulation loop, AI policies, MCTS solver, and statistical CVaR analysis.
 //! - [`dsl`]: Data-driven configurations, Monad Plugin Architecture, PC/Monster abstractions, and scenario parsing.
 
+pub mod creature;
 pub mod dsl;
 pub mod prob;
 pub mod rules;
 pub mod sim;
-
-// Subsystem aliases for backward-compatibility
-pub use dsl::scenario;
-pub use prob::dice;
-pub use prob::exact;
-pub use prob::rng;
-pub use rules::combat;
-pub use rules::creature;
-pub use sim::analysis;
-pub use sim::duel;
-
-// Top-level re-exports (backward compatibility)
-pub use analysis::{evaluate, sustained_rounds_to_kill, Summary};
-pub use combat::{
-    damage_pmf, hit_outcomes, hit_outcomes_with, hit_outcomes_with_reaction, outcomes,
-    resolve_mode, sample_attacks_to_kill, sample_damage, sample_hit, sample_hit_with,
-    sample_hit_with_reaction, sample_save_with, save_success_chance, Attack, AttackModifier,
-    DamageRider, Defense, Landed, Outcomes, Reduction, RollMode, SaveModifier,
-};
-pub use creature::{
-    Ability, AttackTrigger, Condition, Cost, Creature, CreatureType, DamageKind, DamageRoll,
-    Duration, Effect, HealRoll, Move, Resource, Rider, SaveEffect, Size, Strike, Uses,
-};
-pub use dice::Pmf;
-pub use duel::{run, Outcome, Policy, Side};
-pub use exact::{expected_attacks_to_kill, kill_curve};
-pub use rng::Rng;
-
-// Monad Plugin and PC / Monster abstractions
-pub use dsl::{
-    load_creature_from_file, load_creature_from_str, CreatureBuilder, FeatureError, FeaturePlugin,
-    FeatureRegistry, FeatureResult, MonsterDefinition, PlayerCharacter,
-};

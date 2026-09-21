@@ -1,15 +1,15 @@
 //! Configuration loading and deserialization for PC and Monster files.
 
-use serde::Deserialize;
-use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
-
 use super::monster::MonsterDefinition;
 use super::pc::PlayerCharacter;
 use super::plugin::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
 use super::scenario::TraitEffect;
-use crate::rules::creature::{Ability, Creature, Move, SpellCastingProfile};
+use crate::creature::{Creature, Move};
+use crate::rules::{Ability, SpellCastingProfile};
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MoveEntry {
@@ -75,7 +75,7 @@ pub fn apply_resources(
                 "spell slot level '{level_str}' is not a number"
             ))
         })?;
-        if !(1..=crate::rules::creature::SPELL_LEVELS).contains(&level) {
+        if !(1..=crate::rules::SPELL_LEVELS).contains(&level) {
             return Err(FeatureError::InvalidConfiguration(format!(
                 "spell slot level {level} is out of range 1-9"
             )));
@@ -195,7 +195,7 @@ mod tests {
         assert_eq!(gio.actions.len(), 2);
         assert_eq!(gio.bonus_actions.len(), 3);
         assert_eq!(gio.riders.len(), 2);
-        assert!(gio.has_evasion(crate::rules::creature::Ability::Dex));
+        assert!(gio.has_evasion(crate::rules::Ability::Dex));
         assert_eq!(gio.resources[0].name, "focus");
         assert_eq!(gio.resources[0].max, 8);
     }
@@ -215,12 +215,12 @@ mod tests {
         assert_eq!(dragon.riders.len(), 1);
         assert_eq!(
             dragon.creature_type,
-            Some(crate::rules::creature::CreatureType::Dragon)
+            Some(crate::rules::CreatureType::Dragon)
         );
-        assert_eq!(dragon.size, crate::rules::creature::Size::Huge);
+        assert_eq!(dragon.size, crate::rules::Size::Huge);
         // Everything cast through its Spellcasting is a spell; its Rends are
         // melee weapon attacks.
-        use crate::rules::creature::MoveKind;
+        use crate::creature::MoveKind;
         let kinds: Vec<(&str, MoveKind)> = dragon
             .actions
             .iter()
@@ -246,11 +246,8 @@ mod tests {
         assert_eq!(ogre.hp, 68);
         assert_eq!(ogre.initiative, -1);
         assert_eq!(ogre.actions.len(), 2);
-        assert_eq!(
-            ogre.creature_type,
-            Some(crate::rules::creature::CreatureType::Giant)
-        );
-        assert_eq!(ogre.size, crate::rules::creature::Size::Large);
+        assert_eq!(ogre.creature_type, Some(crate::rules::CreatureType::Giant));
+        assert_eq!(ogre.size, crate::rules::Size::Large);
     }
 
     #[test]
@@ -279,7 +276,7 @@ mod tests {
         "#;
         let bandit =
             load_creature_from_str(toml, &registry).expect("a monster with no size parses");
-        assert_eq!(bandit.size, crate::rules::creature::Size::Medium);
+        assert_eq!(bandit.size, crate::rules::Size::Medium);
     }
 
     #[test]
@@ -370,12 +367,12 @@ mod tests {
 
         assert_eq!(caster.ac, 14, "12 base + a 2-point item bonus");
         for ability in [
-            crate::rules::creature::Ability::Str,
-            crate::rules::creature::Ability::Dex,
-            crate::rules::creature::Ability::Con,
-            crate::rules::creature::Ability::Int,
-            crate::rules::creature::Ability::Wis,
-            crate::rules::creature::Ability::Cha,
+            crate::rules::Ability::Str,
+            crate::rules::Ability::Dex,
+            crate::rules::Ability::Con,
+            crate::rules::Ability::Int,
+            crate::rules::Ability::Wis,
+            crate::rules::Ability::Cha,
         ] {
             assert_eq!(caster.save(ability), 1, "every save gets the flat +1");
         }
@@ -385,8 +382,7 @@ mod tests {
         assert_eq!(caster.spell_save_dc(), Some(17));
         // The item-granted resistances sit alongside `resist = ["cold"]`
         // rather than replacing it.
-        use crate::rules::combat::Reduction;
-        use crate::rules::creature::DamageKind;
+        use crate::rules::{DamageKind, Reduction};
         assert_eq!(caster.reduction(DamageKind::Cold), Reduction::Resistant);
         assert_eq!(caster.reduction(DamageKind::Fire), Reduction::Resistant);
         assert_eq!(caster.reduction(DamageKind::Necrotic), Reduction::Resistant);

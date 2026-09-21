@@ -1,18 +1,12 @@
-//! Actions, strikes, saves, stances, and moves.
+//! What a move does: strikes, saving throws, heals, stances and buffs.
 
-use crate::prob::dice::Pmf;
-use crate::prob::rng::Rng;
-use crate::rules::combat::{
+use crate::creature::Creature;
+use crate::prob::{Pmf, Rng};
+use crate::rules::{
     hit_outcomes_with, hit_outcomes_with_reaction, sample_hit_with, sample_hit_with_reaction,
-    AttackModifier, Landed, RollMode, SaveModifier,
+    Ability, AttackModifier, Condition, DamageKind, DamageRoll, Duration, HealRoll, Landed,
+    Reduction, RollMode, SaveModifier,
 };
-
-use crate::rules::combat::Reduction;
-
-use super::combatant::Creature;
-use super::damage::{DamageKind, DamageRoll};
-use super::rider::Rider;
-use super::types::{Ability, Condition, Cost, Duration};
 
 /// What kind of attack roll a [`Strike`] is - the part of 5e's "melee weapon
 /// attack", "ranged spell attack" wording that features gate on.
@@ -124,7 +118,7 @@ impl Strike {
 
     /// `extra` is what [`Strike::damage_pmf_with_modifiers`] and
     /// [`Strike::sample_forcing_crit_with_modifiers`] append for a
-    /// [`super::rider::Rider`]-style bonus - Sneak Attack's dice, a
+    /// [`crate::creature::Rider`]-style bonus - Sneak Attack's dice, a
     /// dragonslaying weapon's bonus - which is exactly [`DamageRoll`] since a
     /// multi-typed strike already carries its own damage as a `Vec` of them.
     ///
@@ -155,7 +149,7 @@ impl Strike {
     /// component is reduced by [`Creature::reduction_from`] rather than the
     /// target's plain [`Creature::reduction`], so an attacker-side trait that
     /// softens an immunity (see
-    /// [`super::rider::Rider::DowngradeImmunity`]) is honoured. This is the
+    /// [`crate::creature::Rider::DowngradeImmunity`]) is honoured. This is the
     /// exact counterpart of [`Strike::sample_from`], which `sim::duel` rolls.
     pub fn damage_pmf_from(
         &self,
@@ -180,7 +174,7 @@ impl Strike {
     /// The single entry point `sim::duel` resolves every attack roll through:
     /// `force_crit` for Paralyzed, `modifiers` for Bless/Bane, `extra_damage`
     /// for every damage rider that qualified for this one attack, and the
-    /// defender's reactive AC boost ([`super::rider::Rider::ReactionOnTargeted`])
+    /// defender's reactive AC boost ([`crate::creature::Rider::ReactionOnTargeted`])
     /// as `ac_bonus`/`reaction_available`. Returns the damage, how it landed,
     /// and whether the reaction was actually spent.
     #[allow(clippy::too_many_arguments)]
@@ -239,7 +233,7 @@ impl Strike {
     /// [`DamageRoll`]s appended on a hit (a damage rider).
     ///
     /// Both lists are decided by the caller for this one attack - see the
-    /// module docs on [`crate::rules::combat::AttackModifier`] - so many
+    /// module docs on [`crate::rules::AttackModifier`] - so many
     /// unrelated sources can be active on the same strike without this
     /// function, or `sim::duel`, growing a branch per source.
     pub fn damage_pmf_with_modifiers(
@@ -263,7 +257,7 @@ impl Strike {
 
     /// As [`Strike::damage_pmf_with_modifiers`], with the same reactive AC
     /// boost as [`Strike::sample_from`] -
-    /// [`super::rider::Rider::ReactionOnTargeted`]. See
+    /// [`crate::creature::Rider::ReactionOnTargeted`]. See
     /// [`hit_outcomes_with_reaction`] for why spending the reaction whenever
     /// `available` is exactly equivalent, in the aggregate, to fighting
     /// against a raised AC.
@@ -349,7 +343,7 @@ impl Strike {
     }
 
     /// Does this strike deal any of the listed types? Asked by
-    /// [`Rider::ReduceDamage`], which only triggers on some damage.
+    /// [`crate::creature::Rider::ReduceDamage`], which only triggers on some damage.
     pub fn deals_any(&self, kinds: &[DamageKind]) -> bool {
         self.damage.iter().any(|r| kinds.contains(&r.kind))
     }
@@ -538,76 +532,6 @@ enum Share {
     Full,
 }
 
-/// A healing roll: dice plus a flat modifier, restoring hit points instead of
-/// removing them.
-///
-/// Deliberately not a [`DamageRoll`] wearing a different sign: there is no
-/// damage type to resist, no crit to double the dice, and nothing reduces it.
-/// Keeping it a separate, smaller type means `Effect::Heal` cannot
-/// accidentally inherit any of that machinery.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HealRoll {
-    pub count: u32,
-    pub sides: u32,
-    /// Baked in at construction time from whichever ability score fuels the
-    /// cast - the caster's [`crate::rules::creature::SpellCastingProfile`]
-    /// modifier, not a hardcoded number. See the plugins in
-    /// `dsl::plugin::spells`.
-    pub bonus: i32,
-}
-
-impl HealRoll {
-    pub fn new(count: u32, sides: u32, bonus: i32) -> Self {
-        assert!(sides > 0, "a d0 has no faces");
-        Self {
-            count,
-            sides,
-            bonus,
-        }
-    }
-
-    /// Exact distribution of the amount healed, floored at zero: a roll with
-    /// a very negative modifier cannot make a healing spell drain HP.
-    pub fn pmf(&self) -> Pmf {
-        Pmf::pool(self.count, self.sides)
-            .offset(self.bonus)
-            .floor_at(0)
-    }
-
-    /// The sampled counterpart of [`HealRoll::pmf`]; `tests/duel_agreement.rs`-style
-    /// agreement is asserted in this module's own tests.
-    pub fn sample(&self, rng: &mut Rng) -> i32 {
-        let raw: i32 = (0..self.count).map(|_| rng.die(self.sides)).sum();
-        (raw + self.bonus).max(0)
-    }
-
-    pub fn mean(&self) -> f64 {
-        f64::from(self.count) * (f64::from(self.sides) + 1.0) / 2.0 + f64::from(self.bonus)
-    }
-}
-
-/// Is a creature at this HP down - unconscious, in 5e terms?
-///
-/// There is no death-save subsystem here, so "down" is exactly "at zero HP or
-/// below": the minimal state a healing spell needs to know whether it is
-/// reviving someone or merely topping them up. Named rather than repeating
-/// `hp <= 0` at each call site, the same reasoning `Condition` gets.
-pub fn is_down(hp: i32) -> bool {
-    hp <= 0
-}
-
-/// Apply `amount` of healing to `current_hp`, capped at `max_hp`.
-///
-/// Returns the new HP and whether this revived the target: 5e's general
-/// "regaining hit points" rule is that any creature at 0 HP that regains any
-/// HP becomes conscious again, which is not specific to any one spell - both
-/// Healing Word and Cure Wounds get it for free by going through this.
-pub fn apply_healing(current_hp: i32, max_hp: i32, amount: i32) -> (i32, bool) {
-    let was_down = is_down(current_hp);
-    let new_hp = (current_hp + amount.max(0)).min(max_hp);
-    (new_hp, was_down && !is_down(new_hp))
-}
-
 /// What a move does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
@@ -650,7 +574,7 @@ pub enum Effect {
     /// its own concentration save - correct 5e behaviour for Bless, not a
     /// bug, since `sim::duel` resolves every saving throw a fighter makes
     /// through the same modifier list. Lasts until this move's concentration
-    /// ends, so a move using this should also set [`Move::concentration`].
+    /// ends, so a move using this should also set [`crate::creature::Move::concentration`].
     ///
     /// Bless is `Buff { attack_modifier: BonusDice(1d4), save_modifier:
     /// BonusDice(1d4), max_targets: Some(3) }`.
@@ -661,12 +585,12 @@ pub enum Effect {
     },
     /// Up to `max_targets` of the opposing side each make an `ability` save
     /// against the caster's own spell save DC (read from
-    /// [`crate::rules::creature::SpellCastingProfile`] at the moment this
+    /// [`crate::rules::SpellCastingProfile`] at the moment this
     /// resolves rather than a number carried on the move, so this can never
     /// drift into a second, stale copy of what that profile already
     /// computes) or take `attack_modifier` on attack rolls and
     /// `save_modifier` on saving throws for the duration. As with
-    /// [`Effect::Buff`], the move should set [`Move::concentration`].
+    /// [`Effect::Buff`], the move should set [`crate::creature::Move::concentration`].
     ///
     /// Bane is `SaveOrModifier { ability: Cha, attack_modifier:
     /// PenaltyDice(1d4), save_modifier: PenaltyDice(1d4), max_targets:
@@ -752,177 +676,187 @@ impl Effect {
     }
 }
 
-/// How often a move can be taken, out of its own budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Uses {
-    #[default]
-    Unlimited,
-    /// A fixed budget for the whole fight: a breath weapon's free uses, a
-    /// once-per-day ability.
-    Limited(u32),
-    /// Spent on use, and back on a `d6` of at least this value rolled at the
-    /// start of each of the creature's turns. `Recharge(5)` is the printed
-    /// "Recharge 5-6", which is why a dragon's breath is certain on round one
-    /// and intermittent afterwards.
-    Recharge(u32),
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::creature::Rider;
 
-/// What kind of activity a move represents, beyond its damage/effect shape.
-///
-/// Almost every move needs nothing here - `Standard` covers plain attacks,
-/// stances and saves, and nothing reads this tag at all by default. The other
-/// variants exist only so a plugin, or a condition's move gating, can
-/// recognise "this move is RAW an Action" - `ObjectUse`/`MagicItem` for
-/// `FastHandsPlugin`, which rejects anything tagged `Standard` or `Spell`
-/// rather than silently promoting it - see `crate::dsl::plugin::rogue` - and
-/// `Spell`/`MagicItem` for a condition like
-/// [`crate::rules::creature::Condition::Suppressed`] that blocks casting and
-/// item activation, via `sim::duel`'s move gating.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum MoveKind {
-    #[default]
-    Standard,
-    /// The Use an Object action - drinking a potion, retrieving a hidden
-    /// blade, activating a non-magical object.
-    ObjectUse,
-    /// Activating a magic item that would otherwise cost the Magic action -
-    /// a wand, a staff, most consumable magic items.
-    MagicItem,
-    /// Casting a spell. What it costs is separate from the tag -
-    /// [`Move::spell_slot_level`] for a slot, [`Move::cost`] for a wand's
-    /// charges - so a free cantrip and a slotted spell are both `Spell`.
-    Spell,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Move {
-    pub name: String,
-    pub uses: Uses,
-    /// Paid from a shared pool, on top of `uses`.
-    pub cost: Option<Cost>,
-    /// A spell slot level this move spends from the caster's own
-    /// [`crate::rules::creature::SpellSlots`], separate from `cost`: a
-    /// caster's slots are nine independent counters rather than one named
-    /// pool, so they are not representable as a [`Cost`]. `None` for
-    /// anything that is not a spell.
-    pub spell_slot_level: Option<u32>,
-    /// Fire when this move hits.
-    pub riders: Vec<Rider>,
-    pub effect: Effect,
-    /// Requires concentration: taking this move ends whatever the user was
-    /// already concentrating on, before anything else happens - even if this
-    /// cast goes on to land nothing. Whatever condition it then applies, on
-    /// whichever targets, becomes the new thing concentration is
-    /// maintaining; see [`crate::sim::duel`] for how that is tracked and torn
-    /// down. `false` for every ordinary move, which is why this defaults with
-    /// the rest of [`Move::new`] rather than needing its own builder call.
-    pub concentration: bool,
-    /// What kind of activity this is; see [`MoveKind`]. Read by Fast Hands
-    /// (which list a move may be promoted into) and by a condition that
-    /// blocks casting or item use ([`Condition::blocks_magic`]).
-    pub kind: MoveKind,
-    /// Resolve this move before the same turn's action rather than after it.
-    /// Only meaningful for a bonus action: Steady Aim is taken *before* the
-    /// attack it is meant to help, while almost everything else a bonus
-    /// action does - an off-hand strike, a Spiritual Weapon swing - follows
-    /// the action. `false` for every ordinary move.
-    pub before_action: bool,
-    /// Set on a move-taking that spent a limited-use charge to be exempt from
-    /// whatever casting-restriction mechanism might apply to it elsewhere -
-    /// being silenced, unable to speak or gesture, and so on. `false` for
-    /// every ordinary move.
-    ///
-    /// This engine has no restriction-checking condition to consult the flag
-    /// against yet - that is a separate, independent mechanism's concern -
-    /// so it exists here as a standalone primitive: whichever mechanism
-    /// checks "can this creature cast right now" can read it once it exists,
-    /// the same way a new [`Condition`] variant is added once and every call
-    /// site the compiler can find is updated to consult it. See
-    /// [`crate::dsl::plugin::casting::BypassCastingRestrictionsPlugin`] for
-    /// how a build grants a charge-gated option to set it, reusing
-    /// [`Uses::Limited`] for the charge budget rather than inventing a
-    /// parallel resource mechanism.
-    pub bypasses_casting_restrictions: bool,
-}
-
-impl Move {
-    pub fn new(name: impl Into<String>, effect: Effect) -> Self {
-        Self {
-            name: name.into(),
-            uses: Uses::Unlimited,
-            cost: None,
-            spell_slot_level: None,
-            riders: Vec::new(),
-            effect,
-            concentration: false,
-            kind: MoveKind::Standard,
-            before_action: false,
-            bypasses_casting_restrictions: false,
-        }
+    fn dummy(ac: i32) -> Creature {
+        Creature::new("dummy", ac, 100)
     }
 
-    pub fn with_uses(mut self, uses: Uses) -> Self {
-        self.uses = uses;
-        self
+    #[test]
+    fn a_strike_damage_distribution_is_a_distribution() {
+        let s = Strike::new(
+            7,
+            vec![
+                DamageRoll::new(1, 10, 8, DamageKind::Slashing),
+                DamageRoll::new(2, 4, 0, DamageKind::Fire),
+            ],
+        );
+        let pmf = s.damage_pmf(&dummy(16));
+        assert!((pmf.total() - 1.0).abs() < 1e-12);
+        assert!(pmf.min() >= 0);
+        assert!(pmf.prob(0) > 0.0, "a miss must be possible");
+        // On a crit the dice double but the +8 does not: 2d10 + 8 plus 4d4.
+        assert_eq!(pmf.max(), 20 + 8 + 16);
     }
 
-    pub fn with_cost(mut self, cost: Cost) -> Self {
-        self.cost = Some(cost);
-        self
+    /// The whole reason damage is a list rather than one pool.
+    #[test]
+    fn each_damage_type_is_reduced_on_its_own() {
+        let mut target = dummy(1);
+        target
+            .reductions
+            .push((DamageKind::Fire, Reduction::Immune));
+
+        let s = Strike::new(
+            20,
+            vec![
+                DamageRoll::new(0, 6, 10, DamageKind::Slashing),
+                DamageRoll::new(0, 6, 10, DamageKind::Fire),
+            ],
+        );
+        // Every roll but a natural 1 hits, and the fire half is deleted.
+        let pmf = s.damage_pmf(&target);
+        assert!((pmf.prob(10) - 19.0 / 20.0).abs() < 1e-12);
+        assert!((pmf.prob(0) - 1.0 / 20.0).abs() < 1e-12);
     }
 
-    /// Mark this move as spending one spell slot of `level` when cast. See
-    /// [`Move::pay_spell_cost`].
-    pub fn with_spell_slot(mut self, level: u32) -> Self {
-        self.spell_slot_level = Some(level);
-        self
+    #[test]
+    fn a_save_has_no_natural_twenty() {
+        let mut target = dummy(10);
+        target.saves[Ability::Dex.index()] = 2;
+        let save = SaveEffect {
+            ability: Ability::Dex,
+            dc: 25,
+            damage: vec![DamageRoll::new(1, 6, 0, DamageKind::Fire)],
+            half_on_success: true,
+            on_failure: vec![],
+            max_targets: None,
+            requires_type: None,
+        };
+        // Needs a 23 on a d20; unlike an attack roll, a natural 20 does not
+        // rescue it.
+        assert!((save.failure_chance(&target) - 1.0).abs() < 1e-12);
+
+        let trivial = SaveEffect { dc: -5, ..save };
+        assert!(trivial.failure_chance(&target).abs() < 1e-12);
     }
 
-    pub fn with_rider(mut self, rider: Rider) -> Self {
-        self.riders.push(rider);
-        self
+    #[test]
+    fn a_successful_save_halves_before_resistance_does() {
+        let mut target = dummy(10);
+        target.saves[Ability::Dex.index()] = 100; // always saves
+        target
+            .reductions
+            .push((DamageKind::Fire, Reduction::Resistant));
+        let save = SaveEffect {
+            ability: Ability::Dex,
+            dc: 10,
+            damage: vec![DamageRoll::new(0, 6, 21, DamageKind::Fire)],
+            half_on_success: true,
+            on_failure: vec![],
+            max_targets: None,
+            requires_type: None,
+        };
+        // 21 -> 10 on the save, then 5 from resistance. Rounding down twice is
+        // not the same as quartering, which is why the order is pinned here.
+        assert!((save.damage_pmf(&target).mean() - 5.0).abs() < 1e-12);
     }
 
-    pub fn with_concentration(mut self) -> Self {
-        self.concentration = true;
-        self
+    /// Evasion turns the usual shape inside out, and stacks with resistance
+    /// rather than replacing it. 40 fire, resisted, is the case to check
+    /// because every step divides.
+    #[test]
+    fn evasion_inverts_the_save_and_still_lets_resistance_apply() {
+        let base = SaveEffect {
+            ability: Ability::Dex,
+            dc: 10,
+            damage: vec![DamageRoll::new(0, 6, 40, DamageKind::Fire)],
+            half_on_success: true,
+            on_failure: vec![],
+            max_targets: None,
+            requires_type: None,
+        };
+
+        let mut always_saves = dummy(10);
+        always_saves.saves = [100; 6];
+        assert!((base.damage_pmf(&always_saves).mean() - 20.0).abs() < 1e-12);
+
+        let evasive = always_saves.clone().with_rider(Rider::NothingOnSuccess {
+            ability: Ability::Dex,
+        });
+        assert!(
+            base.damage_pmf(&evasive).mean().abs() < 1e-12,
+            "a saved Dex save with Evasion deals nothing"
+        );
+
+        // Failing with Evasion is the old success: half. Then resistance.
+        let mut evasive_fails = evasive.clone();
+        evasive_fails.saves[Ability::Dex.index()] = -100;
+        assert!((base.damage_pmf(&evasive_fails).mean() - 20.0).abs() < 1e-12);
+        evasive_fails
+            .reductions
+            .push((DamageKind::Fire, Reduction::Resistant));
+        assert!(
+            (base.damage_pmf(&evasive_fails).mean() - 10.0).abs() < 1e-12,
+            "Evasion halves and resistance halves again"
+        );
+
+        // Evasion is keyed to the ability, so a Con save is untouched.
+        let con = SaveEffect {
+            ability: Ability::Con,
+            ..base.clone()
+        };
+        assert!(!evasive.has_evasion(Ability::Con));
+        assert!((con.damage_pmf(&always_saves).mean() - 20.0).abs() < 1e-12);
     }
 
-    pub fn with_kind(mut self, kind: MoveKind) -> Self {
-        self.kind = kind;
-        self
+    #[test]
+    fn strikes_add_their_means_and_a_sequence_adds_its_parts() {
+        let target = dummy(15);
+        let profile = || Strike::new(5, vec![DamageRoll::new(1, 8, 3, DamageKind::Slashing)]);
+        let one = Effect::Strikes {
+            strike: profile(),
+            count: 1,
+        };
+        let three = Effect::Strikes {
+            strike: profile(),
+            count: 3,
+        };
+        assert!((three.mean_damage(&target) - 3.0 * one.mean_damage(&target)).abs() < 1e-9);
+        assert!((three.damage_pmf(&target).total() - 1.0).abs() < 1e-12);
+
+        let combo = Effect::Sequence(vec![one.clone(), one.clone(), one.clone()]);
+        assert!((combo.mean_damage(&target) - three.mean_damage(&target)).abs() < 1e-9);
+
+        // A stance contributes nothing to damage but is still findable.
+        let mixed = Effect::Sequence(vec![
+            one,
+            Effect::Stance {
+                condition: Condition::Dodging,
+            },
+        ]);
+        assert_eq!(mixed.stance(), Some(Condition::Dodging));
     }
 
-    /// Resolve this move before the turn's action - see
-    /// [`Move::before_action`].
-    pub fn with_before_action(mut self) -> Self {
-        self.before_action = true;
-        self
-    }
-
-    /// Marks this specific move-taking as exempt from whatever
-    /// casting-restriction mechanism might apply to it - see
-    /// [`Move::bypasses_casting_restrictions`].
-    pub fn with_bypasses_casting_restrictions(mut self) -> Self {
-        self.bypasses_casting_restrictions = true;
-        self
-    }
-
-    /// A move that spends nothing is one a hoarding policy will still take.
-    pub fn is_free(&self) -> bool {
-        matches!(self.uses, Uses::Unlimited)
-            && self.cost.is_none()
-            && self.spell_slot_level.is_none()
-    }
-
-    /// Spend this move's spell slot, if it has one, from `caster`'s own
-    /// pool. `true` and no change for a move that costs no slot; `false` and
-    /// no change if the slot it needs is not available - the same shape as
-    /// [`crate::rules::creature::SpellSlots::cast`], which this calls.
-    pub fn pay_spell_cost(&self, caster: &mut Creature) -> bool {
-        match self.spell_slot_level {
-            None => true,
-            Some(level) => caster.cast_spell(level),
-        }
+    /// The four standard shapes of attack roll, and the two questions
+    /// features ask of them.
+    #[test]
+    fn attack_kinds_answer_the_sneak_attack_and_ranged_weapon_gates() {
+        assert!(!AttackKind::MELEE_WEAPON.finesse_or_ranged_weapon());
+        let rapier = AttackKind {
+            finesse: true,
+            ..AttackKind::MELEE_WEAPON
+        };
+        assert!(rapier.finesse_or_ranged_weapon());
+        assert!(!rapier.ranged_weapon());
+        assert!(AttackKind::RANGED_WEAPON.finesse_or_ranged_weapon());
+        assert!(AttackKind::RANGED_WEAPON.ranged_weapon());
+        assert!(!AttackKind::RANGED_SPELL.finesse_or_ranged_weapon());
+        assert!(!AttackKind::RANGED_SPELL.ranged_weapon());
+        assert!(!AttackKind::MELEE_SPELL.finesse_or_ranged_weapon());
+        assert_eq!(Strike::new(5, Vec::new()).kind, AttackKind::MELEE_WEAPON);
     }
 }

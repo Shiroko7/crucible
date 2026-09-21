@@ -3,12 +3,11 @@
 //! Represents a monster or NPC combatant defined by its statblock, challenge rating (CR),
 //! traits, actions, and legendary actions.
 
+use crate::creature::Creature;
+use crate::dsl::plugin::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
+use crate::rules::{Ability, Condition, CreatureType, DamageKind, Reduction, Size};
 use serde::Deserialize;
 use std::collections::HashMap;
-
-use crate::dsl::plugin::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
-use crate::rules::combat::Reduction;
-use crate::rules::creature::{Ability, Condition, Creature, CreatureType, DamageKind, Size};
 
 /// Structured representation of a Monster / NPC.
 #[derive(Debug, Clone, Deserialize)]
@@ -34,7 +33,7 @@ pub struct MonsterDefinition {
     #[serde(default)]
     pub vulnerable: Vec<String>,
     /// Conditions this creature cannot be given at all - see
-    /// [`crate::rules::creature::Creature::condition_immunities`].
+    /// [`crate::creature::Creature::condition_immunities`].
     #[serde(default)]
     pub condition_immune: Vec<String>,
     #[serde(default)]

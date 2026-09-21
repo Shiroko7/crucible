@@ -28,9 +28,11 @@
 //! project: five standard errors of the estimate, plus a floor so a
 //! probability-zero outcome is not held to a tolerance of exactly zero.
 
-use crucible_core::{damage_pmf, sample_damage, Attack, Defense, Rider, Rng, RollMode};
 use proptest::prelude::*;
 
+use crucible_core::creature::Rider;
+use crucible_core::prob::Rng;
+use crucible_core::rules::{damage_pmf, sample_damage, Attack, Defense, RollMode};
 /// Matches the sample counts `exact_vs_sampled.rs` and `duel_agreement.rs`
 /// use for a single attack, scaled down a little because `proptest` repeats
 /// this over many generated cases rather than a fixed handful.

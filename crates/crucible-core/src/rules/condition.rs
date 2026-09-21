@@ -1,161 +1,6 @@
-//! Fundamental types for combatants: abilities, conditions, durations, and resources.
+//! Conditions, and how long an applied one lasts.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Ability {
-    Str,
-    Dex,
-    Con,
-    Int,
-    Wis,
-    Cha,
-}
-
-impl Ability {
-    pub fn parse(word: &str) -> Option<Self> {
-        Some(match word.to_ascii_lowercase().as_str() {
-            "str" | "strength" => Self::Str,
-            "dex" | "dexterity" => Self::Dex,
-            "con" | "constitution" => Self::Con,
-            "int" | "intelligence" => Self::Int,
-            "wis" | "wisdom" => Self::Wis,
-            "cha" | "charisma" => Self::Cha,
-            _ => return None,
-        })
-    }
-
-    pub fn index(self) -> usize {
-        match self {
-            Self::Str => 0,
-            Self::Dex => 1,
-            Self::Con => 2,
-            Self::Int => 3,
-            Self::Wis => 4,
-            Self::Cha => 5,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        ["str", "dex", "con", "int", "wis", "cha"][self.index()]
-    }
-}
-
-/// A 5e creature type - Dragon, Giant, Undead, and so on.
-///
-/// The only thing anything here asks of it today is equality, as the gate for
-/// [`crate::rules::creature::Rider::BonusDamageVsCreatureType`]: a slaying
-/// weapon, a favoured-enemy bonus, a holy weapon's bite against fiends and
-/// undead are all "extra damage when `target.creature_type` matches", never a
-/// branch per weapon. A full type system - half-fiends, shapechangers reading
-/// as their original type - is out of scope until a feature actually needs it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CreatureType {
-    Aberration,
-    Beast,
-    Celestial,
-    Construct,
-    Dragon,
-    Elemental,
-    Fey,
-    Fiend,
-    Giant,
-    Humanoid,
-    Monstrosity,
-    Ooze,
-    Plant,
-    Undead,
-}
-
-impl CreatureType {
-    pub fn parse(word: &str) -> Option<Self> {
-        Some(match word.to_ascii_lowercase().as_str() {
-            "aberration" => Self::Aberration,
-            "beast" => Self::Beast,
-            "celestial" => Self::Celestial,
-            "construct" => Self::Construct,
-            "dragon" => Self::Dragon,
-            "elemental" => Self::Elemental,
-            "fey" => Self::Fey,
-            "fiend" => Self::Fiend,
-            "giant" => Self::Giant,
-            "humanoid" => Self::Humanoid,
-            "monstrosity" => Self::Monstrosity,
-            "ooze" => Self::Ooze,
-            "plant" => Self::Plant,
-            "undead" => Self::Undead,
-            _ => return None,
-        })
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Aberration => "aberration",
-            Self::Beast => "beast",
-            Self::Celestial => "celestial",
-            Self::Construct => "construct",
-            Self::Dragon => "dragon",
-            Self::Elemental => "elemental",
-            Self::Fey => "fey",
-            Self::Fiend => "fiend",
-            Self::Giant => "giant",
-            Self::Humanoid => "humanoid",
-            Self::Monstrosity => "monstrosity",
-            Self::Ooze => "ooze",
-            Self::Plant => "plant",
-            Self::Undead => "undead",
-        }
-    }
-}
-
-/// A 5e size category, Tiny through Gargantuan.
-///
-/// Ordered smallest to largest - the derived [`Ord`] is the whole reason this
-/// is a type rather than the size word left as a `String` - so a size-gated
-/// effect can compare directly (`target.size <= Size::Large`, Cunning
-/// Strike's Trip) instead of matching every variant that qualifies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Size {
-    Tiny,
-    Small,
-    Medium,
-    Large,
-    Huge,
-    Gargantuan,
-}
-
-impl Size {
-    pub fn parse(word: &str) -> Option<Self> {
-        Some(match word.to_ascii_lowercase().as_str() {
-            "tiny" => Self::Tiny,
-            "small" => Self::Small,
-            "medium" => Self::Medium,
-            "large" => Self::Large,
-            "huge" => Self::Huge,
-            "gargantuan" => Self::Gargantuan,
-            _ => return None,
-        })
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Tiny => "tiny",
-            Self::Small => "small",
-            Self::Medium => "medium",
-            Self::Large => "large",
-            Self::Huge => "huge",
-            Self::Gargantuan => "gargantuan",
-        }
-    }
-}
-
-/// Most statblocks that bother to state a size are Medium, and plenty do not
-/// bother at all - so a creature with nothing declared defaults to Medium
-/// rather than to some third "unknown" state every size comparison would
-/// then have to account for.
-impl Default for Size {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
+use crate::rules::Ability;
 
 /// A condition, in the 5e sense: a named bundle of effects with a lifetime.
 ///
@@ -230,8 +75,8 @@ pub enum Condition {
     /// three share exactly one applier, one victim and one duration. Unlike
     /// Stunned or Paralyzed, this does **not** incapacitate: the creature
     /// still gets its turn, its ordinary attacks, and every move that is not
-    /// tagged [`crate::rules::creature::MoveKind::Spell`] or
-    /// [`crate::rules::creature::MoveKind::MagicItem`].
+    /// tagged [`crate::creature::MoveKind::Spell`] or
+    /// [`crate::creature::MoveKind::MagicItem`].
     Suppressed,
     /// Outlined by a fading light: no effect on its own actions or saves, but
     /// the next attack roll made against it - by anyone, not only whoever
@@ -246,7 +91,7 @@ pub enum Condition {
     Marked,
     /// Disadvantage on this creature's own saving throws of one ability, and
     /// nothing else - what an injury poison leaves behind on a failed save
-    /// (see [`crate::rules::creature::Rider::InjuryPoison`]). Not a named SRD
+    /// (see [`crate::creature::Rider::InjuryPoison`]). Not a named SRD
     /// condition, the same way [`Condition::Compelled`] is not: it is the
     /// engine's handle on "saves of this one kind are burdened" so that
     /// lifetime, stacking and clearing reuse the condition machinery rather
@@ -255,8 +100,8 @@ pub enum Condition {
     /// Cannot cast a spell that has to be spoken - the Silence spell's
     /// sphere, a gag. Spell components are not modelled here, so every spell
     /// counts as needing a voice: this blocks every
-    /// [`crate::rules::creature::MoveKind::Spell`] move except one taken with
-    /// [`crate::rules::creature::Move::bypasses_casting_restrictions`]
+    /// [`crate::creature::MoveKind::Spell`] move except one taken with
+    /// [`crate::creature::Move::bypasses_casting_restrictions`]
     /// (casting without components - Tricky Spells, Subtle Spell). See
     /// [`Condition::blocks_casting`].
     Silenced,
@@ -376,8 +221,8 @@ impl Condition {
 
     /// Blocks the two RAW action categories a debuff like this one takes
     /// away: casting a spell
-    /// ([`crate::rules::creature::MoveKind::Spell`]) and activating a magic
-    /// item ([`crate::rules::creature::MoveKind::MagicItem`]). Whoever
+    /// ([`crate::creature::MoveKind::Spell`]) and activating a magic
+    /// item ([`crate::creature::MoveKind::MagicItem`]). Whoever
     /// selects a move checks this before taking one of either kind - see
     /// `sim::duel`'s move gating - this only answers the question.
     pub fn blocks_magic(self) -> bool {
@@ -385,7 +230,7 @@ impl Condition {
     }
 
     /// Blocks casting a spell the ordinary way, but not a cast made without
-    /// components ([`crate::rules::creature::Move::bypasses_casting_restrictions`]).
+    /// components ([`crate::creature::Move::bypasses_casting_restrictions`]).
     /// Unlike [`Condition::blocks_magic`], which stops casting outright.
     pub fn blocks_casting(self) -> bool {
         matches!(self, Self::Silenced)
@@ -408,7 +253,7 @@ impl Condition {
 
     /// Halves this creature's own outgoing damage, of any type, against
     /// anyone it attacks - the attacker-side counterpart to
-    /// [`crate::rules::combat::Reduction`], which only ever halves by the
+    /// [`crate::rules::Reduction`], which only ever halves by the
     /// *target's* damage type. See `sim::duel::halve_if_suppressed`.
     pub fn halves_own_damage(self) -> bool {
         matches!(self, Self::Suppressed)
@@ -450,145 +295,201 @@ pub enum Duration {
     SaveEndTurn { ability: Ability, dc: i32 },
 }
 
-/// A pool several moves draw on: focus points, ki, sorcery points, superiority
-/// dice. Distinct from [`crate::rules::creature::Uses`], which is one move's private budget.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Resource {
-    pub name: String,
-    pub max: u32,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// What a move or rider takes out of a pool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Cost {
-    /// Index into the creature's `resources`, resolved when the scenario is
-    /// parsed so the hot path never compares strings.
-    pub resource: usize,
-    pub amount: u32,
-}
-
-// --- Spellcasting -----------------------------------------------------
-//
-// Kept in its own section at the end of the file: unrelated to the types
-// above it, and spell slots and the attack/DC formula are the kind of thing
-// several other features (upcasting, Warlock slots, item bonuses) will want
-// to extend without conflicting with edits elsewhere in this file.
-
-/// How many spell levels a caster can have slots at: 1st through 9th.
-pub const SPELL_LEVELS: u32 = 9;
-
-/// A caster's spell slot pools: one independent counter per level, 1st
-/// through 9th.
-///
-/// Distinct from [`Resource`], which is a single named pool shared across
-/// several moves (focus, ki, sorcery points). A caster's slots are nine
-/// separate counters instead, each with its own maximum, and a slot spent at
-/// one level can never fill a different one - so this earns its own type
-/// rather than being nine `Resource`s wearing a trenchcoat.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct SpellSlots {
-    max: [u32; SPELL_LEVELS as usize],
-    available: [u32; SPELL_LEVELS as usize],
-}
-
-impl SpellSlots {
-    pub fn new() -> Self {
-        Self::default()
+    #[test]
+    fn conditions_answer_the_questions_the_duel_asks() {
+        assert!(Condition::Stunned.incapacitated());
+        assert!(Condition::Stunned.advantage_to_attackers());
+        assert!(Condition::Stunned.auto_fails(Ability::Dex));
+        assert!(!Condition::Stunned.auto_fails(Ability::Wis));
+        assert!(Condition::Dodging.disadvantage_to_attackers());
+        assert!(!Condition::Dodging.incapacitated());
+        assert!(Condition::Prone.advantage_to_attackers());
+        assert!(Condition::Prone.disadvantage_on_attacks());
     }
 
-    fn index(level: u32) -> usize {
-        assert!(
-            (1..=SPELL_LEVELS).contains(&level),
-            "spell slot level must be 1-9, got {level}"
-        );
-        (level - 1) as usize
+    #[test]
+    fn poisoned_only_burdens_its_own_attacks() {
+        assert!(Condition::Poisoned.disadvantage_on_attacks());
+        assert!(!Condition::Poisoned.advantage_to_attackers());
+        assert!(!Condition::Poisoned.incapacitated());
+        assert!(!Condition::Poisoned.auto_crits());
     }
 
-    /// Declare (or redeclare) the maximum slots at `level`, refilling
-    /// `available` to match. This is how a config loader sets a caster's
-    /// starting pool, before anything has been spent.
-    pub fn set_max(&mut self, level: u32, max: u32) {
-        let i = Self::index(level);
-        self.max[i] = max;
-        self.available[i] = max;
+    #[test]
+    fn blinded_burdens_its_own_attacks_and_helps_attackers() {
+        assert!(Condition::Blinded.disadvantage_on_attacks());
+        assert!(Condition::Blinded.advantage_to_attackers());
+        assert!(!Condition::Blinded.incapacitated());
+        assert!(!Condition::Blinded.auto_crits());
     }
 
-    pub fn max(&self, level: u32) -> u32 {
-        self.max[Self::index(level)]
+    /// Paralyzed is Stunned's three effects plus the auto-crit, not a fresh
+    /// set - the compiler should catch it if a future edit to Stunned's
+    /// semantics forgets its sibling.
+    #[test]
+    fn paralyzed_is_stunned_plus_the_close_range_crit() {
+        assert!(Condition::Paralyzed.incapacitated());
+        assert!(Condition::Paralyzed.advantage_to_attackers());
+        assert!(Condition::Paralyzed.auto_fails(Ability::Str));
+        assert!(Condition::Paralyzed.auto_fails(Ability::Dex));
+        assert!(!Condition::Paralyzed.auto_fails(Ability::Con));
+        assert!(Condition::Paralyzed.blocks_riders());
+        assert!(Condition::Paralyzed.auto_crits());
+        assert!(!Condition::Stunned.auto_crits());
     }
 
-    pub fn available(&self, level: u32) -> u32 {
-        self.available[Self::index(level)]
+    /// Deafened carries none of Blinded's combat modifiers - see its own doc
+    /// comment - so it is tracked for provenance only, the same gap Poisoned
+    /// and Blinded already note for ability checks.
+    #[test]
+    fn deafened_changes_nothing_a_duel_checks() {
+        assert!(!Condition::Deafened.incapacitated());
+        assert!(!Condition::Deafened.advantage_to_attackers());
+        assert!(!Condition::Deafened.disadvantage_to_attackers());
+        assert!(!Condition::Deafened.disadvantage_on_attacks());
+        assert!(!Condition::Deafened.auto_fails(Ability::Dex));
+        assert!(!Condition::Deafened.blocks_riders());
+        assert!(!Condition::Deafened.auto_crits());
     }
 
-    /// Spend one slot of exactly `level`. `false` and no change if none are
-    /// left - upcasting and slot substitution are a policy decision for
-    /// whatever calls this, not this type's job.
-    pub fn cast(&mut self, level: u32) -> bool {
-        let i = Self::index(level);
-        if self.available[i] == 0 {
-            return false;
-        }
-        self.available[i] -= 1;
-        true
+    /// Compelled steals the turn Command spends it on (checked at the duel
+    /// layer, in `sim::duel::Fighter::loses_turn`) without carrying any of
+    /// Incapacitated's other side effects - no advantage to attackers, no
+    /// auto-failed Strength or Dexterity saves, and it must not block
+    /// legendary actions the way real Incapacitated does.
+    #[test]
+    fn compelled_carries_none_of_incapacitated_side_effects() {
+        assert!(!Condition::Compelled.incapacitated());
+        assert!(!Condition::Compelled.advantage_to_attackers());
+        assert!(!Condition::Compelled.disadvantage_to_attackers());
+        assert!(!Condition::Compelled.disadvantage_on_attacks());
+        assert!(!Condition::Compelled.auto_fails(Ability::Str));
+        assert!(!Condition::Compelled.auto_fails(Ability::Dex));
+        assert!(!Condition::Compelled.blocks_riders());
+        assert!(!Condition::Compelled.auto_crits());
     }
 
-    /// A long rest: every slot returns.
-    pub fn recover_all(&mut self) {
-        self.available = self.max;
-    }
-
-    /// Return `amount` slots at `level`, capped at the maximum. A short-rest
-    /// feature (Arcane Recovery, a Warlock's own slots) recovers less than
-    /// everything, which is why this takes an amount rather than always
-    /// filling the pool.
-    pub fn recover(&mut self, level: u32, amount: u32) {
-        let i = Self::index(level);
-        self.available[i] = (self.available[i] + amount).min(self.max[i]);
-    }
-}
-
-/// How a creature's spell attacks and save DCs are computed - kept distinct
-/// from physical weapon stats, and generic over which ability fuels it, since
-/// Wisdom, Intelligence and Charisma casters share this formula and differ
-/// only in which score feeds it.
-///
-/// Fields are public and the formula is two small methods rather than one
-/// hardcoded number, so a magic item can inspect and adjust `item_bonus`
-/// without reconstructing the rest of the profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SpellCastingProfile {
-    pub ability: Ability,
-    pub ability_modifier: i32,
-    pub proficiency_bonus: i32,
-    /// A flat bonus from equipment: a +1 spell focus, a Rod of the Pact
-    /// Keeper. Kept separate from the other two fields so an item can be
-    /// swapped without recomputing them.
-    pub item_bonus: i32,
-}
-
-impl SpellCastingProfile {
-    pub fn new(ability: Ability, ability_modifier: i32, proficiency_bonus: i32) -> Self {
-        Self {
-            ability,
-            ability_modifier,
-            proficiency_bonus,
-            item_bonus: 0,
+    /// Steady Aim grants advantage on the creature's own attacks - the mirror
+    /// of Poisoned/Blinded's self-inflicted disadvantage - and, unlike any
+    /// other condition here, marks the speed-zeroing flag nothing yet reads.
+    #[test]
+    fn steady_aim_grants_advantage_and_flags_zero_speed() {
+        assert!(Condition::SteadyAim.advantage_on_attacks());
+        assert!(Condition::SteadyAim.zeroes_speed());
+        assert!(!Condition::SteadyAim.disadvantage_on_attacks());
+        assert!(!Condition::SteadyAim.incapacitated());
+        assert!(!Condition::SteadyAim.advantage_to_attackers());
+        assert!(!Condition::SteadyAim.auto_crits());
+        // Nothing else grants its own attacks advantage or flags speed.
+        for c in [
+            Condition::Stunned,
+            Condition::Dodging,
+            Condition::Prone,
+            Condition::Poisoned,
+            Condition::Blinded,
+            Condition::Paralyzed,
+        ] {
+            assert!(!c.advantage_on_attacks(), "{c:?} should not");
+            assert!(!c.zeroes_speed(), "{c:?} should not");
         }
     }
 
-    pub fn with_item_bonus(mut self, bonus: i32) -> Self {
-        self.item_bonus = bonus;
-        self
+    #[test]
+    fn condition_names_round_trip_through_parse() {
+        for c in [
+            Condition::Stunned,
+            Condition::Dodging,
+            Condition::Prone,
+            Condition::Poisoned,
+            Condition::Blinded,
+            Condition::Paralyzed,
+            Condition::Deafened,
+            Condition::Compelled,
+            Condition::SteadyAim,
+            Condition::Suppressed,
+            Condition::Marked,
+            Condition::SaveDisadvantage(Ability::Str),
+            Condition::SaveDisadvantage(Ability::Dex),
+            Condition::SaveDisadvantage(Ability::Con),
+            Condition::SaveDisadvantage(Ability::Int),
+            Condition::SaveDisadvantage(Ability::Wis),
+            Condition::SaveDisadvantage(Ability::Cha),
+            Condition::Silenced,
+        ] {
+            assert_eq!(Condition::parse(c.name()), Some(c));
+        }
+        assert_eq!(Condition::parse("paralysed"), Some(Condition::Paralyzed));
+        assert_eq!(Condition::parse("steady aim"), Some(Condition::SteadyAim));
+        assert_eq!(Condition::parse("nonsense"), None);
     }
 
-    /// Spell attack modifier: ability modifier + proficiency bonus + item bonus.
-    pub fn attack_bonus(&self) -> i32 {
-        self.ability_modifier + self.proficiency_bonus + self.item_bonus
+    /// Suppressed is deliberately not incapacitating and does not touch
+    /// attack rolls at all - only the three questions a limited-use item's
+    /// debuff actually asks: can it cast or use an item, does it save worse,
+    /// does its own damage suffer.
+    #[test]
+    fn suppressed_only_blocks_magic_items_saves_and_own_damage() {
+        assert!(Condition::Suppressed.blocks_magic());
+        assert!(Condition::Suppressed.disadvantage_on_save(Ability::Wis));
+        assert!(Condition::Suppressed.halves_own_damage());
+
+        assert!(!Condition::Suppressed.incapacitated());
+        assert!(!Condition::Suppressed.advantage_to_attackers());
+        assert!(!Condition::Suppressed.disadvantage_to_attackers());
+        assert!(!Condition::Suppressed.disadvantage_on_attacks());
+        assert!(!Condition::Suppressed.auto_fails(Ability::Str));
+        assert!(!Condition::Suppressed.auto_fails(Ability::Dex));
+        assert!(!Condition::Suppressed.blocks_riders());
+        assert!(!Condition::Suppressed.auto_crits());
+
+        // Nothing else answers "yes" to these by accident.
+        for c in [
+            Condition::Stunned,
+            Condition::Dodging,
+            Condition::Prone,
+            Condition::Poisoned,
+            Condition::Blinded,
+            Condition::Paralyzed,
+        ] {
+            assert!(!c.blocks_magic(), "{c:?} should not block magic");
+            assert!(
+                !c.disadvantage_on_save(Ability::Con),
+                "{c:?} should not disadvantage saves"
+            );
+            assert!(!c.halves_own_damage(), "{c:?} should not halve own damage");
+        }
     }
 
-    /// Spell save DC: 8 + ability modifier + proficiency bonus + item bonus.
-    pub fn save_dc(&self) -> i32 {
-        8 + self.attack_bonus()
+    /// Marked only ever grants advantage to attackers - it does not
+    /// incapacitate, burden its own attacks, or do anything else every other
+    /// condition here does, which is the point: it is a narrow, single-shot
+    /// primitive, not a bundle.
+    #[test]
+    fn marked_only_grants_advantage_to_attackers() {
+        assert!(Condition::Marked.advantage_to_attackers());
+        assert!(!Condition::Marked.incapacitated());
+        assert!(!Condition::Marked.disadvantage_to_attackers());
+        assert!(!Condition::Marked.disadvantage_on_attacks());
+        assert!(!Condition::Marked.auto_fails(Ability::Str));
+        assert!(!Condition::Marked.blocks_riders());
+        assert!(!Condition::Marked.auto_crits());
+    }
+
+    /// An injury poison's burden touches exactly one kind of save and
+    /// nothing else.
+    #[test]
+    fn a_save_disadvantage_burdens_only_its_own_ability() {
+        let burden = Condition::SaveDisadvantage(Ability::Wis);
+        assert!(burden.disadvantage_on_save(Ability::Wis));
+        assert!(!burden.disadvantage_on_save(Ability::Con));
+        assert!(!burden.incapacitated());
+        assert!(!burden.advantage_to_attackers());
+        assert!(!burden.disadvantage_on_attacks());
+        assert!(!burden.blocks_magic());
+        assert!(!burden.halves_own_damage());
     }
 }

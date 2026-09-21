@@ -3,8 +3,7 @@
 use std::process::ExitCode;
 
 use crucible_core::creature::Creature;
-use crucible_core::scenario;
-
+use crucible_core::dsl::scenario;
 mod args;
 mod report;
 

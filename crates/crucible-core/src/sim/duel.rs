@@ -43,13 +43,12 @@
 //! which Sneak Attack asks about, is read off who is fighting what instead: see
 //! [`Fight::ally_adjacent`].
 
+use crate::creature::{AttackKind, Cost, Creature, Effect, Move, MoveKind, Rider, Strike, Uses};
 use crate::prob::rng::Rng;
-use crate::rules::combat::{
-    hit_outcomes_with, sample_save_modifier_bonus, AttackModifier, Landed, RollMode, SaveModifier,
-};
-use crate::rules::creature::{
-    apply_healing, Ability, AttackKind, Condition, Cost, Creature, DamageKind, DamageRoll,
-    Duration, Effect, HealRoll, Move, MoveKind, Rider, Size, SpellSlots, Strike, Uses,
+use crate::rules::{
+    apply_healing, hit_outcomes_with, sample_save_modifier_bonus, Ability, AttackModifier,
+    Condition, DamageKind, DamageRoll, Duration, HealRoll, Landed, RollMode, SaveModifier, Size,
+    SpellSlots,
 };
 
 /// Which side of the fight. A side is a team, of any size.
@@ -2559,7 +2558,7 @@ fn saving_throw(
     fighters: &mut [Fighter<'_>],
     rng: &mut Rng,
     who: usize,
-    ability: crate::rules::creature::Ability,
+    ability: crate::rules::Ability,
     dc: i32,
     advantage: bool,
 ) -> (bool, bool) {
@@ -2642,11 +2641,11 @@ fn react_to_hit(
 
 /// This creature's own outgoing damage, halved if
 /// [`Condition::halves_own_damage`] is active - the attacker-side
-/// counterpart to a target's own [`crate::rules::combat::Reduction`], which
+/// counterpart to a target's own [`crate::rules::Reduction`], which
 /// only ever halves by the target's damage type. Applied last, after any
 /// reaction that already cut the incoming damage - the same place a target's
 /// own resistance sits at the end of `damage_pmf`'s pipeline - and rounds
-/// down exactly like [`crate::rules::combat::Reduction::Resistant`].
+/// down exactly like [`crate::rules::Reduction::Resistant`].
 fn halve_if_suppressed(fighters: &[Fighter<'_>], me: usize, dealt: i32) -> i32 {
     if fighters[me].has(Condition::halves_own_damage) {
         dealt / 2
@@ -2753,11 +2752,8 @@ pub fn run_teams(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::combat::{save_success_chance, Reduction};
-    use crate::rules::creature::{
-        Ability, AttackTrigger, DamageKind, DamageRoll, HealRoll, MoveKind, Resource, SaveEffect,
-        SpellCastingProfile, Strike,
-    };
+    use crate::creature::{AttackTrigger, Resource, SaveEffect};
+    use crate::rules::{save_success_chance, Reduction, SpellCastingProfile};
 
     fn puncher(name: &str, ac: i32, hp: i32, to_hit: i32, bonus: i32) -> Creature {
         Creature::new(name, ac, hp).with_action(Move::new(
@@ -5256,7 +5252,7 @@ mod tests {
     fn a_live_attack_with_riders_agrees_with_the_exact_path() {
         let rogue = sneak_attacker("rogue");
         let mut dragon = Creature::new("dragon", 16, 100_000)
-            .with_creature_type(crate::rules::creature::CreatureType::Dragon);
+            .with_creature_type(crate::rules::CreatureType::Dragon);
         dragon
             .reductions
             .push((DamageKind::Fire, Reduction::Resistant));
@@ -5271,7 +5267,7 @@ mod tests {
             dice_sides: 6,
             bonus: 0,
             damage_kind: DamageKind::Piercing,
-            creature_type: crate::rules::creature::CreatureType::Dragon,
+            creature_type: crate::rules::CreatureType::Dragon,
         });
         let roster = [(&rogue, Side::A), (&dragon, Side::B)];
         let (mut fight, mut rng) = fight_of(&roster, 21);
@@ -5402,16 +5398,16 @@ mod tests {
     fn a_weapons_bonus_vs_creature_type_applies_only_to_its_prey() {
         let archer = Creature::new("archer", 15, 50);
         let dragon = Creature::new("dragon", 10, 1_000)
-            .with_creature_type(crate::rules::creature::CreatureType::Dragon);
-        let giant = Creature::new("giant", 10, 1_000)
-            .with_creature_type(crate::rules::creature::CreatureType::Giant);
+            .with_creature_type(crate::rules::CreatureType::Dragon);
+        let giant =
+            Creature::new("giant", 10, 1_000).with_creature_type(crate::rules::CreatureType::Giant);
         let mut slayer = bow(5, RollMode::Normal);
         slayer.riders.push(Rider::BonusDamageVsCreatureType {
             dice_count: 3,
             dice_sides: 6,
             bonus: 0,
             damage_kind: DamageKind::Piercing,
-            creature_type: crate::rules::creature::CreatureType::Dragon,
+            creature_type: crate::rules::CreatureType::Dragon,
         });
         let Effect::Strikes { strike, .. } = &slayer.effect else {
             unreachable!()
@@ -5684,10 +5680,10 @@ mod tests {
             )
             .with_spell_slot(2),
         );
-        let dragon = puncher("dragon", 10, 100, 5, 2)
-            .with_creature_type(crate::rules::creature::CreatureType::Dragon);
+        let dragon =
+            puncher("dragon", 10, 100, 5, 2).with_creature_type(crate::rules::CreatureType::Dragon);
         let bandit = puncher("bandit", 10, 100, 5, 2)
-            .with_creature_type(crate::rules::creature::CreatureType::Humanoid);
+            .with_creature_type(crate::rules::CreatureType::Humanoid);
         for (foe, expected) in [(&dragon, Some(1)), (&bandit, Some(0))] {
             let roster = [(&caster, Side::A), (foe, Side::B)];
             let mut rng = Rng::new(1);

@@ -1,9 +1,8 @@
 //! Standard feature plugins for 5e abilities, traits, and combat actions.
 
-use crate::rules::combat::Reduction;
-use crate::rules::creature::{Ability, DamageKind, DamageRoll, Move, Rider};
-
 use super::traits::{CreatureBuilder, FeaturePlugin, FeatureResult};
+use crate::creature::{Move, Rider};
+use crate::rules::{Ability, DamageKind, DamageRoll, Reduction};
 
 /// Evasion (Monk 7, Rogue 7): On a Dexterity save, take no damage on a success and half on a fail.
 #[derive(Debug, Clone)]

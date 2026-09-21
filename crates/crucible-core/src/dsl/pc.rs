@@ -3,12 +3,11 @@
 //! Represents a player character composed of class, level, ability scores,
 //! equipment, resources, and pluggable features.
 
+use crate::creature::Creature;
+use crate::dsl::plugin::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
+use crate::rules::{Ability, Condition, DamageKind, Reduction};
 use serde::Deserialize;
 use std::collections::HashMap;
-
-use crate::dsl::plugin::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
-use crate::rules::combat::Reduction;
-use crate::rules::creature::{Ability, Condition, Creature, DamageKind};
 
 /// Structured representation of a Player Character (PC).
 #[derive(Debug, Clone, Deserialize)]
@@ -39,7 +38,7 @@ pub struct PlayerCharacter {
     #[serde(default)]
     pub vulnerable: Vec<String>,
     /// Conditions this creature cannot be given at all - see
-    /// [`crate::rules::creature::Creature::condition_immunities`].
+    /// [`crate::creature::Creature::condition_immunities`].
     #[serde(default)]
     pub condition_immune: Vec<String>,
     #[serde(default)]

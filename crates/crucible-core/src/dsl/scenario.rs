@@ -50,7 +50,7 @@
 //!
 //! `&&` joins a move out of several effects, for a Multiattack that is not all
 //! the same attack. Move order is meaningful: it is what
-//! [`crate::duel::Policy::InOrder`] reads.
+//! [`crate::sim::Policy::InOrder`] reads.
 //!
 //! A strike is a melee weapon attack unless its move says otherwise: `ranged`,
 //! `finesse`, `spell` (a spell attack; also marks the move as casting a spell),
@@ -61,14 +61,15 @@
 //! applier's next turn), `until save` (repeat the save at the end of each of
 //! the victim's turns), or `for N rounds|minutes|hours`.
 
-use std::fmt;
-
-use crate::rules::combat::{Reduction, RollMode};
-use crate::rules::creature::{
-    Ability, AttackKind, AttackTrigger, Condition, Cost, Creature, CreatureType, DamageKind,
-    DamageRoll, Duration, Effect, HealRoll, Move, MoveKind, Resource, Rider, SaveEffect, Strike,
-    Uses,
+use crate::creature::{
+    AttackKind, AttackTrigger, Cost, Creature, Effect, Move, MoveKind, Resource, Rider, SaveEffect,
+    Strike, Uses,
 };
+use crate::rules::{
+    Ability, Condition, CreatureType, DamageKind, DamageRoll, Duration, HealRoll, Reduction,
+    RollMode,
+};
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -248,7 +249,7 @@ pub fn parse(text: &str) -> Result<Vec<Creature>, ParseError> {
 /// Turn `count: 4` into four separately numbered creatures.
 ///
 /// Numbered because the narration is unreadable otherwise, and because
-/// [`crate::duel::Policy::Scattered`] needs them to be distinguishable.
+/// [`crate::sim::Policy::Scattered`] needs them to be distinguishable.
 fn expand(creatures: Vec<Creature>) -> Vec<Creature> {
     let mut out = Vec::new();
     for c in creatures {
@@ -313,7 +314,7 @@ pub enum TraitEffect {
     /// A flat, always-on bonus to every saving throw.
     SavesBonus(i32),
     /// A flat, always-on bonus to spell attack rolls and spell save DC,
-    /// added to the creature's existing [`crate::rules::creature::SpellCastingProfile::item_bonus`].
+    /// added to the creature's existing [`crate::rules::SpellCastingProfile::item_bonus`].
     SpellBonus(i32),
     /// Resistance to one or more damage types.
     Resistance(Vec<DamageKind>),
@@ -803,7 +804,7 @@ fn parse_body<'a>(
             "cost" => out.cost = Some(parse_cost(&words, 1, clause, owner)?),
             "slot" => {
                 let level = count(arg(&words, 1, clause)?)?;
-                if !(1..=crate::rules::creature::SPELL_LEVELS).contains(&level) {
+                if !(1..=crate::rules::SPELL_LEVELS).contains(&level) {
                     return Err(format!("`{clause}`: a spell slot is level 1 to 9"));
                 }
                 out.spell_slot_level = Some(level);

@@ -13,12 +13,12 @@
 //! `dice_count` belongs to the rogue wearing it rather than to the plugin.
 //! None of it is hardcoded here.
 
-use crate::rules::creature::{Ability, Rider, SpellCastingProfile, SPELL_LEVELS};
-
 use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
+use crate::creature::Rider;
+use crate::rules::{Ability, SpellCastingProfile, SPELL_LEVELS};
 
 /// One entry-prerequisite check against a raw ability score already recorded
-/// on the creature - see [`crate::rules::creature::Creature::ability_score`]
+/// on the creature - see [`crate::creature::Creature::ability_score`]
 /// and [`CreatureBuilder::set_ability_score`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbilityRequirement {
@@ -36,7 +36,7 @@ impl AbilityRequirement {
 /// apply at all unless its entry prerequisites hold.
 ///
 /// On success this sets the creature's
-/// [`crate::rules::creature::SpellSlots`] pool to exactly `slots` (index 0 is
+/// [`crate::rules::SpellSlots`] pool to exactly `slots` (index 0 is
 /// 1st level spell slots, ... index 8 is 9th) and its [`SpellCastingProfile`]
 /// to `ability`, with that ability's modifier read off the creature's own
 /// score and `proficiency_bonus` alongside it - the same three fields any
@@ -167,7 +167,6 @@ impl FeaturePlugin for PrestigeSpellcastingPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsl::plugin::traits::CreatureBuilder;
 
     fn requirements() -> [AbilityRequirement; 2] {
         [

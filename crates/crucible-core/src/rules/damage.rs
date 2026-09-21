@@ -1,8 +1,7 @@
-//! Damage kinds and individual damage rolls.
+//! Damage kinds, individual damage rolls, and how resistance, immunity and
+//! vulnerability reduce them.
 
-use crate::prob::dice::Pmf;
-use crate::prob::rng::Rng;
-use crate::rules::combat::Reduction;
+use crate::prob::{Pmf, Rng};
 
 /// The damage types, which exist here so resistance can be looked up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -89,7 +88,7 @@ impl DamageRoll {
     /// The exact distribution of this component alone.
     ///
     /// Flooring at zero happens before the reduction is applied, matching
-    /// [`crate::rules::combat::damage_pmf`] and the rule it encodes: resistance and
+    /// [`crate::rules::damage_pmf`] and the rule it encodes: resistance and
     /// vulnerability come after every other modifier to the damage.
     pub fn pmf(&self, crit: bool, reduction: Reduction) -> Pmf {
         let dice = if crit { self.count * 2 } else { self.count };
@@ -114,5 +113,43 @@ impl DamageRoll {
 
     pub fn mean(&self) -> f64 {
         f64::from(self.count) * (f64::from(self.sides) + 1.0) / 2.0 + f64::from(self.bonus)
+    }
+}
+
+/// Resistance halves and rounds down; vulnerability doubles; immunity zeroes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Reduction {
+    #[default]
+    Normal,
+    Resistant,
+    Vulnerable,
+    Immune,
+}
+
+impl Reduction {
+    #[inline]
+    pub fn apply(self, damage: i32) -> i32 {
+        match self {
+            Reduction::Normal => damage,
+            // Integer division truncates toward zero, which is what "round
+            // down" means for the non-negative values this ever sees.
+            Reduction::Resistant => damage / 2,
+            Reduction::Vulnerable => damage * 2,
+            Reduction::Immune => 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resistance_halves_and_rounds_down() {
+        assert_eq!(Reduction::Resistant.apply(7), 3);
+        assert_eq!(Reduction::Resistant.apply(8), 4);
+        assert_eq!(Reduction::Resistant.apply(1), 0);
+        assert_eq!(Reduction::Vulnerable.apply(7), 14);
+        assert_eq!(Reduction::Immune.apply(7), 0);
     }
 }

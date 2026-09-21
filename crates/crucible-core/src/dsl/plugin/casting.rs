@@ -6,7 +6,7 @@
 //! examples. This module implements a limited-use charge that, when spent,
 //! marks one specific move-taking as exempt via
 //! [`Move::bypasses_casting_restrictions`]; `sim::duel`'s move gating reads
-//! that flag, letting the move through [`crate::rules::creature::Condition::Silenced`].
+//! that flag, letting the move through [`crate::rules::Condition::Silenced`].
 //!
 //! The charge budget reuses [`Uses::Limited`], the same "N per day" pattern
 //! [`super::standard::LegendaryResistancePlugin`] and every other
@@ -16,12 +16,11 @@
 //! fight - so "1/day" and "1/fight" are the same number here, and a long
 //! rest is exactly what starting the next fight already does: `run` builds
 //! fresh per-fight tracking state from the untouched
-//! [`crate::rules::creature::Creature`] config every time it is called, so
+//! [`crate::creature::Creature`] config every time it is called, so
 //! the charge is back at full the moment a new encounter starts.
 
-use crate::rules::creature::{Move, Uses};
-
 use super::traits::{CreatureBuilder, FeaturePlugin, FeatureResult};
+use crate::creature::{Move, Uses};
 
 /// Grants a creature a limited-use option to take `base_move` flagged as
 /// exempt from whatever casting-restriction mechanism exists or comes to
@@ -81,9 +80,9 @@ impl FeaturePlugin for BypassCastingRestrictionsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsl::plugin::traits::CreatureBuilder;
+    use crate::creature::{Creature, Effect, Strike};
     use crate::prob::rng::Rng;
-    use crate::rules::creature::{Creature, DamageKind, DamageRoll, Effect, Strike};
+    use crate::rules::{DamageKind, DamageRoll};
     use crate::sim::duel::{run, Policy};
 
     fn spell_move() -> Move {

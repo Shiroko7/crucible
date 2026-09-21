@@ -1,11 +1,10 @@
 //! Replayable example fight narrations.
 
-use crucible_core::creature::Creature;
-use crucible_core::duel::{run_teams, Outcome, Policy, Side};
-use crucible_core::Rng;
-
 use crate::args::Args;
 
+use crucible_core::creature::Creature;
+use crucible_core::prob::Rng;
+use crucible_core::sim::{run_teams, Outcome, Policy, Side};
 /// Replayable example fights, chosen from a probe run rather than cherry-picked by
 /// hand: the worst case for the first side, the median, and the best.
 pub fn print_fights(args: &Args, roster: &[&Creature]) {

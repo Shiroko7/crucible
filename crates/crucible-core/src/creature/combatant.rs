@@ -1,12 +1,8 @@
 //! The Creature combatant model.
 
-use crate::rules::combat::Reduction;
-
-use super::action::Move;
-use super::damage::DamageKind;
-use super::rider::Rider;
-use super::types::{
-    Ability, Condition, CreatureType, Resource, Size, SpellCastingProfile, SpellSlots,
+use crate::creature::{Move, Resource, Rider};
+use crate::rules::{
+    Ability, Condition, CreatureType, DamageKind, Reduction, Size, SpellCastingProfile, SpellSlots,
 };
 
 /// One side of a fight.
@@ -220,7 +216,7 @@ impl Creature {
     /// d20 check, for a check the creature is `proficient` in - `None`
     /// otherwise, and `None` for a creature without the feature at all
     /// regardless of proficiency. Feed the result straight into
-    /// [`crate::rules::check::CheckRoll::with_floor`].
+    /// [`crate::rules::CheckRoll::with_floor`].
     pub fn check_floor(&self, proficient: bool) -> Option<i32> {
         if proficient {
             self.reliable_talent_floor
@@ -269,5 +265,44 @@ impl Creature {
     pub fn with_condition_immunity(mut self, condition: Condition) -> Self {
         self.condition_immunities.push(condition);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn casting_a_spell_on_a_creature_spends_from_its_own_pool() {
+        let mut caster = Creature::new("caster", 15, 20);
+        caster.spell_slots.set_max(1, 2);
+
+        assert!(caster.cast_spell(1));
+        assert!(caster.cast_spell(1));
+        assert!(!caster.cast_spell(1), "the pool is empty");
+
+        caster.recover_spell_slots();
+        assert!(caster.cast_spell(1), "a rest refills it");
+    }
+
+    /// A creature with no declared type gates out every
+    /// `BonusDamageVsCreatureType` rider, which is what a plain SRD monster
+    /// with no `creature_type` line should do.
+    #[test]
+    fn a_creature_with_no_declared_type_never_matches_a_creature_type_gate() {
+        let plain = dummy(15);
+        assert_eq!(plain.creature_type, None);
+    }
+
+    #[test]
+    fn a_creature_defaults_to_medium_size_but_can_be_overridden() {
+        let creature = Creature::new("dummy", 12, 10);
+        assert_eq!(creature.size, Size::Medium);
+        let huge = Creature::new("big", 12, 10).with_size(Size::Huge);
+        assert_eq!(huge.size, Size::Huge);
+    }
+
+    fn dummy(ac: i32) -> Creature {
+        Creature::new("dummy", ac, 100)
     }
 }

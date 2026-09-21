@@ -2,7 +2,7 @@
 //!
 //! This is the half of the engine that is *obviously* correct. Anything simple
 //! enough to solve in closed form gets solved here by convolution, and the
-//! sampled path in [`crate::rules::combat`] is then required to converge to it. That
+//! sampled path in [`crate::rules::sample_damage`] is then required to converge to it. That
 //! agreement is the project's load-bearing test: the sampled path is the one
 //! that scales to a full encounter, and this is the one that can be checked.
 //!

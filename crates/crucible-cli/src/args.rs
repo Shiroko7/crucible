@@ -1,7 +1,6 @@
 //! CLI argument parsing and configuration flags.
 
-use crucible_core::duel::{Budget, Policy};
-
+use crucible_core::sim::{Budget, Policy};
 pub const USAGE: &str = "\
 usage: crucible <scenario file> [options]
 

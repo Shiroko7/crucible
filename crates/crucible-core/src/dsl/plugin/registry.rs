@@ -1,8 +1,5 @@
 //! Feature registry for looking up and instantiating known feature plugins.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use super::casting::BypassCastingRestrictionsPlugin;
 use super::items::LimitedUseDebuffItemPlugin;
 use super::prestige_spellcasting::{AbilityRequirement, PrestigeSpellcastingPlugin};
@@ -10,8 +7,11 @@ use super::rogue::*;
 use super::spells::*;
 use super::standard::*;
 use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
+use crate::creature::{MoveKind, Rider};
 use crate::dsl::scenario::{self, DurationSpec, TraitEffect};
-use crate::rules::creature::{Ability, DamageKind, MoveKind, Rider, SPELL_LEVELS};
+use crate::rules::{Ability, DamageKind, SPELL_LEVELS};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Read a spell plugin's optional cost into a [`SpellCost`]: `slot = N`
 /// spends a spell slot of that level, while `resource = "<pool>"` (with an
@@ -279,7 +279,7 @@ impl FeatureRegistry {
             let duration = match (spec, dc) {
                 (DurationSpec::Fixed(d), _) => d,
                 (DurationSpec::UntilSave, Some(dc)) => {
-                    crate::rules::creature::Duration::SaveEndTurn { ability, dc }
+                    crate::rules::Duration::SaveEndTurn { ability, dc }
                 }
                 (DurationSpec::UntilSave, None) => {
                     return Err(FeatureError::InvalidConfiguration(format!(
@@ -599,6 +599,8 @@ impl FeatureRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::creature::Effect;
+    use crate::rules::{Condition, Duration, SpellCastingProfile};
 
     /// `dice_count` is the whole point of making Sneak Attack a plugin
     /// parameter rather than a hardcoded 4d6 - a level-9 rogue's TOML feature
@@ -624,7 +626,7 @@ mod tests {
         plugin.apply(&mut builder).unwrap();
         assert_eq!(
             builder.creature.riders,
-            vec![crate::rules::creature::Rider::ConditionalExtraDamage {
+            vec![crate::creature::Rider::ConditionalExtraDamage {
                 dice_count: 4,
                 dice_sides: 6,
                 once_per_turn: true,
@@ -641,9 +643,6 @@ mod tests {
             Err(FeatureError::InvalidConfiguration(_))
         ));
     }
-
-    use crate::dsl::plugin::CreatureBuilder;
-    use crate::rules::creature::{Ability, Condition, Duration, Effect, SpellCastingProfile};
 
     fn spellcaster() -> CreatureBuilder {
         let mut builder = CreatureBuilder::new("Wizard", 12, 30);
@@ -758,7 +757,7 @@ mod tests {
         plugin.apply(&mut builder).unwrap();
         assert_eq!(
             builder.creature.riders,
-            vec![crate::rules::creature::Rider::CunningStrike { dc: 15 }]
+            vec![crate::creature::Rider::CunningStrike { dc: 15 }]
         );
     }
 
@@ -777,7 +776,7 @@ mod tests {
         plugin.apply(&mut builder).unwrap();
         assert_eq!(
             builder.creature.riders,
-            vec![crate::rules::creature::Rider::CunningStrike { dc: 15 }]
+            vec![crate::creature::Rider::CunningStrike { dc: 15 }]
         );
 
         let with: toml::Value = toml::from_str(
@@ -789,7 +788,7 @@ mod tests {
         plugin.apply(&mut builder).unwrap();
         assert_eq!(
             builder.creature.riders,
-            vec![crate::rules::creature::Rider::CunningStrike { dc: 17 }]
+            vec![crate::creature::Rider::CunningStrike { dc: 17 }]
         );
     }
 
@@ -850,7 +849,7 @@ mod tests {
         trip.apply(&mut builder).unwrap();
         assert_eq!(
             builder.creature.riders,
-            vec![crate::rules::creature::Rider::CunningStrikeTrip]
+            vec![crate::creature::Rider::CunningStrikeTrip]
         );
 
         let withdraw = registry
@@ -862,7 +861,7 @@ mod tests {
         withdraw.apply(&mut builder).unwrap();
         assert_eq!(
             builder.creature.riders,
-            vec![crate::rules::creature::Rider::CunningStrikeWithdraw]
+            vec![crate::creature::Rider::CunningStrikeWithdraw]
         );
     }
 
@@ -902,7 +901,7 @@ mod tests {
         builder.set_ability_score(Ability::Dex, 13);
         builder.set_ability_score(Ability::Int, 13);
         builder.set_ability_score(Ability::Wis, 20);
-        builder.add_rider(crate::rules::creature::Rider::ConditionalExtraDamage {
+        builder.add_rider(crate::creature::Rider::ConditionalExtraDamage {
             dice_count: 2,
             dice_sides: 6,
             once_per_turn: true,
@@ -981,11 +980,7 @@ mod tests {
         assert_eq!(plugin.name(), "True Strike");
 
         let mut builder = crate::dsl::plugin::CreatureBuilder::new("Caster", 15, 30);
-        builder.set_spellcasting(crate::rules::creature::SpellCastingProfile::new(
-            Ability::Wis,
-            4,
-            3,
-        ));
+        builder.set_spellcasting(crate::rules::SpellCastingProfile::new(Ability::Wis, 4, 3));
         plugin
             .apply(&mut builder)
             .expect("spellcasting is declared");
@@ -1015,11 +1010,7 @@ mod tests {
         .unwrap();
         let plugin = registry.build_plugin("true_strike", &params).unwrap();
         let mut builder = crate::dsl::plugin::CreatureBuilder::new("Caster", 15, 30);
-        builder.set_spellcasting(crate::rules::creature::SpellCastingProfile::new(
-            Ability::Wis,
-            5,
-            4,
-        ));
+        builder.set_spellcasting(crate::rules::SpellCastingProfile::new(Ability::Wis, 5, 4));
         plugin.apply(&mut builder).unwrap();
         let action = &builder.creature.actions[0];
         let Effect::Strikes { strike, .. } = &action.effect else {
@@ -1030,7 +1021,7 @@ mod tests {
         assert!(strike.kind.ranged && strike.kind.weapon && strike.kind.spell);
         assert!(matches!(
             action.riders[..],
-            [crate::rules::creature::Rider::BonusDamageVsCreatureType { dice_count: 3, .. }]
+            [crate::creature::Rider::BonusDamageVsCreatureType { dice_count: 3, .. }]
         ));
 
         let flat: toml::Value = toml::from_str(
@@ -1106,7 +1097,7 @@ mod tests {
         let m = &builder.creature.actions[0];
         assert!(m.bypasses_casting_restrictions);
         assert_eq!(m.kind, MoveKind::Spell);
-        assert_eq!(m.uses, crate::rules::creature::Uses::Limited(1));
+        assert_eq!(m.uses, crate::creature::Uses::Limited(1));
     }
 
     #[test]
@@ -1215,28 +1206,23 @@ mod tests {
         assert_eq!(plugin.name(), "Guiding Bolt");
 
         let mut builder = crate::dsl::plugin::CreatureBuilder::new("Cleric", 16, 30);
-        builder.set_spellcasting(crate::rules::creature::SpellCastingProfile::new(
-            Ability::Wis,
-            3,
-            2,
-        ));
+        builder.set_spellcasting(crate::rules::SpellCastingProfile::new(Ability::Wis, 3, 2));
         builder.set_spell_slot_max(1, 2);
         let built = builder
             .apply_feature(plugin.as_ref())
             .expect("guiding_bolt applies to a caster")
             .build()
             .expect("builds");
-        let crate::rules::creature::Effect::Strikes { strike, .. } = &built.actions[0].effect
-        else {
+        let crate::creature::Effect::Strikes { strike, .. } = &built.actions[0].effect else {
             panic!("expected a Strikes effect");
         };
         assert_eq!(
             strike.damage,
-            vec![crate::rules::creature::DamageRoll::new(
+            vec![crate::rules::DamageRoll::new(
                 4,
                 6,
                 0,
-                crate::rules::creature::DamageKind::Radiant
+                crate::rules::DamageKind::Radiant
             )]
         );
 
@@ -1248,28 +1234,23 @@ mod tests {
             .build_plugin("guiding_bolt", &overridden)
             .expect("guiding_bolt builds with overridden dice");
         let mut builder = crate::dsl::plugin::CreatureBuilder::new("Cleric", 16, 30);
-        builder.set_spellcasting(crate::rules::creature::SpellCastingProfile::new(
-            Ability::Wis,
-            3,
-            2,
-        ));
+        builder.set_spellcasting(crate::rules::SpellCastingProfile::new(Ability::Wis, 3, 2));
         builder.set_spell_slot_max(1, 2);
         let built = builder
             .apply_feature(plugin.as_ref())
             .expect("guiding_bolt applies")
             .build()
             .expect("builds");
-        let crate::rules::creature::Effect::Strikes { strike, .. } = &built.actions[0].effect
-        else {
+        let crate::creature::Effect::Strikes { strike, .. } = &built.actions[0].effect else {
             panic!("expected a Strikes effect");
         };
         assert_eq!(
             strike.damage,
-            vec![crate::rules::creature::DamageRoll::new(
+            vec![crate::rules::DamageRoll::new(
                 5,
                 8,
                 0,
-                crate::rules::creature::DamageKind::Radiant
+                crate::rules::DamageKind::Radiant
             )]
         );
     }

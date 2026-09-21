@@ -2,7 +2,7 @@
 //!
 //! Each spell here is a `Move` built the same way any other feature builds
 //! one - see `standard.rs` - rather than new engine branches. The one thing
-//! genuinely new to the engine is [`crate::rules::creature::Effect::AutoHit`],
+//! genuinely new to the engine is [`crate::creature::Effect::AutoHit`],
 //! for Magic Missile's "no attack roll, no save" damage; Blindness/Deafness
 //! and Command both fit entirely inside the existing `Effect::Save` /
 //! `Condition` / `Duration` machinery ARCH-01 and ARCH-05 already built.
@@ -14,8 +14,8 @@
 //! ## What pays for a cast
 //!
 //! A slotted spell spends from the caster's own
-//! [`crate::rules::creature::SpellSlots`] via
-//! [`crate::rules::creature::Move::with_spell_slot`] - one pool per level,
+//! [`crate::rules::SpellSlots`] via
+//! [`crate::creature::Move::with_spell_slot`] - one pool per level,
 //! shared by every spell of that level, which `sim::duel` spends from and
 //! refuses to overdraw. The spells a build might instead power from
 //! somewhere else - Blindness/Deafness, Command and Magic Missile, which a
@@ -31,7 +31,7 @@
 //! Reviving a creature at 0 HP is not spell-specific text - it is 5e's
 //! general "a creature that regains any hit points while it has 0 becomes
 //! conscious" rule - so it is implemented once, in
-//! [`crate::rules::creature::apply_healing`], and inherited by both healing
+//! [`crate::rules::apply_healing`], and inherited by both healing
 //! spells (and anything else that ever heals) rather than re-implemented per
 //! spell. `sim::duel` aims a heal at the caster's own side: a downed ally
 //! first, otherwise whoever is missing the most hit points.
@@ -48,7 +48,7 @@
 //! saving-throw modifier rather than a condition - Bless and Bane. Neither
 //! registers anything new: [`AttackModifier::BonusDice`] /
 //! [`AttackModifier::PenaltyDice`] and their [`SaveModifier`] siblings
-//! already exist for exactly this (see `rules::combat`'s module docs), and
+//! already exist for exactly this (see `rules::attack`'s module docs), and
 //! `sim::duel` already knows how to apply them for the duration of a
 //! concentration spell and strip them when concentration ends - see
 //! [`Effect::Buff`] and [`Effect::SaveOrModifier`]. This module only builds
@@ -62,33 +62,32 @@
 //! Every clause of that sentence is machinery this engine already has,
 //! rather than anything new:
 //! - the save and its DC are `Effect::Save`'s ordinary business, with the DC
-//!   read off the caster's own [`crate::rules::creature::SpellCastingProfile`]
+//!   read off the caster's own [`crate::rules::SpellCastingProfile`]
 //!   rather than hardcoded;
-//! - "a humanoid" is [`crate::rules::creature::SaveEffect::requires_type`],
+//! - "a humanoid" is [`crate::creature::SaveEffect::requires_type`],
 //!   checked before a save is even rolled - a non-humanoid is not caught at
 //!   all, not caught-and-then-unaffected;
 //! - "repeating the save at the end of its turns" is
-//!   [`crate::rules::creature::Duration::SaveEndTurn`], which already drives
+//!   [`crate::rules::Duration::SaveEndTurn`], which already drives
 //!   `sim::duel`'s end-of-turn save loop for any condition that carries it;
 //! - "for as long as the caster concentrates" is
-//!   [`crate::rules::creature::Move::concentration`] - `sim::duel`'s
+//!   [`crate::creature::Move::concentration`] - `sim::duel`'s
 //!   concentration tracker clears the condition from every target it is
 //!   maintaining the instant that ends, save or no save;
 //! - the auto-crit a Paralyzed target grants an attacker is
-//!   [`crate::rules::creature::Condition::auto_crits`], already read by every
+//!   [`crate::rules::Condition::auto_crits`], already read by every
 //!   strike this engine resolves.
 //!
 //! Hold Person is not modelled beyond its base cast either, for the same
 //! reasons as the healing spells above: range/positioning is out of scope,
 //! and upcasting (catching more than one humanoid) is skipped.
 
-use crate::rules::combat::{Attack, AttackModifier, DamageRider, SaveModifier};
-use crate::rules::creature::{
-    Ability, AttackKind, Condition, Cost, DamageKind, DamageRoll, Duration, Effect, HealRoll, Move,
-    MoveKind, Rider, SaveEffect, SpellCastingProfile, Strike, Uses,
-};
-
 use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
+use crate::creature::{AttackKind, Cost, Effect, Move, MoveKind, Rider, SaveEffect, Strike, Uses};
+use crate::rules::{
+    Ability, Attack, AttackModifier, Condition, DamageKind, DamageRider, DamageRoll, Duration,
+    HealRoll, SaveModifier, SpellCastingProfile,
+};
 
 /// Both healing spells are cast here at their base, 1st-level, rate. See the
 /// module doc: upcasting is out of scope.
@@ -103,7 +102,7 @@ const MAX_TARGETS: u32 = 1;
 
 /// Hold Person's own targeting restriction: the SRD names the creature type
 /// by this exact word, matched case-insensitively by
-/// [`crate::rules::creature::Creature::is_creature_type`].
+/// [`crate::creature::Creature::is_creature_type`].
 const TARGET_TYPE: &str = "Humanoid";
 
 /// The ability modifier a healing spell adds, read off the creature's own
@@ -125,7 +124,7 @@ fn spellcasting_ability_modifier(
 
 /// Healing Word (SRD 5.2): Bonus Action, 60 feet, 1d4 + spellcasting ability
 /// modifier. If the target is at 0 HP, it revives instead of only healing -
-/// see [`crate::rules::creature::apply_healing`].
+/// see [`crate::rules::apply_healing`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HealingWordPlugin;
 
@@ -217,9 +216,9 @@ impl FeaturePlugin for CureWoundsPlugin {
 /// in its strike's [`AttackKind`]. The two are independent and additive: a
 /// rogue using True Strike with a rapier still qualifies for Sneak Attack
 /// through the ordinary weapon gate -
-/// [`crate::rules::creature::Rider::extra_damage_for`] - with or without any
+/// [`crate::creature::Rider::extra_damage_for`] - with or without any
 /// build that also extends Sneak Attack to spell attacks (see
-/// [`crate::rules::creature::Rider::extra_damage_for_with_spell_attack_extension`]).
+/// [`crate::creature::Rider::extra_damage_for_with_spell_attack_extension`]).
 ///
 /// The attack is made *with* the wielded weapon, so whatever that weapon
 /// brings comes along: its magic bonus (and its ammunition's) to both the
@@ -340,7 +339,7 @@ impl TrueStrikePlugin {
     /// dice ride alongside as a [`DamageRider`] - doubled on a crit exactly
     /// like the weapon's own dice, which is correct: a critical hit doubles
     /// every damage die an attack rolls, not only the weapon's (see
-    /// `rules::combat`'s module docs).
+    /// `rules::attack`'s module docs).
     ///
     /// Roll mode and ally-adjacency are situational, not a property of the
     /// spell, so they are left at [`Attack`]'s defaults here - a caller
@@ -410,7 +409,7 @@ impl FeaturePlugin for TrueStrikePlugin {
 /// concentration): summons a spectral weapon that immediately makes a melee
 /// spell attack - `1d8 + spellcasting ability modifier` Force damage on a
 /// hit, using the caster's own
-/// [`crate::rules::creature::SpellCastingProfile::attack_bonus`], never a
+/// [`crate::rules::SpellCastingProfile::attack_bonus`], never a
 /// hardcoded number - and on every later round, an identical Bonus Action
 /// strike is available again at no further cost.
 ///
@@ -512,7 +511,7 @@ impl FeaturePlugin for SpiritualWeaponPlugin {
 /// different pool without a code change. Upcasting Guiding Bolt itself (more
 /// dice from a higher-level slot) is not modelled: this always spends
 /// exactly one 1st-level slot, from the same
-/// [`crate::rules::creature::SpellSlots`] pool every other 1st-level spell
+/// [`crate::rules::SpellSlots`] pool every other 1st-level spell
 /// draws on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GuidingBoltPlugin {
@@ -645,7 +644,7 @@ impl FeaturePlugin for HoldPersonPlugin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpellCost {
     /// One spell slot of this level, from the caster's own
-    /// [`crate::rules::creature::SpellSlots`].
+    /// [`crate::rules::SpellSlots`].
     Slot(u32),
     /// `amount` from the resource pool named `resource_name`, resolved
     /// against whatever the caster's config declared.
@@ -961,7 +960,7 @@ impl FeaturePlugin for MagicMissilePlugin {
 
 /// Bane (1st level, concentration, up to 1 minute): up to three creatures
 /// each make a Charisma save against the caster's own spell save DC - read
-/// from [`crate::rules::creature::SpellCastingProfile`] at the moment the
+/// from [`crate::rules::SpellCastingProfile`] at the moment the
 /// spell resolves, never a fixed number baked in here - or subtract `1d4`
 /// from every attack roll and every saving throw they make for the
 /// duration.
@@ -999,15 +998,13 @@ impl FeaturePlugin for BanePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::creature::Creature;
     use crate::dsl::plugin::rogue::SneakAttackPlugin;
     use crate::prob::dice::Pmf;
     use crate::prob::rng::Rng;
-    use crate::rules::combat::{
-        damage_pmf, sample_damage, Attack, DamageRider, Defense, Reduction, RollMode,
-    };
-    use crate::rules::creature::{
-        apply_healing, is_down, Ability, Creature, CreatureType, DamageKind, DamageRoll, Rider,
-        SpellCastingProfile, Strike, Uses,
+    use crate::rules::{
+        apply_healing, damage_pmf, is_down, sample_damage, CreatureType, Defense, Reduction,
+        RollMode,
     };
     use crate::sim::duel::{run, run_teams, Budget, Policy};
 
@@ -1166,13 +1163,13 @@ mod tests {
         let punch = Move::new(
             "Punch",
             Effect::Strikes {
-                strike: crate::rules::creature::Strike::new(
+                strike: crate::creature::Strike::new(
                     5,
-                    vec![crate::rules::creature::DamageRoll::new(
+                    vec![crate::rules::DamageRoll::new(
                         1,
                         4,
                         2,
-                        crate::rules::creature::DamageKind::Bludgeoning,
+                        crate::rules::DamageKind::Bludgeoning,
                     )],
                 ),
                 count: 1,
@@ -1354,7 +1351,7 @@ mod tests {
 
     /// On a hit, the weapon's own dice and the configured Radiant dice both
     /// land, and a crit doubles both pools identically - exactly the shape
-    /// [`crate::rules::combat::rider_pmf`] already guarantees for any
+    /// [`crate::rules::rider_pmf`] already guarantees for any
     /// [`DamageRider`], not reimplemented here.
     #[test]
     fn on_hit_damage_is_the_weapons_own_dice_plus_the_configured_radiant_dice() {
@@ -2471,7 +2468,7 @@ mod tests {
     /// caster is explicitly built with the
     /// [`Rider::ExtraDamageAppliesToSpellAttacks`] marker plus a qualifying
     /// trigger condition (advantage, here) - the same gate
-    /// `rider.rs`'s own tests exercise, checked concretely against this
+    /// `creature::rider::extra_damage`'s own tests exercise, checked concretely against this
     /// spell's `1d8 + ability modifier` numbers rather than an arbitrary
     /// fixture.
     #[test]
@@ -2655,7 +2652,7 @@ mod tests {
             panic!("expected Strikes");
         };
 
-        let target = crate::rules::creature::Creature::new("target", 15, 40);
+        let target = crate::creature::Creature::new("target", 15, 40);
         let exact = strike.damage_pmf(&target);
         assert!(close(exact.total(), 1.0));
         assert!(exact.min() >= 0, "damage floors at zero");
@@ -2688,11 +2685,9 @@ mod tests {
     /// ([`Attack::is_spell_attack`]) whose damage profile composes with the
     /// AT-02 sneak-attack-style extension exactly like a weapon attack does,
     /// as soon as the attack has Advantage - from this exact mark's own
-    /// prior use, or any other source. Verified at the [`rules::combat`]
+    /// prior use, or any other source. Verified at the [`Attack`]
     /// level, the same way AT-02's own tests prove the gate, and checked
     /// exact-vs-sampled.
-    ///
-    /// [`rules::combat`]: crate::rules::combat
     #[test]
     fn guiding_bolts_profile_composes_with_the_sneak_attack_style_spell_extension_under_advantage()
     {
