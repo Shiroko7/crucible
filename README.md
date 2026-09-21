@@ -39,18 +39,21 @@ times, reported.
 |---|---|---|
 | `rng` | `prob::rng` | PCG32, seedable, independent streams for parallel rollouts |
 | `dice` | `prob::dice` | exact PMFs by convolution: pools, mixtures, flooring, halving |
-| `combat` | `rules::combat` | attack resolution, both exact and sampled: crits, advantage, resistance, composable `AttackModifier`/`DamageRider` lists (Bless, Bane, extra damage dice) |
 | `exact` | `prob::exact` | closed-form kill curves and expected attacks, by dynamic programming |
-| `creature` | `rules::creature` | modular combatant model: multi-type damage, saves, recharge, resource pools, riders |
-| `dsl` | `dsl` | Monad Plugin Architecture (`FeaturePlugin`, `CreatureBuilder`, `FeatureRegistry`), PC & Monster abstractions, TOML config loaders |
+| rules | `rules` | core 5e rules, one concept per file: abilities, sizes, creature types, conditions and their lifetimes, damage and reduction, healing, spell slots, saves, checks |
+| attacks | `rules::attack` | attack resolution, both exact and sampled: crits, advantage, resistance, composable `AttackModifier`/`DamageRider` lists (Bless, Bane, extra damage dice) |
+| `creature` | `creature` | modular combatant model: moves and their effects, multi-type damage, saves, recharge, resource pools, riders |
+| riders | `creature::rider` | Evasion, Legendary Resistance, Stunning Strike, Sneak Attack and Cunning Strike, bonus dice against a creature type, weapon buffs armed by a condition, injury poisons, immunity downgrades, and reactions (Deflect Attacks, Uncanny Dodge, a reactive AC boost) - as general mechanisms, all applied in live fights |
+| features | `features` | the ruleset as plugins (`FeaturePlugin`, `CreatureBuilder`, `FeatureRegistry`), one file per feature: `classes/` (a folder per class and subclass), `spells/`, `monsters/`, `spellcasting/`, `items/`; each feature registers its own TOML factory |
+| grammar | `dsl::grammar` | the phrase grammar moves and traits are written in, shared by every creature format and by features that take a move as a parameter |
 | `scenario` | `dsl::scenario` | scenario parser supporting both external creature configs (`source:`) and inline declarations |
-| `duel` | `sim::duel` | team combat rounds: initiative, action economy, reactions, condition lifetimes, legendary actions between turns |
+| configs | `dsl::config` | TOML PC and Monster loaders |
+| fight | `sim::fight` | team combat rounds, one file per stage of a turn: initiative, action economy, reactions, condition lifetimes, concentration, legendary actions between turns |
 | `analysis` | `sim::analysis` | win and death probability, CVaR of the bad tail, exact pacing check |
-| riders | `rules::creature::rider` | Evasion, Legendary Resistance, Stunning Strike, Sneak Attack and Cunning Strike, bonus dice against a creature type, weapon buffs armed by a condition, injury poisons, immunity downgrades, and reactions (Deflect Attacks, Uncanny Dodge, a reactive AC boost) - as general mechanisms, all applied in live fights |
-| policies | `sim::duel::policy` | eight of the nine from `DESIGN.md`: `solver`, `nova`, `greedy`, `focus-fire`, `scattered`, `in-order`, `defensive`, `attrition`, `thrifty` |
-| search | `sim::duel` | flat Monte Carlo over one turn, to a depth budget |
+| policies | `sim::policy` | eight of the nine from `DESIGN.md`: `solver`, `nova`, `greedy`, `focus-fire`, `scattered`, `in-order`, `defensive`, `attrition`, `thrifty` |
+| search | `sim::fight` | flat Monte Carlo over one turn, to a depth budget |
 | content | `content/` | data-driven PC (`content/characters/`) and Monster (`content/monsters/`) formatted configurations |
-| event pipeline | `sim::duel` | riders fire at fixed points (as an attack is rolled, on being targeted, on a hit's damage, on a hit, on a failed save, on a save for half); they do not yet subscribe to hooks |
+| event pipeline | `sim::fight` | riders fire at fixed points (as an attack is rolled, on being targeted, on a hit's damage, on a hit, on a failed save, on a save for half); they do not yet subscribe to hooks |
 | `fitted` policy | | blocked: it means fitting parameters to logged play, and there are no logs |
 
 ### What is and is not modelled
@@ -201,7 +204,9 @@ Creatures are formatted data configurations rather than hardcoded simulation log
 SRD material is CC-BY-4.0 and ships with attribution. Non-SRD material is loaded from local
 data files and never committed — `scenarios/local/` is gitignored for that. The Monad Plugin
 Architecture ensures that new or missing mechanics are implemented as reusable plugins,
-while PCs and monsters are expressed purely as structured data.
+while PCs and monsters are expressed purely as structured data. Each plugin lives in its own
+file under `crates/crucible-core/src/features/`, in the narrowest folder that covers every
+class (or spell list, or item) that has it, together with its TOML factory and its tests.
 
 `crates/crucible-core/tests/multiclass_rogue_caster.rs` is the worked example of a whole
 multiclass build written that way - a rogue with a secondary spellcasting grant, magic

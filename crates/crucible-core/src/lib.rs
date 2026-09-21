@@ -6,11 +6,17 @@
 //! to check against itself: a rollout engine with a biased d20 or a mishandled
 //! critical hit produces perfectly plausible numbers.
 //!
-//! Subsystems:
+//! Subsystems, in dependency order - each uses only the ones before it:
 //! - [`prob`]: Probability mass functions, dice convolution, exact curves, and deterministic PRNG.
-//! - [`rules`]: 5e combat rules, damage reduction, attack resolution, and combatant models.
-//! - [`sim`]: Simulation loop, AI policies, MCTS solver, and statistical CVaR analysis.
-//! - [`dsl`]: Data-driven configurations, Monad Plugin Architecture, PC/Monster abstractions, and scenario parsing.
+//! - [`rules`]: Core 5e rules - conditions, damage, saves, checks, spellcasting, attack resolution.
+//! - [`creature`]: The combatant model - moves, what they do, and the riders hanging off them.
+//! - [`sim`]: The fight engine, playstyle policies, the solver, and CVaR analysis.
+//! - [`dsl`]: The move and trait grammar ([`dsl::grammar`]), `.crucible` scenarios, and TOML configs.
+//! - [`features`]: The ruleset as plugins, one file per class feature, spell, monster trait or item.
+//!
+//! One exception: the file formats ([`dsl::scenario`], [`dsl::config`]) build
+//! creatures through [`features`], which comes after them. [`features`] itself
+//! only ever reaches back into [`dsl::grammar`], never a file format.
 
 pub mod creature;
 pub mod dsl;
