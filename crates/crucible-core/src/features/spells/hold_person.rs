@@ -109,8 +109,7 @@ pub(super) fn register(registry: &mut FeatureRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::creature::Creature;
-    use crate::creature::Strike;
+    use crate::creature::{Creature, Strike};
     use crate::prob::Rng;
     use crate::rules::{CreatureType, DamageKind, DamageRoll, SpellCastingProfile};
     use crate::sim::{run, run_teams, Budget, Policy};

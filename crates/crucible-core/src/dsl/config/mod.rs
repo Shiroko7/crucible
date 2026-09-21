@@ -1,8 +1,16 @@
 //! Configuration loading and deserialization for PC and Monster files.
+//!
+//! A TOML file declares one `[pc]` or `[monster]`: stat block fields, trait
+//! phrases and moves written in [`crate::dsl::grammar`], and a list of
+//! registry features by id - see [`crate::features::FeatureRegistry`].
 
-use super::monster::MonsterDefinition;
-use super::pc::PlayerCharacter;
-use super::scenario::TraitEffect;
+mod monster;
+mod pc;
+
+use crate::dsl::grammar::TraitEffect;
+pub use monster::MonsterDefinition;
+pub use pc::PlayerCharacter;
+
 use crate::creature::{Creature, Move};
 use crate::features::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
 use crate::rules::{Ability, SpellCastingProfile};
@@ -94,13 +102,13 @@ struct RootDocument {
 /// Parse a trait definition string (e.g. "evasion dex", "legendary resistance 3",
 /// "ac 2").
 pub fn parse_trait_str(value: &str) -> FeatureResult<TraitEffect> {
-    crate::dsl::scenario::parse_trait_external(value).map_err(FeatureError::InvalidConfiguration)
+    crate::dsl::grammar::parse_trait_external(value).map_err(FeatureError::InvalidConfiguration)
 }
 
 /// Parse a move entry into a `Move` given the current combatant context.
 pub fn parse_move_entry(entry: &MoveEntry, owner: &Creature) -> FeatureResult<Move> {
     let full = format!("{} | {}", entry.name, entry.effect);
-    crate::dsl::scenario::parse_move_external(&full, owner)
+    crate::dsl::grammar::parse_move_external(&full, owner)
         .map_err(FeatureError::InvalidConfiguration)
 }
 

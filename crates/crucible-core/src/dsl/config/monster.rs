@@ -23,9 +23,9 @@ pub struct MonsterDefinition {
     #[serde(default)]
     pub saves: HashMap<String, i32>,
     #[serde(default)]
-    pub resources: super::config::ResourcesConfig,
+    pub resources: super::ResourcesConfig,
     #[serde(default)]
-    pub spellcasting: Option<super::config::SpellcastingConfig>,
+    pub spellcasting: Option<super::SpellcastingConfig>,
     #[serde(default)]
     pub resist: Vec<String>,
     #[serde(default)]
@@ -41,13 +41,13 @@ pub struct MonsterDefinition {
     #[serde(default)]
     pub features: Vec<toml::Value>,
     #[serde(default)]
-    pub actions: Vec<super::config::MoveEntry>,
+    pub actions: Vec<super::MoveEntry>,
     #[serde(default)]
-    pub bonus: Vec<super::config::MoveEntry>,
+    pub bonus: Vec<super::MoveEntry>,
     #[serde(default)]
     pub legendary_uses: u32,
     #[serde(default)]
-    pub legendary: Vec<super::config::MoveEntry>,
+    pub legendary: Vec<super::MoveEntry>,
 }
 
 impl MonsterDefinition {
@@ -83,7 +83,7 @@ impl MonsterDefinition {
         }
 
         // Apply resources, including any spell slot pools
-        super::config::apply_resources(&mut builder, &self.resources)?;
+        super::apply_resources(&mut builder, &self.resources)?;
 
         // Apply the spellcasting profile (spell attack bonus / save DC)
         if let Some(spellcasting) = &self.spellcasting {
@@ -114,9 +114,9 @@ impl MonsterDefinition {
 
         // Apply trait strings: each is a Rider, or a flat passive stat bonus
         // applied straight onto the creature (AC, saves, spellcasting item
-        // bonus, resistance) - see `dsl::scenario::TraitEffect`.
+        // bonus, resistance) - see `dsl::grammar::TraitEffect`.
         for trait_line in &self.traits {
-            let effect = super::config::parse_trait_str(trait_line)?;
+            let effect = super::parse_trait_str(trait_line)?;
             effect
                 .apply(&mut builder.creature)
                 .map_err(FeatureError::InvalidConfiguration)?;
@@ -132,19 +132,19 @@ impl MonsterDefinition {
 
         // Apply actions
         for entry in &self.actions {
-            let m = super::config::parse_move_entry(entry, &builder.creature)?;
+            let m = super::parse_move_entry(entry, &builder.creature)?;
             builder.add_action(m);
         }
 
         // Apply bonus actions
         for entry in &self.bonus {
-            let m = super::config::parse_move_entry(entry, &builder.creature)?;
+            let m = super::parse_move_entry(entry, &builder.creature)?;
             builder.add_bonus_action(m);
         }
 
         // Apply legendary actions
         for entry in &self.legendary {
-            let m = super::config::parse_move_entry(entry, &builder.creature)?;
+            let m = super::parse_move_entry(entry, &builder.creature)?;
             builder.add_legendary_action(m);
         }
 

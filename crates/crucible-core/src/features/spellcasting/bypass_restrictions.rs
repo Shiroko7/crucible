@@ -20,7 +20,7 @@
 //! the charge is back at full the moment a new encounter starts.
 
 use crate::creature::{Move, MoveKind, Uses};
-use crate::dsl::scenario;
+use crate::dsl::grammar;
 use crate::features::{
     CreatureBuilder, FeatureError, FeaturePlugin, FeatureRegistry, FeatureResult,
 };
@@ -96,7 +96,7 @@ impl FeaturePlugin for DeclaredBypassCast {
     }
 
     fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
-        let mut m = scenario::parse_move_external(
+        let mut m = grammar::parse_move_external(
             &format!("{} | {}", self.name, self.effect),
             &builder.creature,
         )
@@ -134,8 +134,7 @@ pub(super) fn register(registry: &mut FeatureRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::creature::Creature;
-    use crate::creature::{Effect, Strike};
+    use crate::creature::{Creature, Effect, Strike};
     use crate::prob::Rng;
     use crate::rules::{Ability, DamageKind, DamageRoll, SpellCastingProfile};
     use crate::sim::{run, Policy};

@@ -1,8 +1,8 @@
 //! True Strike (2024 cantrip).
 
 use crate::creature::{AttackKind, Effect, Move, MoveKind, Rider, Strike};
-use crate::dsl::scenario;
-use crate::dsl::scenario::TraitEffect;
+use crate::dsl::grammar;
+use crate::dsl::grammar::TraitEffect;
 use crate::features::{
     CreatureBuilder, FeatureError, FeaturePlugin, FeatureRegistry, FeatureResult,
 };
@@ -12,7 +12,7 @@ use crate::rules::{Attack, DamageKind, DamageRider, DamageRoll, SpellCastingProf
 /// dragon` - rather than a flat stat bonus, for a plugin that attaches it to
 /// one of its own moves.
 fn parse_rider_phrase(phrase: &str) -> FeatureResult<Rider> {
-    match scenario::parse_trait_external(phrase).map_err(FeatureError::InvalidConfiguration)? {
+    match grammar::parse_trait_external(phrase).map_err(FeatureError::InvalidConfiguration)? {
         TraitEffect::Rider(rider) => Ok(rider),
         other => Err(FeatureError::InvalidConfiguration(format!(
             "`{phrase}` is a flat bonus ({other:?}), not something a weapon carries onto a hit"

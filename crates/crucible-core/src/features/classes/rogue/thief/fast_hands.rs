@@ -1,7 +1,7 @@
 //! Fast Hands (2024 Thief 3).
 
 use crate::creature::{Move, MoveKind};
-use crate::dsl::scenario;
+use crate::dsl::grammar;
 use crate::features::{
     CreatureBuilder, FeatureError, FeaturePlugin, FeatureRegistry, FeatureResult,
 };
@@ -82,7 +82,7 @@ impl FeaturePlugin for DeclaredFastHandsMove {
     }
 
     fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
-        let mut m = scenario::parse_move_external(
+        let mut m = grammar::parse_move_external(
             &format!("{} | {}", self.name, self.effect),
             &builder.creature,
         )

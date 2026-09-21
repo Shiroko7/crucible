@@ -128,8 +128,7 @@ pub(super) fn register(registry: &mut FeatureRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::creature::Creature;
-    use crate::creature::Uses;
+    use crate::creature::{Creature, Uses};
     use crate::prob::Rng;
     use crate::rules::{DamageKind, Reduction, SpellCastingProfile};
 

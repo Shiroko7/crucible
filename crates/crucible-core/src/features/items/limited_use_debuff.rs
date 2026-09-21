@@ -1,8 +1,8 @@
 //! A limited-use item that forces a save or suffer a debuff.
 
 use crate::creature::{Effect, Move, MoveKind, SaveEffect, Uses};
-use crate::dsl::scenario;
-use crate::dsl::scenario::DurationSpec;
+use crate::dsl::grammar;
+use crate::dsl::grammar::DurationSpec;
 use crate::features::classes::rogue::thief::FastHandsPlugin;
 use crate::features::{
     CreatureBuilder, FeatureError, FeaturePlugin, FeatureRegistry, FeatureResult,
@@ -159,7 +159,7 @@ pub(super) fn register(registry: &mut FeatureRegistry) {
             .and_then(|v| v.as_str())
             .unwrap_or("until applier");
         let words: Vec<&str> = phrase.split_whitespace().collect();
-        let (spec, used) = scenario::parse_duration(&words, 0, phrase)
+        let (spec, used) = grammar::parse_duration(&words, 0, phrase)
             .map_err(FeatureError::InvalidConfiguration)?;
         if used != words.len() {
             return Err(FeatureError::InvalidConfiguration(format!(

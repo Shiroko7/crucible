@@ -411,7 +411,7 @@ fn an_item_spell_dc_bonus_composes_and_still_agrees_with_the_exact_path() {
         ability_modifier = 3
         proficiency_bonus = 2
     "#;
-    let caster = crucible_core::dsl::load_creature_from_str(toml, &registry)
+    let caster = crucible_core::dsl::config::load_creature_from_str(toml, &registry)
         .expect("a caster with a spell-bonus trait parses");
     // 3 (INT mod) + 2 (proficiency) + 2 (item, from the trait) = 7; DC 15.
     assert_eq!(caster.spell_save_dc(), Some(15));
