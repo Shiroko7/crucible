@@ -3396,6 +3396,184 @@ mod tests {
         );
     }
 
+    // --- Spiritual Weapon (SPL-02) ------------------------------------
+    //
+    // The moves built here mirror exactly what
+    // `dsl::plugin::spells::SpiritualWeaponPlugin` registers, but are
+    // constructed directly rather than imported from `dsl` - `sim` sits
+    // below `dsl` in the subsystem order (see `lib.rs`'s module docs), so a
+    // test that exercises the duel engine's own bookkeeping has no business
+    // depending on the DSL layer above it.
+
+    /// The initial cast: a Bonus Action, a 2nd-level slot, and - critically
+    /// for the "pay once, then repeat" shape - `Uses::Limited(1)` so it can
+    /// never be taken a second time even if a slot is still available.
+    fn spiritual_weapon_cast_move(to_hit: i32, ability_modifier: i32) -> Move {
+        Move::new(
+            "Spiritual Weapon",
+            Effect::Strikes {
+                strike: Strike::new(
+                    to_hit,
+                    vec![DamageRoll::new(1, 8, ability_modifier, DamageKind::Force)],
+                ),
+                count: 1,
+            },
+        )
+        .with_uses(Uses::Limited(1))
+        .with_spell_level(2)
+    }
+
+    /// The repeat: an identical strike, free and unlimited, so once the
+    /// move above is spent this is the only bonus action left that still
+    /// qualifies.
+    fn spiritual_weapon_strike_again_move(to_hit: i32, ability_modifier: i32) -> Move {
+        Move::new(
+            "Spiritual Weapon (Strike Again)",
+            Effect::Strikes {
+                strike: Strike::new(
+                    to_hit,
+                    vec![DamageRoll::new(1, 8, ability_modifier, DamageKind::Force)],
+                ),
+                count: 1,
+            },
+        )
+    }
+
+    /// The initial cast spends the caster's one 2nd-level slot and then
+    /// becomes permanently unavailable for the rest of the fight
+    /// (`Uses::Limited(1)`); the repeat strike never touches the slot pool
+    /// at all, on this round or any later one.
+    #[test]
+    fn spiritual_weapons_initial_cast_spends_a_slot_and_the_repeat_strike_does_not() {
+        let mut caster = Creature::new("caster", 20, 100);
+        caster.spell_slots.set_max(2, 1);
+        caster.bonus_actions.push(spiritual_weapon_cast_move(6, 3));
+        caster
+            .bonus_actions
+            .push(spiritual_weapon_strike_again_move(6, 3));
+
+        let dummy = Creature::new("dummy", 1, 1_000); // AC 1: almost everything hits
+
+        let roster = [(&caster, Side::A), (&dummy, Side::B)];
+        let mut rng = Rng::new(3_000);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        assert_eq!(fight.fighters[0].spell_slots.available(2), 1);
+        assert!(
+            fight.fighters[0].bonus_actions[0].available(),
+            "the cast starts available"
+        );
+
+        fight.take_turn(1, 0, &mut rng, &mut log, None);
+        assert_eq!(
+            fight.fighters[0].spell_slots.available(2),
+            0,
+            "the initial cast spends the one 2nd-level slot"
+        );
+        assert!(
+            !fight.fighters[0].bonus_actions[0].available(),
+            "the cast is a once-per-fight bonus action, spent or not"
+        );
+        assert!(
+            fight.fighters[0].bonus_actions[1].available(),
+            "the repeat strike is unlimited and stays available"
+        );
+
+        fight.take_turn(2, 0, &mut rng, &mut log, None);
+        assert_eq!(
+            fight.fighters[0].spell_slots.available(2),
+            0,
+            "the repeat strike must not spend a second slot"
+        );
+        assert!(
+            fight.fighters[0].bonus_actions[1].available(),
+            "the repeat strike stays available across rounds"
+        );
+    }
+
+    /// Spiritual Weapon never sets [`Move::concentration`], so it can be
+    /// summoned alongside a genuinely concentrated spell without either one
+    /// displacing the other - unlike casting a second concentration spell,
+    /// which ends the first (`a_second_concentration_spell_ends_the_first`,
+    /// above). The action establishes concentration on `Hold`; the bonus
+    /// action then casts Spiritual Weapon, and both effects have to still be
+    /// standing afterwards.
+    #[test]
+    fn spiritual_weapon_coexists_with_an_active_concentration_spell_without_disturbing_it() {
+        let hold = Move::new(
+            "Hold",
+            Effect::Save(SaveEffect {
+                ability: Ability::Wis,
+                dc: 99, // never saved
+                damage: vec![],
+                half_on_success: false,
+                on_failure: vec![(Condition::Prone, Duration::ApplierTurn)],
+                max_targets: None,
+                requires_type: None,
+            }),
+        )
+        .with_concentration();
+
+        let mut caster = Creature::new("caster", 10, 100);
+        caster.spell_slots.set_max(2, 1);
+        caster.actions.push(hold);
+        caster.bonus_actions.push(spiritual_weapon_cast_move(6, 3));
+        caster
+            .bonus_actions
+            .push(spiritual_weapon_strike_again_move(6, 3));
+
+        let mut victim = Creature::new("victim", 1, 1_000);
+        victim.saves[Ability::Wis.index()] = -100; // never saves
+
+        let roster = [(&caster, Side::A), (&victim, Side::B)];
+        let mut rng = Rng::new(3_001);
+        let mut log = no_log();
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            5,
+            Budget::default(),
+            &mut log,
+        );
+
+        fight.take_turn(1, 0, &mut rng, &mut log, None);
+
+        assert!(
+            fight.fighters[1].has(|c| c == Condition::Prone),
+            "the action's concentration effect should have landed"
+        );
+        let active = fight.fighters[0]
+            .concentration
+            .as_ref()
+            .expect("still concentrating on Hold");
+        match &active.effect {
+            ConcentrationEffect::Condition { targets, condition } => {
+                assert_eq!(*condition, Condition::Prone);
+                assert_eq!(*targets, vec![1]);
+            }
+            other => panic!("expected a Condition concentration effect, got {other:?}"),
+        }
+
+        assert_eq!(
+            fight.fighters[0].spell_slots.available(2),
+            0,
+            "Spiritual Weapon's own bonus action should still have spent its slot"
+        );
+        assert!(
+            !fight.fighters[0].bonus_actions[0].available(),
+            "Spiritual Weapon's cast should have fired alongside the concentration spell"
+        );
+    }
+
     fn bless_move() -> Move {
         Move::new(
             "Bless",
@@ -3462,6 +3640,7 @@ mod tests {
             1,
             "casting Bless spends one 1st-level slot"
         );
+
         for i in 0..3 {
             assert_eq!(
                 fight.fighters[i].attack_modifiers,
