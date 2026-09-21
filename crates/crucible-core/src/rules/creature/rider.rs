@@ -1,23 +1,31 @@
 //! Triggered modifiers and reactions (riders).
 
+use super::action::AttackKind;
 use super::combatant::Creature;
 use super::damage::{DamageKind, DamageRoll};
 use super::types::{Ability, Condition, Cost, CreatureType, Duration, Size};
 use crate::prob::rng::Rng;
 use crate::rules::combat::{Attack, DamageRider, RollMode};
 
-/// What kind of incoming attack a [`Rider::ReactionOnTargeted`] answers.
-///
-/// One variant today, because nothing in the engine yet distinguishes a
-/// melee attack roll from a ranged or spell one the way
-/// [`Attack::finesse_or_ranged`] distinguishes weapon properties. The field
-/// exists anyway so a future distinction - a reaction that only answers a
-/// melee attack, say - is a new variant matched at the same call site, not a
-/// new field threaded through every caller.
+/// What kind of incoming attack a [`Rider::ReactionOnTargeted`] answers,
+/// read against the incoming strike's own [`AttackKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttackTrigger {
-    /// Any attack roll made against this creature.
+    /// Any attack roll made against this creature - the Shield spell.
     AnyAttack,
+    /// Only a ranged weapon attack - an item that can be raised against
+    /// arrows but not against a sword or a spell.
+    RangedWeaponAttack,
+}
+
+impl AttackTrigger {
+    /// Does an incoming attack of `kind` set this trigger off?
+    pub fn answers(self, kind: AttackKind) -> bool {
+        match self {
+            AttackTrigger::AnyAttack => true,
+            AttackTrigger::RangedWeaponAttack => kind.ranged_weapon(),
+        }
+    }
 }
 
 /// A triggered modifier.
@@ -52,33 +60,41 @@ pub enum Rider {
     /// one use and a reroll instead of a pass.
     AlwaysSucceed { uses: u32 },
     /// A reaction that reduces the damage of an incoming *attack* whose types
-    /// include one of `kinds`.
+    /// include one of `kinds` by `roll`.
     ///
-    /// Deflect Attacks. Uncanny Dodge and Heavy Armor Master are variations.
+    /// Deflect Attacks. Heavy Armor Master's flat reduction is the same
+    /// shape with a constant roll.
+    ///
+    /// Like every reaction rider, it spends the creature's one reaction per
+    /// round - shared with [`Rider::ReactionOnTargeted`] and
+    /// [`Rider::HalveAttackDamage`] - which comes back at the start of its
+    /// own turn, and is unavailable while it is Incapacitated.
     ReduceDamage {
         kinds: Vec<DamageKind>,
         roll: DamageRoll,
-        /// Reactions refresh at the start of the creature's turn.
-        per_round: u32,
     },
-    /// A reaction spent on being *targeted* by an attack, before its hit or
-    /// miss is finalized, that adds `ac_bonus` to this creature's AC against
-    /// that one attack - capable of turning what would have been a hit into
-    /// a miss.
+    /// A reaction spent on being *targeted* by an attack that matches
+    /// `trigger`, before its hit or miss is finalized, that adds `ac_bonus`
+    /// to this creature's AC against that one attack - capable of turning
+    /// what would have been a hit into a miss.
     ///
     /// The mirror of [`Rider::ReduceDamage`]: that one reacts to an attack
     /// that already hit, on its damage; this one reacts to being targeted,
     /// before the roll against AC is decided. A reaction that boosts AC
-    /// against a targeting attack - the Shield spell, a Ring of Protection's
-    /// reactive bonus, and any homebrew item shaped the same way - is this
+    /// against a targeting attack - the Shield spell against anything, an
+    /// item that is raised only against ranged weapon attacks - is this
     /// mechanism; nothing here is specific to any one of them.
     ReactionOnTargeted {
         trigger: AttackTrigger,
         ac_bonus: i32,
-        /// Reactions refresh at the start of the creature's turn, the same
-        /// as [`Rider::ReduceDamage::per_round`].
-        per_round: u32,
     },
+    /// A reaction that halves (rounding down) the damage of one attack that
+    /// hits this creature.
+    ///
+    /// Uncanny Dodge (2024 Rogue 5). Spent on the first hit that lands while
+    /// the reaction is available - see `sim::duel` - since the engine has no
+    /// way to foresee a bigger hit later in the round.
+    HalveAttackDamage,
     /// Extra damage dice on a hit, gated on the attack roll having advantage
     /// or an ally next to the target - and never at all if the attacker also
     /// has disadvantage, which overrides an ally in place. Spendable once per
@@ -227,9 +243,9 @@ pub enum Rider {
     /// sibling `ConditionalExtraDamage` rider.
     ExtraDamageAppliesToSpellAttacks,
     /// An attacker-side buff, dormant until this creature inflicts `trigger`
-    /// on a target via a weapon attack - after which its weapon attacks
-    /// carry `dice_count`d`dice_sides` (plus `bonus`) extra `damage_kind`
-    /// damage for the rest of the encounter.
+    /// on a target by any means - after which its weapon attacks carry
+    /// `dice_count`d`dice_sides` (plus `bonus`) extra `damage_kind` damage
+    /// for the rest of the encounter.
     ///
     /// Generic over which condition arms it: a weapon that empowers itself
     /// after poisoning something is the flavour ITM-06 names, but nothing
@@ -259,16 +275,14 @@ pub enum Rider {
         bonus: i32,
         damage_kind: DamageKind,
     },
-    /// A consumable injury poison coating a weapon: the next hit forces
-    /// `ability`/`dc` as a saving throw, and a failure burdens the target's
-    /// own future `debuffed_ability` saving throws with
-    /// [`RollMode::Disadvantage`] for `duration`.
+    /// A consumable injury poison coating a weapon: the next weapon hit
+    /// forces `ability`/`dc` as a saving throw, and a failure burdens the
+    /// target's own future `debuffed_ability` saving throws with
+    /// [`RollMode::Disadvantage`] - [`Condition::SaveDisadvantage`] - and
+    /// applies `condition` too if there is one (most such poisons also leave
+    /// the target Poisoned), both for `duration`.
     ///
-    /// Not a [`Condition`] at all - 5e's condition list has nothing this
-    /// general ("disadvantage on one specific kind of saving throw"), so this
-    /// is a dedicated variant rather than stretching
-    /// [`Rider::SaveOrCondition`] to cover a debuff it cannot express. See
-    /// [`injury_poison_forcing_save`] for the forcing save, and
+    /// See [`injury_poison_forcing_save`] for the forcing save, and
     /// [`save_with_mode`] for the generic "roll a save under a [`RollMode`]"
     /// mechanism the resulting debuff itself uses once applied - the same
     /// [`RollMode`] an attack roll already rolls under, generalised to saves.
@@ -276,27 +290,39 @@ pub enum Rider {
     /// Generic over both abilities and never named after a specific poison:
     /// `ability`/`dc` is typically a Constitution save against a poison, and
     /// `debuffed_ability` is whichever save the poison burdens, but nothing
-    /// here reads either as such. Using up the coating itself - "the next
-    /// hit" - is the caller's business: a single-use item is a rider with no
-    /// [`Rider::initial_uses`] budget of its own, present on the wielder only
-    /// while the coating lasts.
+    /// here reads either as such. The coating is one dose: its
+    /// [`Rider::initial_uses`] is 1, spent by the first weapon hit whether or
+    /// not the save then succeeds.
     InjuryPoison {
         ability: Ability,
         dc: i32,
         debuffed_ability: Ability,
+        condition: Option<Condition>,
         duration: Duration,
     },
 }
 
 impl Rider {
-    /// Riders with a budget need somewhere to count it down.
+    /// Riders with a per-fight budget need somewhere to count it down:
+    /// Legendary Resistance's uses, an injury poison's single dose.
+    /// Reactions are not counted here - they share the creature's one
+    /// reaction per round, which `sim::duel` tracks itself.
     pub fn initial_uses(&self) -> u32 {
         match self {
             Rider::AlwaysSucceed { uses } => *uses,
-            Rider::ReduceDamage { per_round, .. } => *per_round,
-            Rider::ReactionOnTargeted { per_round, .. } => *per_round,
+            Rider::InjuryPoison { .. } => 1,
             _ => 0,
         }
+    }
+
+    /// Does using this rider cost the creature its reaction?
+    pub fn is_reaction(&self) -> bool {
+        matches!(
+            self,
+            Rider::ReduceDamage { .. }
+                | Rider::ReactionOnTargeted { .. }
+                | Rider::HalveAttackDamage
+        )
     }
 
     /// The [`DamageRider`] this rider contributes to `attack`, or `None` if
@@ -354,6 +380,64 @@ impl Rider {
         used_this_turn: bool,
         spell_attacks_extended: bool,
     ) -> Option<DamageRider> {
+        let rider = self.conditional_extra_damage(
+            attack.finesse_or_ranged,
+            attack.is_spell_attack && spell_attacks_extended,
+            attack.mode,
+            attack.ally_adjacent,
+            used_this_turn,
+        )?;
+        Some(match attack.spell_damage_kind {
+            Some(kind) => rider.with_kind(kind),
+            None => rider,
+        })
+    }
+
+    /// The same gate as [`Rider::extra_damage_for_with_spell_attack_extension`],
+    /// read off a [`super::action::Strike`]'s [`AttackKind`] rather than an
+    /// [`Attack`]'s flags - the form `sim::duel` resolves every live attack
+    /// roll in. `mode` is the roll's final mode, after every source of
+    /// advantage and disadvantage has cancelled.
+    ///
+    /// The returned [`DamageRider`] carries `damage_kind` as its type: the
+    /// weapon's own type for a weapon attack, the spell's for a spell attack
+    /// (Sneak Attack's "same type as the weapon", and the spell-attack
+    /// extension's "same type as the spell's damage") - both of which are
+    /// just the triggering strike's primary damage type.
+    pub fn extra_damage_for_strike(
+        &self,
+        kind: AttackKind,
+        damage_kind: Option<DamageKind>,
+        mode: RollMode,
+        ally_adjacent: bool,
+        used_this_turn: bool,
+        spell_attacks_extended: bool,
+    ) -> Option<DamageRider> {
+        let rider = self.conditional_extra_damage(
+            kind.finesse_or_ranged_weapon(),
+            kind.spell && spell_attacks_extended,
+            mode,
+            ally_adjacent,
+            used_this_turn,
+        )?;
+        Some(match damage_kind {
+            Some(k) => rider.with_kind(k),
+            None => rider,
+        })
+    }
+
+    /// The gate itself, shared by both attack models: a qualifying roll
+    /// (`weapon_qualifies` or `spell_qualifies`) that is not at disadvantage
+    /// and has either advantage or an ally next to the target, with the
+    /// once-per-turn budget unspent.
+    fn conditional_extra_damage(
+        &self,
+        weapon_qualifies: bool,
+        spell_qualifies: bool,
+        mode: RollMode,
+        ally_adjacent: bool,
+        used_this_turn: bool,
+    ) -> Option<DamageRider> {
         let Rider::ConditionalExtraDamage {
             dice_count,
             dice_sides,
@@ -365,19 +449,13 @@ impl Rider {
         if *once_per_turn && used_this_turn {
             return None;
         }
-        let qualifying_attack =
-            attack.finesse_or_ranged || (attack.is_spell_attack && spell_attacks_extended);
-        if !qualifying_attack || attack.mode == RollMode::Disadvantage {
+        if !(weapon_qualifies || spell_qualifies) || mode == RollMode::Disadvantage {
             return None;
         }
-        if attack.mode != RollMode::Advantage && !attack.ally_adjacent {
+        if mode != RollMode::Advantage && !ally_adjacent {
             return None;
         }
-        let rider = DamageRider::new(*dice_count, *dice_sides);
-        Some(match attack.spell_damage_kind {
-            Some(kind) => rider.with_kind(kind),
-            None => rider,
-        })
+        Some(DamageRider::new(*dice_count, *dice_sides))
     }
 
     /// The Cunning Strike DC this rider carries, or `None` if it is not
@@ -444,14 +522,11 @@ impl Rider {
     /// returning the reduced pool alongside [`Condition::Prone`] on a
     /// failed save or `None` on a successful one.
     ///
-    /// This rolls the save directly with `rng` rather than through
-    /// `sim::duel`'s save handling - which also lets
+    /// This rolls a bare save with `rng`, for resolving one attack outside a
+    /// fight. `sim::duel` makes the same choice and spend live, but rolls the
+    /// save through its own save handling - which also lets
     /// [`Rider::AlwaysSucceed`] buy back a failure and auto-fails Strength
-    /// and Dexterity saves for an Incapacitated target - because no policy
-    /// layer yet decides *when* a rogue spends Sneak Attack dice on Trip
-    /// instead of full damage. Wiring that choice into a live fight is
-    /// future work, same as the rest of "which effects a spend buys" per
-    /// [`Rider::CunningStrike`]'s doc comment.
+    /// and Dexterity saves for an Incapacitated target.
     pub fn resolve_cunning_strike_trip(
         &self,
         pool: DamageRider,
@@ -563,8 +638,28 @@ impl Rider {
                 dc,
                 debuffed_ability,
                 duration,
+                ..
             } => Some((*ability, *dc, *debuffed_ability, *duration)),
             _ => None,
+        }
+    }
+
+    /// Every condition an [`Rider::InjuryPoison`] leaves on a failed save:
+    /// the [`Condition::SaveDisadvantage`] burden, plus its extra
+    /// `condition` if it has one. Empty for any other rider.
+    pub fn injury_poison_conditions(&self) -> Vec<(Condition, Duration)> {
+        match self {
+            Rider::InjuryPoison {
+                debuffed_ability,
+                condition,
+                duration,
+                ..
+            } => {
+                let mut out = vec![(Condition::SaveDisadvantage(*debuffed_ability), *duration)];
+                out.extend(condition.map(|c| (c, *duration)));
+                out
+            }
+            _ => Vec::new(),
         }
     }
 }
@@ -1788,6 +1883,7 @@ mod tests {
             ability: Ability::Con,
             dc: 13,
             debuffed_ability: Ability::Str,
+            condition: None,
             duration: Duration::ApplierTurn,
         }
     }

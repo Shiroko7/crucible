@@ -72,13 +72,18 @@ pub struct Creature {
     /// Legendary actions available each round, each move costing one. Real
     /// blocks have moves costing two or three; nothing here needs that yet.
     pub legendary_uses: u32,
-    /// Reliable Talent (2024 Rogue 11): a floor under a d20 roll for a check
+    /// Reliable Talent (2024 Rogue 7): a floor under a d20 roll for a check
     /// the creature is proficient in - `Some(10)` for the standard feature,
     /// `None` for a creature without it. Plain field rather than a
     /// [`Rider`] because, like `legendary_uses`, nothing about it is
     /// triggered or conditional; see [`Creature::check_floor`] for where the
     /// "proficient" half of the rule is applied.
     pub reliable_talent_floor: Option<i32>,
+    /// A player character drops to 0 hit points unconscious rather than dead,
+    /// so healing can bring it back mid-fight - unless the blow that dropped
+    /// it had damage left over equal to its hit point maximum, which kills it
+    /// outright. A monster simply dies at 0. Set by the PC loader.
+    pub player_character: bool,
 }
 
 impl Creature {
@@ -105,6 +110,7 @@ impl Creature {
             legendary: Vec::new(),
             legendary_uses: 0,
             reliable_talent_floor: None,
+            player_character: false,
         }
     }
 

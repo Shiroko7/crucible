@@ -24,6 +24,9 @@
 //! trait: evasion dex
 //! trait: legendary resistance 3
 //! trait: deflect 1d10+7 bludgeoning, piercing, slashing
+//! trait: halve attack damage
+//! trait: extra damage applies to spell attacks
+//! trait: reaction ac 5 vs ranged weapon
 //! trait: bonus 3d6 piercing vs dragon
 //! trait: ac 2
 //! trait: saves 1
@@ -31,8 +34,13 @@
 //! trait: resistance fire, cold
 //! trait: downgrade immunity poison damage, poisoned condition
 //! trait: empower weapon 2d6 poison on poisoned
-//! trait: injury poison con dc 13 disadvantage str
+//! trait: injury poison con dc 13 poisoned disadvantage str for 1 hour
+//! condition immune: poisoned
 //! action: Greatclub | strikes 1 | hit +6 | 2d8+4 bludgeoning
+//! action: Longbow | ranged | hit +8 | 1d8+4 piercing | bonus 3d6 piercing vs dragon
+//! action: Guiding Bolt | spell | slot 1 | ranged | hit +7 | 4d6 radiant
+//! action: Hold | spell | slot 2 | concentration | save wis dc 15 | on fail paralyzed until save
+//! bonus: Potion of Healing | object | cost potions 1 | heal 2d4+2
 //! action: Staff | strikes 2 | hit +9 | 1d8+6 bludgeoning
 //!              | on hit save con dc 16 stunned once cost focus 1
 //! bonus: Patient Defense | cost focus 1 | stance dodging
@@ -43,13 +51,23 @@
 //! `&&` joins a move out of several effects, for a Multiattack that is not all
 //! the same attack. Move order is meaningful: it is what
 //! [`crate::duel::Policy::InOrder`] reads.
+//!
+//! A strike is a melee weapon attack unless its move says otherwise: `ranged`,
+//! `finesse`, `spell` (a spell attack; also marks the move as casting a spell),
+//! and `weapon` (a weapon attack made as part of a spell, alongside `spell`).
+//! `item` and `object` mark a move as activating a magic item or using an
+//! object. A condition's lifetime, after `on fail` or an `on hit save`, is
+//! `until victim`, `until applier` (the default), `until end` (the end of the
+//! applier's next turn), `until save` (repeat the save at the end of each of
+//! the victim's turns), or `for N rounds|minutes|hours`.
 
 use std::fmt;
 
 use crate::rules::combat::{Reduction, RollMode};
 use crate::rules::creature::{
-    Ability, Condition, Cost, Creature, CreatureType, DamageKind, DamageRoll, Duration, Effect,
-    Move, MoveKind, Resource, Rider, SaveEffect, Strike, Uses,
+    Ability, AttackKind, AttackTrigger, Condition, Cost, Creature, CreatureType, DamageKind,
+    DamageRoll, Duration, Effect, HealRoll, Move, MoveKind, Resource, Rider, SaveEffect, Strike,
+    Uses,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +188,14 @@ pub fn parse(text: &str) -> Result<Vec<Creature>, ParseError> {
                     let kind = DamageKind::parse(word)
                         .ok_or_else(|| fail(format!("unknown damage type `{word}`")))?;
                     current.reductions.push((kind, reduction));
+                }
+            }
+            "condition immune" => {
+                for word in value.split(',') {
+                    let word = word.trim();
+                    let condition = Condition::parse(word)
+                        .ok_or_else(|| fail(format!("unknown condition `{word}`")))?;
+                    current.condition_immunities.push(condition);
                 }
             }
             "resource" => {
@@ -390,21 +416,14 @@ fn parse_trait(value: &str) -> Result<TraitEffect, String> {
                 .ok_or_else(|| format!("expected a number of uses in `{value}`"))?;
             Ok(TraitEffect::Rider(Rider::AlwaysSucceed { uses: n }))
         }
-        // `deflect 1d10+7 bludgeoning, piercing, slashing [per round 2]`
+        // `deflect 1d10+7 bludgeoning, piercing, slashing` - a reaction.
         "deflect" | "reduce" => {
             let (dice, sides, bonus) = parse_dice(arg(&words, 1, value)?)?;
             let rest = value
                 .split_once(arg(&words, 1, value)?)
                 .map(|(_, r)| r)
                 .unwrap_or("");
-            let (kinds_text, per_round) = match rest.to_ascii_lowercase().find("per round") {
-                Some(at) => {
-                    let n = count(rest[at + "per round".len()..].trim())?;
-                    (&rest[..at], n)
-                }
-                None => (rest, 1),
-            };
-            let kinds = parse_damage_kinds(kinds_text, value)?;
+            let kinds = parse_damage_kinds(rest, value)?;
             if kinds.is_empty() {
                 return Err(format!("`{value}` needs the damage types it applies to"));
             }
@@ -412,7 +431,50 @@ fn parse_trait(value: &str) -> Result<TraitEffect, String> {
                 // The type on the reduction roll is never read; only its dice.
                 roll: DamageRoll::new(dice, sides, bonus, DamageKind::Force),
                 kinds,
-                per_round,
+            }))
+        }
+        // `extra damage applies to spell attacks` - a creature's Sneak
+        // Attack also qualifies on a spell attack roll.
+        "extra" => {
+            if value
+                .to_ascii_lowercase()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                != ["extra", "damage", "applies", "to", "spell", "attacks"]
+            {
+                return Err(format!(
+                    "expected `extra damage applies to spell attacks`, got `{value}`"
+                ));
+            }
+            Ok(TraitEffect::Rider(Rider::ExtraDamageAppliesToSpellAttacks))
+        }
+        // `halve attack damage`, or the feature's own name `uncanny dodge` -
+        // a reaction that halves one hit.
+        "halve" | "uncanny" => Ok(TraitEffect::Rider(Rider::HalveAttackDamage)),
+        // `reaction ac 5 [vs ranged weapon]` - a reaction that raises AC
+        // against one attack roll, optionally only a ranged weapon one.
+        "reaction" => {
+            if !arg(&words, 1, value)?.eq_ignore_ascii_case("ac") {
+                return Err(format!("expected `reaction ac <n> ...`, got `{value}`"));
+            }
+            let ac_bonus = number(arg(&words, 2, value)?)?;
+            let trigger = match words.get(3).map(|w| w.to_ascii_lowercase()) {
+                None => AttackTrigger::AnyAttack,
+                Some(w) if w == "vs" => {
+                    let rest = words[4..].join(" ").to_ascii_lowercase();
+                    match rest.as_str() {
+                        "any" | "any attack" => AttackTrigger::AnyAttack,
+                        "ranged weapon" | "ranged weapon attack" | "ranged weapon attacks" => {
+                            AttackTrigger::RangedWeaponAttack
+                        }
+                        other => return Err(format!("`vs {other}` is not an attack trigger")),
+                    }
+                }
+                Some(other) => return Err(format!("unexpected `{other}` in `{value}`")),
+            };
+            Ok(TraitEffect::Rider(Rider::ReactionOnTargeted {
+                trigger,
+                ac_bonus,
             }))
         }
         // `ac 2`, or the more readable `ac bonus 2` - a passive item's flat
@@ -437,29 +499,10 @@ fn parse_trait(value: &str) -> Result<TraitEffect, String> {
             Ok(TraitEffect::Resistance(kinds))
         }
         // `bonus 3d6 piercing vs dragon` - extra damage dice on a hit against
-        // one creature type: a slaying weapon, a favoured-enemy bonus.
-        "bonus" => {
-            let (dice, sides, bonus) = parse_dice(arg(&words, 1, value)?)?;
-            let kind_word = arg(&words, 2, value)?;
-            let damage_kind = DamageKind::parse(kind_word)
-                .ok_or_else(|| format!("unknown damage type `{kind_word}` in `{value}`"))?;
-            let vs_word = arg(&words, 3, value)?;
-            if !vs_word.eq_ignore_ascii_case("vs") {
-                return Err(format!(
-                    "expected `bonus NdM <damage type> vs <creature type>`, got `{value}`"
-                ));
-            }
-            let type_word = arg(&words, 4, value)?;
-            let creature_type = CreatureType::parse(type_word)
-                .ok_or_else(|| format!("unknown creature type `{type_word}` in `{value}`"))?;
-            Ok(TraitEffect::Rider(Rider::BonusDamageVsCreatureType {
-                dice_count: dice,
-                dice_sides: sides,
-                bonus,
-                damage_kind,
-                creature_type,
-            }))
-        }
+        // one creature type, on every attack this creature makes: a
+        // favoured-enemy bonus. A weapon's own bonus is the same words as a
+        // clause on that weapon's move.
+        "bonus" => Ok(TraitEffect::Rider(parse_bonus_vs(&words, value)?)),
         // `downgrade immunity poison damage, poisoned condition` - either
         // term alone, or both combined, in any order.
         "downgrade" => {
@@ -544,12 +587,13 @@ fn parse_trait(value: &str) -> Result<TraitEffect, String> {
                 damage_kind,
             }))
         }
-        // `injury poison con dc 13 disadvantage str [until victim|applier]` -
-        // a consumable injury poison coating a weapon: the next hit forces a
-        // saving throw, and a failure burdens the target's own future saves
-        // of a second, independently chosen ability with Disadvantage for the
-        // stated duration. Generic over both abilities; nothing here is tied
-        // to a specific poison's name or flavour.
+        // `injury poison con dc 13 [poisoned] disadvantage str [duration]` -
+        // a consumable injury poison coating a weapon: the next weapon hit
+        // forces a saving throw, and a failure burdens the target's own future
+        // saves of a second, independently chosen ability with Disadvantage -
+        // plus the named condition, if any - for the stated duration. Generic
+        // over both abilities; nothing here is tied to a specific poison's
+        // name or flavour.
         "injury" => {
             let poison_word = arg(&words, 1, value)?;
             if !poison_word.eq_ignore_ascii_case("poison") {
@@ -561,38 +605,103 @@ fn parse_trait(value: &str) -> Result<TraitEffect, String> {
                 return Err(format!("expected `dc <n>` in `{value}`"));
             }
             let dc = number(arg(&words, 4, value)?)?;
-            if !arg(&words, 5, value)?.eq_ignore_ascii_case("disadvantage") {
+            let mut at = 5;
+            let condition = if arg(&words, at, value)?.eq_ignore_ascii_case("disadvantage") {
+                None
+            } else {
+                let name = arg(&words, at, value)?;
+                at += 1;
+                Some(Condition::parse(name).ok_or_else(|| {
+                    format!(
+                        "expected `[condition] disadvantage <ability>` in `{value}`, got `{name}`"
+                    )
+                })?)
+            };
+            if !arg(&words, at, value)?.eq_ignore_ascii_case("disadvantage") {
                 return Err(format!("expected `disadvantage <ability>` in `{value}`"));
             }
-            let debuffed_ability = Ability::parse(arg(&words, 6, value)?)
+            let debuffed_ability = Ability::parse(arg(&words, at + 1, value)?)
                 .ok_or_else(|| format!("unknown ability in `{value}`"))?;
-            let duration = parse_until_duration(&words, 7, value)?;
+            let (duration, used) = parse_duration(&words, at + 2, value)?;
+            if at + 2 + used != words.len() {
+                return Err(format!("unexpected words at the end of `{value}`"));
+            }
             Ok(TraitEffect::Rider(Rider::InjuryPoison {
                 ability,
                 dc,
                 debuffed_ability,
-                duration,
+                condition,
+                duration: duration.resolve(Some((ability, dc)), value)?,
             }))
         }
         other => Err(format!("unknown trait `{other}`")),
     }
 }
 
-/// `until victim|theirs|their` or `until applier|mine|my`, defaulting to
-/// [`Duration::ApplierTurn`] when nothing follows - the same two-case
-/// duration tail [`parse_on_fail`] parses, factored out so a second trait
-/// (`injury poison`) does not repeat it.
-fn parse_until_duration(words: &[&str], at: usize, clause: &str) -> Result<Duration, String> {
-    match words.get(at).map(|w| w.to_ascii_lowercase()) {
-        None => Ok(Duration::ApplierTurn),
-        Some(w) if w == "until" => {
-            match arg(words, at + 1, clause)?.to_ascii_lowercase().as_str() {
-                "victim" | "theirs" | "their" => Ok(Duration::VictimTurn),
-                "applier" | "mine" | "my" => Ok(Duration::ApplierTurn),
-                other => Err(format!("`until {other}` is not a duration")),
-            }
+/// A duration as written, before the save it might refer back to is known -
+/// `until save` repeats "the" save, and in a move whose clauses come in any
+/// order that save may not have been read yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurationSpec {
+    Fixed(Duration),
+    /// Repeat the triggering save at the end of each of the victim's turns.
+    UntilSave,
+}
+
+impl DurationSpec {
+    /// Pin down `until save` against the save it repeats, if there is one.
+    pub fn resolve(self, save: Option<(Ability, i32)>, context: &str) -> Result<Duration, String> {
+        match self {
+            DurationSpec::Fixed(d) => Ok(d),
+            DurationSpec::UntilSave => match save {
+                Some((ability, dc)) => Ok(Duration::SaveEndTurn { ability, dc }),
+                None => Err(format!("`until save` in `{context}` has no save to repeat")),
+            },
         }
-        Some(other) => Err(format!("unexpected `{other}` in `{clause}`")),
+    }
+}
+
+/// A condition's lifetime starting at word `at`, and how many words it took:
+///
+/// - nothing at all: [`Duration::ApplierTurn`];
+/// - `until victim|theirs|their`: [`Duration::VictimTurn`];
+/// - `until applier|mine|my`: [`Duration::ApplierTurn`];
+/// - `until end`: [`Duration::ApplierNextTurnEnd`];
+/// - `until save`: [`Duration::SaveEndTurn`], against the triggering save;
+/// - `for N round(s)|minute(s)|hour(s)`: [`Duration::Rounds`], a minute being
+///   ten rounds.
+///
+/// Anything else is left for the caller, which is why the word count comes
+/// back rather than the rest being rejected here.
+pub fn parse_duration(
+    words: &[&str],
+    at: usize,
+    clause: &str,
+) -> Result<(DurationSpec, usize), String> {
+    match words.get(at).map(|w| w.to_ascii_lowercase()) {
+        Some(w) if w == "until" => {
+            let who = arg(words, at + 1, clause)?.to_ascii_lowercase();
+            let spec = match who.as_str() {
+                "victim" | "theirs" | "their" => DurationSpec::Fixed(Duration::VictimTurn),
+                "applier" | "mine" | "my" => DurationSpec::Fixed(Duration::ApplierTurn),
+                "end" => DurationSpec::Fixed(Duration::ApplierNextTurnEnd),
+                "save" => DurationSpec::UntilSave,
+                other => return Err(format!("`until {other}` is not a duration")),
+            };
+            Ok((spec, 2))
+        }
+        Some(w) if w == "for" => {
+            let n = count(arg(words, at + 1, clause)?)?;
+            let unit = arg(words, at + 2, clause)?.to_ascii_lowercase();
+            let rounds = match unit.trim_end_matches('s') {
+                "round" => n,
+                "minute" => n * 10,
+                "hour" => n * 600,
+                other => return Err(format!("`{other}` is not a unit of time in `{clause}`")),
+            };
+            Ok((DurationSpec::Fixed(Duration::Rounds(rounds)), 3))
+        }
+        _ => Ok((DurationSpec::Fixed(Duration::ApplierTurn), 0)),
     }
 }
 
@@ -623,33 +732,25 @@ fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> {
                 .ok_or_else(|| format!("the `&&` part of `{name}` does nothing"))?,
         );
         built.riders.extend(tail.riders);
+        built.kind = built.kind.or(tail.kind);
+        built.spell_slot_level = built.spell_slot_level.or(tail.spell_slot_level);
+        built.concentration |= tail.concentration;
     }
 
     Ok(Move {
         name,
         uses: built.uses,
         cost: built.cost,
-        // The text-based scenario/config move syntax has no clause for
-        // spending a spell slot yet; spells are built directly by plugins in
-        // `dsl::plugin::spells` instead.
-        spell_slot_level: None,
+        spell_slot_level: built.spell_slot_level,
         riders: built.riders,
         effect: if effects.len() == 1 {
             effects.pop().unwrap()
         } else {
             Effect::Sequence(effects)
         },
-        // The DSL has no clause for either yet; a scenario that needs
-        // concentration, or the casting-restriction exemption, waits on that
-        // syntax, not on the engine.
-        concentration: false,
-        // The string DSL has no clause for it yet; every move it produces is
-        // `Standard` until one is added. `FastHandsPlugin` only ever sees a
-        // `Move` built in Rust, not through this parser.
-        kind: MoveKind::Standard,
-        // Same gap as `concentration` above: no clause yet for spending a
-        // spell slot from a hand-written scenario move.
-        spell_level: None,
+        concentration: built.concentration,
+        kind: built.kind.unwrap_or_default(),
+        before_action: false,
         bypasses_casting_restrictions: false,
     })
 }
@@ -660,6 +761,9 @@ struct Body {
     cost: Option<Cost>,
     riders: Vec<Rider>,
     effect: Option<Effect>,
+    kind: Option<MoveKind>,
+    spell_slot_level: Option<u32>,
+    concentration: bool,
 }
 
 fn parse_body<'a>(
@@ -672,9 +776,13 @@ fn parse_body<'a>(
     let mut save: Option<(Ability, i32)> = None;
     let mut half_on_success = false;
     let mut stance: Option<Condition> = None;
-    let mut on_failure: Vec<(Condition, Duration)> = Vec::new();
+    let mut on_failure: Vec<(Condition, DurationSpec)> = Vec::new();
     let mut max_targets: Option<u32> = None;
     let mut damage: Vec<DamageRoll> = Vec::new();
+    let mut heal: Option<HealRoll> = None;
+    let mut attack = AttackKind::MELEE_WEAPON;
+    let mut spell = false;
+    let mut weapon_named = false;
     let mut out = Body::default();
 
     for clause in clauses {
@@ -693,6 +801,29 @@ fn parse_body<'a>(
             "half" => half_on_success = true,
             "targets" => max_targets = Some(count(arg(&words, 1, clause)?)?),
             "cost" => out.cost = Some(parse_cost(&words, 1, clause, owner)?),
+            "slot" => {
+                let level = count(arg(&words, 1, clause)?)?;
+                if !(1..=crate::rules::creature::SPELL_LEVELS).contains(&level) {
+                    return Err(format!("`{clause}`: a spell slot is level 1 to 9"));
+                }
+                out.spell_slot_level = Some(level);
+            }
+            "concentration" => out.concentration = true,
+            "ranged" => attack.ranged = true,
+            "melee" => attack.ranged = false,
+            "finesse" => attack.finesse = true,
+            "weapon" => weapon_named = true,
+            "spell" => {
+                spell = true;
+                out.kind = Some(MoveKind::Spell);
+            }
+            "item" => out.kind = Some(MoveKind::MagicItem),
+            "object" => out.kind = Some(MoveKind::ObjectUse),
+            "heal" => {
+                let (dice, sides, bonus) = parse_dice(arg(&words, 1, clause)?)?;
+                heal = Some(HealRoll::new(dice, sides, bonus));
+            }
+            "bonus" => out.riders.push(parse_bonus_vs(&words, clause)?),
             "stance" => {
                 let name = arg(&words, 1, clause)?;
                 stance = Some(
@@ -715,8 +846,20 @@ fn parse_body<'a>(
         }
     }
 
+    // A spell's strike is a spell attack, unless the move also names the
+    // weapon it is made with (True Strike's shape).
+    attack.spell = spell;
+    attack.weapon = !spell || weapon_named;
+
+    let on_failure = on_failure
+        .into_iter()
+        .map(|(condition, spec)| Ok((condition, spec.resolve(save, "on fail")?)))
+        .collect::<Result<Vec<_>, String>>()?;
+
     out.effect = if let Some(condition) = stance {
         Some(Effect::Stance { condition })
+    } else if let Some(roll) = heal {
+        Some(Effect::Heal(roll))
     } else if let Some((ability, dc)) = save {
         Some(Effect::Save(SaveEffect {
             ability,
@@ -736,6 +879,7 @@ fn parse_body<'a>(
                 to_hit,
                 mode,
                 damage,
+                kind: attack,
             },
             count: strikes,
         })
@@ -745,15 +889,45 @@ fn parse_body<'a>(
     Ok(out)
 }
 
-/// `on fail prone [until victim]`, the condition half of a saving throw.
-fn parse_on_fail(words: &[&str], clause: &str) -> Result<(Condition, Duration), String> {
+/// `bonus 3d6 piercing vs dragon` - extra damage dice on a hit against one
+/// creature type. As a trait it rides every attack the creature makes; as a
+/// move clause, only that move's.
+fn parse_bonus_vs(words: &[&str], clause: &str) -> Result<Rider, String> {
+    let (dice, sides, bonus) = parse_dice(arg(words, 1, clause)?)?;
+    let kind_word = arg(words, 2, clause)?;
+    let damage_kind = DamageKind::parse(kind_word)
+        .ok_or_else(|| format!("unknown damage type `{kind_word}` in `{clause}`"))?;
+    let vs_word = arg(words, 3, clause)?;
+    if !vs_word.eq_ignore_ascii_case("vs") {
+        return Err(format!(
+            "expected `bonus NdM <damage type> vs <creature type>`, got `{clause}`"
+        ));
+    }
+    let type_word = arg(words, 4, clause)?;
+    let creature_type = CreatureType::parse(type_word)
+        .ok_or_else(|| format!("unknown creature type `{type_word}` in `{clause}`"))?;
+    Ok(Rider::BonusDamageVsCreatureType {
+        dice_count: dice,
+        dice_sides: sides,
+        bonus,
+        damage_kind,
+        creature_type,
+    })
+}
+
+/// `on fail prone [duration]`, the condition half of a saving throw. The
+/// duration may be `until save`, resolved once the move's own save is known.
+fn parse_on_fail(words: &[&str], clause: &str) -> Result<(Condition, DurationSpec), String> {
     let name = arg(words, 2, clause)?;
     let condition = Condition::parse(name).ok_or_else(|| format!("unknown condition `{name}`"))?;
-    let duration = parse_until_duration(words, 3, clause)?;
+    let (duration, used) = parse_duration(words, 3, clause)?;
+    if 3 + used != words.len() {
+        return Err(format!("unexpected words at the end of `{clause}`"));
+    }
     Ok((condition, duration))
 }
 
-/// `on hit save con dc 16 stunned [once] [cost focus 1] [until victim]`
+/// `on hit save con dc 16 stunned [once] [cost focus 1] [duration]`
 fn parse_on_hit(words: &[&str], clause: &str, owner: &Creature) -> Result<Rider, String> {
     if !arg(words, 1, clause)?.eq_ignore_ascii_case("hit") {
         return Err(format!("expected `on hit ...`, got `{clause}`"));
@@ -781,14 +955,11 @@ fn parse_on_hit(words: &[&str], clause: &str, owner: &Creature) -> Result<Rider,
                 cost = Some(parse_cost(words, i + 1, clause, owner)?);
                 i += 2;
             }
-            "until" => {
-                let who = arg(words, i + 1, clause)?;
-                duration = match who.to_ascii_lowercase().as_str() {
-                    "victim" | "theirs" | "their" => Duration::VictimTurn,
-                    "applier" | "mine" | "my" => Duration::ApplierTurn,
-                    other => return Err(format!("`until {other}` is not a duration")),
-                };
-                i += 1;
+            "until" | "for" => {
+                let (spec, used) = parse_duration(words, i, clause)?;
+                duration = spec.resolve(Some((ability, dc)), clause)?;
+                i += used;
+                continue;
             }
             // Words like "per" and "turn" in "once per turn" read as noise.
             "per" | "turn" => {}
@@ -965,11 +1136,7 @@ trait: deflect 1d10+7 bludgeoning, piercing, slashing
             .riders
             .iter()
             .find_map(|r| match r {
-                Rider::ReduceDamage {
-                    kinds,
-                    roll,
-                    per_round,
-                } => Some((kinds, roll, per_round)),
+                Rider::ReduceDamage { kinds, roll } => Some((kinds, roll)),
                 _ => None,
             })
             .expect("deflect parsed");
@@ -978,7 +1145,6 @@ trait: deflect 1d10+7 bludgeoning, piercing, slashing
             (deflect.1.count, deflect.1.sides, deflect.1.bonus),
             (1, 10, 7)
         );
-        assert_eq!(*deflect.2, 1);
     }
 
     /// The generic "bonus damage vs a creature type" trait: any weapon or
@@ -1207,6 +1373,7 @@ trait: empower weapon 2d6 poison on poisoned
                 ability: Ability::Con,
                 dc: 13,
                 debuffed_ability: Ability::Str,
+                condition: None,
                 duration: Duration::ApplierTurn,
             })
         );
@@ -1220,7 +1387,23 @@ trait: empower weapon 2d6 poison on poisoned
                 ability: Ability::Con,
                 dc: 13,
                 debuffed_ability: Ability::Str,
+                condition: None,
                 duration: Duration::VictimTurn,
+            })
+        );
+
+        // A poison that also leaves its victim Poisoned, for an hour.
+        let poisoning =
+            parse_trait_external("injury poison con dc 17 poisoned disadvantage wis for 1 hour")
+                .expect("parses with a condition and a fixed duration");
+        assert_eq!(
+            poisoning,
+            TraitEffect::Rider(Rider::InjuryPoison {
+                ability: Ability::Con,
+                dc: 17,
+                debuffed_ability: Ability::Wis,
+                condition: Some(Condition::Poisoned),
+                duration: Duration::Rounds(600),
             })
         );
     }
@@ -1373,5 +1556,155 @@ source: content/monsters/adult-red-dragon.toml
         assert_eq!(combatants[0].team, 0);
         assert_eq!(combatants[1].name, "Adult Red Dragon");
         assert_eq!(combatants[1].team, 1);
+    }
+
+    /// What kind of attack a strike is, what casting it costs, and whether
+    /// it concentrates - all declared on the move.
+    #[test]
+    fn a_move_declares_its_attack_kind_spell_slot_and_concentration() {
+        let text = "
+creature: Caster
+hp: 20
+action: Longbow | ranged | hit +8 | 1d8+4 piercing | bonus 3d6 piercing vs dragon
+action: Rapier | finesse | hit +7 | 1d8+4 piercing
+action: Guiding Bolt | spell | slot 1 | ranged | hit +7 | 4d6 radiant
+action: True Strike | spell | weapon | ranged | hit +11 | 1d8+5 piercing, 2d6 radiant
+action: Hold | spell | slot 2 | concentration | save wis dc 15 | on fail paralyzed until save
+bonus: Wand | item | hit +7 | 1d6 force
+";
+        let c = &parse(text).unwrap()[0];
+        let kind = |i: usize| match &c.actions[i].effect {
+            Effect::Strikes { strike, .. } => strike.kind,
+            other => panic!("expected strikes, got {other:?}"),
+        };
+        assert_eq!(kind(0), AttackKind::RANGED_WEAPON);
+        assert!(matches!(
+            c.actions[0].riders[..],
+            [Rider::BonusDamageVsCreatureType { dice_count: 3, .. }]
+        ));
+        assert!(kind(1).finesse && kind(1).weapon && !kind(1).ranged);
+        assert_eq!(kind(2), AttackKind::RANGED_SPELL);
+        assert_eq!(c.actions[2].kind, MoveKind::Spell);
+        assert_eq!(c.actions[2].spell_slot_level, Some(1));
+        assert!(kind(3).weapon && kind(3).spell && kind(3).ranged);
+
+        let hold = &c.actions[4];
+        assert!(hold.concentration);
+        assert_eq!(hold.spell_slot_level, Some(2));
+        let Effect::Save(save) = &hold.effect else {
+            panic!("expected a save");
+        };
+        assert_eq!(
+            save.on_failure,
+            vec![(
+                Condition::Paralyzed,
+                Duration::SaveEndTurn {
+                    ability: Ability::Wis,
+                    dc: 15
+                }
+            )]
+        );
+        assert_eq!(c.bonus_actions[0].kind, MoveKind::MagicItem);
+    }
+
+    /// `until save` refers back to the move's own save wherever the clauses
+    /// fall, and every other duration phrase reads as written.
+    #[test]
+    fn durations_parse_in_every_form() {
+        let text = "
+creature: x
+hp: 20
+resource: ki 3
+action: A | on fail stunned until save | save con dc 14 | 0 force
+action: B | save wis dc 13 | 0 force | on fail suppressed for 1 minute
+action: C | save wis dc 13 | 0 force | on fail prone until end
+action: D | hit +5 | 1d6 bludgeoning | on hit save con dc 12 poisoned until save
+action: E | hit +5 | 1d6 bludgeoning | on hit save con dc 12 stunned once cost ki 1 for 2 rounds
+";
+        let c = &parse(text).unwrap()[0];
+        let fail = |i: usize| match &c.actions[i].effect {
+            Effect::Save(save) => save.on_failure[0].1,
+            other => panic!("expected a save, got {other:?}"),
+        };
+        assert_eq!(
+            fail(0),
+            Duration::SaveEndTurn {
+                ability: Ability::Con,
+                dc: 14
+            }
+        );
+        assert_eq!(fail(1), Duration::Rounds(10));
+        assert_eq!(fail(2), Duration::ApplierNextTurnEnd);
+        let rider = |i: usize| match &c.actions[i].riders[0] {
+            Rider::SaveOrCondition { duration, .. } => *duration,
+            other => panic!("expected a save-or-condition rider, got {other:?}"),
+        };
+        assert_eq!(
+            rider(3),
+            Duration::SaveEndTurn {
+                ability: Ability::Con,
+                dc: 12
+            }
+        );
+        assert_eq!(rider(4), Duration::Rounds(2));
+
+        let orphan = parse("creature: x\nhp: 4\naction: X | hit +5 | 1d6 fire | stance dodging\naction: Y | stance prone | on fail prone until save\n");
+        assert!(orphan.is_err(), "`until save` with no save to repeat");
+        let bad_unit = parse_duration(&["for", "2", "fortnights"], 0, "for 2 fortnights");
+        assert!(bad_unit.is_err());
+    }
+
+    /// A potion is a heal from a pool, and an object.
+    #[test]
+    fn a_heal_move_parses() {
+        let text = "creature: x\nhp: 20\nresource: potions 4\nbonus: Potion | object | cost potions 1 | heal 2d4+2\n";
+        let c = &parse(text).unwrap()[0];
+        let potion = &c.bonus_actions[0];
+        assert_eq!(potion.kind, MoveKind::ObjectUse);
+        assert_eq!(potion.effect, Effect::Heal(HealRoll::new(2, 4, 2)));
+        assert!(potion.cost.is_some());
+    }
+
+    /// The reaction traits, and condition immunities.
+    #[test]
+    fn reaction_traits_and_condition_immunities_parse() {
+        let text = "
+creature: x
+hp: 20
+trait: halve attack damage
+trait: reaction ac 5 vs ranged weapon
+trait: reaction ac 5
+condition immune: poisoned, prone
+";
+        let c = &parse(text).unwrap()[0];
+        assert_eq!(
+            c.riders,
+            vec![
+                Rider::HalveAttackDamage,
+                Rider::ReactionOnTargeted {
+                    trigger: AttackTrigger::RangedWeaponAttack,
+                    ac_bonus: 5
+                },
+                Rider::ReactionOnTargeted {
+                    trigger: AttackTrigger::AnyAttack,
+                    ac_bonus: 5
+                },
+            ]
+        );
+        assert_eq!(
+            c.condition_immunities,
+            vec![Condition::Poisoned, Condition::Prone]
+        );
+        assert_eq!(
+            parse_trait("uncanny dodge").unwrap(),
+            TraitEffect::Rider(Rider::HalveAttackDamage)
+        );
+        assert_eq!(
+            parse_trait("extra damage applies to spell attacks").unwrap(),
+            TraitEffect::Rider(Rider::ExtraDamageAppliesToSpellAttacks)
+        );
+        assert!(parse_trait("extra damage everywhere").is_err());
+        assert!(parse_trait("reaction ac 5 vs sword").is_err());
+        assert!(parse_trait("reaction speed 5").is_err());
     }
 }

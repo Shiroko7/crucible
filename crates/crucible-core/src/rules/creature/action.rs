@@ -7,10 +7,86 @@ use crate::rules::combat::{
     AttackModifier, Landed, RollMode, SaveModifier,
 };
 
+use crate::rules::combat::Reduction;
+
 use super::combatant::Creature;
 use super::damage::{DamageKind, DamageRoll};
 use super::rider::Rider;
 use super::types::{Ability, Condition, Cost, Duration};
+
+/// What kind of attack roll a [`Strike`] is - the part of 5e's "melee weapon
+/// attack", "ranged spell attack" wording that features gate on.
+///
+/// Sneak Attack wants a finesse or ranged *weapon* (or, with a feature that
+/// extends it, a spell attack); a reaction like a shielding umbrella answers
+/// only a ranged *weapon* attack; the ally-adjacency proxy in `sim::duel`
+/// asks whether a creature's primary attack is melee. Four independent flags
+/// rather than one enum of four cases because they genuinely overlap: True
+/// Strike is a weapon attack made as part of casting a spell, so it is both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttackKind {
+    /// Made with a weapon (natural weapons and unarmed strikes included).
+    pub weapon: bool,
+    /// A spell attack roll.
+    pub spell: bool,
+    /// Ranged rather than melee.
+    pub ranged: bool,
+    /// The weapon has the finesse property.
+    pub finesse: bool,
+}
+
+impl AttackKind {
+    /// A plain melee weapon attack - what an attack is unless it says
+    /// otherwise, and the default for every [`Strike::new`].
+    pub const MELEE_WEAPON: Self = Self {
+        weapon: true,
+        spell: false,
+        ranged: false,
+        finesse: false,
+    };
+
+    /// A ranged weapon attack - a bow, a thrown dagger.
+    pub const RANGED_WEAPON: Self = Self {
+        weapon: true,
+        spell: false,
+        ranged: true,
+        finesse: false,
+    };
+
+    /// A melee spell attack - Spiritual Weapon, Inflict Wounds.
+    pub const MELEE_SPELL: Self = Self {
+        weapon: false,
+        spell: true,
+        ranged: false,
+        finesse: false,
+    };
+
+    /// A ranged spell attack - Guiding Bolt, Scorching Ray.
+    pub const RANGED_SPELL: Self = Self {
+        weapon: false,
+        spell: true,
+        ranged: true,
+        finesse: false,
+    };
+
+    /// Sneak Attack's weapon gate: a weapon attack whose weapon is finesse
+    /// or ranged.
+    pub fn finesse_or_ranged_weapon(self) -> bool {
+        self.weapon && (self.finesse || self.ranged)
+    }
+
+    /// A ranged weapon attack, the trigger a shielding reaction can be
+    /// limited to.
+    pub fn ranged_weapon(self) -> bool {
+        self.weapon && self.ranged
+    }
+}
+
+impl Default for AttackKind {
+    fn default() -> Self {
+        Self::MELEE_WEAPON
+    }
+}
 
 /// One attack roll and everything it deals on a hit.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +94,8 @@ pub struct Strike {
     pub to_hit: i32,
     pub mode: RollMode,
     pub damage: Vec<DamageRoll>,
+    /// What kind of attack roll this is - see [`AttackKind`].
+    pub kind: AttackKind,
 }
 
 impl Strike {
@@ -26,7 +104,22 @@ impl Strike {
             to_hit,
             mode: RollMode::Normal,
             damage,
+            kind: AttackKind::default(),
         }
+    }
+
+    /// Declare what kind of attack roll this is - see [`AttackKind`].
+    pub fn with_kind(mut self, kind: AttackKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// The damage type of this strike's first damage component - the
+    /// "weapon's type" that 2024 Sneak Attack's extra dice take on, and the
+    /// "spell's type" they take on when a spell attack triggers them.
+    /// `None` only for a strike that deals no damage at all.
+    pub fn primary_kind(&self) -> Option<DamageKind> {
+        self.damage.first().map(|r| r.kind)
     }
 
     /// `extra` is what [`Strike::damage_pmf_with_modifiers`] and
@@ -34,13 +127,101 @@ impl Strike {
     /// [`super::rider::Rider`]-style bonus - Sneak Attack's dice, a
     /// dragonslaying weapon's bonus - which is exactly [`DamageRoll`] since a
     /// multi-typed strike already carries its own damage as a `Vec` of them.
-    fn landed_pmf(&self, target: &Creature, crit: bool, extra: &[DamageRoll]) -> Pmf {
+    ///
+    /// `reduce` is how `target` reduces each damage type: normally just
+    /// [`Creature::reduction`], but attacker-scoped
+    /// ([`Creature::reduction_from`]) when the attacker carries something that
+    /// changes it - see [`Strike::damage_pmf_from`].
+    fn landed_pmf_by(
+        &self,
+        reduce: &dyn Fn(DamageKind) -> Reduction,
+        crit: bool,
+        extra: &[DamageRoll],
+    ) -> Pmf {
         self.damage
             .iter()
             .chain(extra)
             .fold(Pmf::constant(0), |acc, roll| {
-                acc.convolve(&roll.pmf(crit, target.reduction(roll.kind)))
+                acc.convolve(&roll.pmf(crit, reduce(roll.kind)))
             })
+    }
+
+    fn landed_pmf(&self, target: &Creature, crit: bool, extra: &[DamageRoll]) -> Pmf {
+        self.landed_pmf_by(&|kind| target.reduction(kind), crit, extra)
+    }
+
+    /// The exact damage distribution `attacker` deals to `target` with this
+    /// strike: as [`Strike::damage_pmf_with_modifiers`], but every damage
+    /// component is reduced by [`Creature::reduction_from`] rather than the
+    /// target's plain [`Creature::reduction`], so an attacker-side trait that
+    /// softens an immunity (see
+    /// [`super::rider::Rider::DowngradeImmunity`]) is honoured. This is the
+    /// exact counterpart of [`Strike::sample_from`], which `sim::duel` rolls.
+    pub fn damage_pmf_from(
+        &self,
+        attacker: &Creature,
+        target: &Creature,
+        mode: RollMode,
+        modifiers: &[AttackModifier],
+        extra_damage: &[DamageRoll],
+    ) -> Pmf {
+        let reduce = |kind| target.reduction_from(kind, attacker);
+        let o = hit_outcomes_with(self.to_hit, mode, target.ac, modifiers);
+        Pmf::mixture(&[
+            (o.miss, Pmf::constant(0)),
+            (o.hit, self.landed_pmf_by(&reduce, false, extra_damage)),
+            (o.crit, self.landed_pmf_by(&reduce, true, extra_damage)),
+        ])
+    }
+
+    /// One sampled strike from `attacker` against `target`, distributed
+    /// according to [`Strike::damage_pmf_from`] when no reaction is spent.
+    ///
+    /// The single entry point `sim::duel` resolves every attack roll through:
+    /// `force_crit` for Paralyzed, `modifiers` for Bless/Bane, `extra_damage`
+    /// for every damage rider that qualified for this one attack, and the
+    /// defender's reactive AC boost ([`super::rider::Rider::ReactionOnTargeted`])
+    /// as `ac_bonus`/`reaction_available`. Returns the damage, how it landed,
+    /// and whether the reaction was actually spent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_from(
+        &self,
+        rng: &mut Rng,
+        attacker: &Creature,
+        target: &Creature,
+        mode: RollMode,
+        force_crit: bool,
+        modifiers: &[AttackModifier],
+        extra_damage: &[DamageRoll],
+        ac_bonus: i32,
+        reaction_available: bool,
+    ) -> (i32, Landed, bool) {
+        let (landed, consumed) = sample_hit_with_reaction(
+            rng,
+            self.to_hit,
+            mode,
+            target.ac,
+            modifiers,
+            ac_bonus,
+            reaction_available,
+        );
+        let landed = if force_crit && landed == Landed::Hit {
+            Landed::Crit
+        } else {
+            landed
+        };
+        let crit = match landed {
+            Landed::Miss => return (0, landed, consumed),
+            Landed::Hit => false,
+            Landed::Crit => true,
+        };
+        let total = self
+            .damage
+            .iter()
+            .chain(extra_damage)
+            .map(|roll| roll.sample(rng, crit, target.reduction_from(roll.kind, attacker)))
+            .sum();
+        (total, landed, consumed)
     }
 
     /// Exact distribution of the damage this strike deals to `target`,
@@ -81,7 +262,7 @@ impl Strike {
     }
 
     /// As [`Strike::damage_pmf_with_modifiers`], with the same reactive AC
-    /// boost as [`Strike::sample_forcing_crit_with_reaction`] -
+    /// boost as [`Strike::sample_from`] -
     /// [`super::rider::Rider::ReactionOnTargeted`]. See
     /// [`hit_outcomes_with_reaction`] for why spending the reaction whenever
     /// `available` is exactly equivalent, in the aggregate, to fighting
@@ -161,56 +342,6 @@ impl Strike {
 
     pub fn sample(&self, rng: &mut Rng, target: &Creature) -> i32 {
         self.sample_with(rng, target, self.mode).0
-    }
-
-    /// As [`Strike::sample_forcing_crit`], but the defender may spend a
-    /// reaction to add `ac_bonus` to its AC against this one attack before
-    /// hit or miss is finalized - [`super::rider::Rider::ReactionOnTargeted`],
-    /// the mirror of [`super::rider::Rider::ReduceDamage`]: that one reacts
-    /// to an attack that already hit, on its damage; this one reacts to
-    /// being targeted, before the roll against AC is decided, and can turn
-    /// what would have been a hit into a miss. Returns whether the reaction
-    /// actually fired alongside the damage and how the attack landed, so the
-    /// caller - `sim::duel`, which owns the per-round budget - can debit it
-    /// only when it does.
-    #[allow(clippy::too_many_arguments)]
-    pub fn sample_forcing_crit_with_reaction(
-        &self,
-        rng: &mut Rng,
-        target: &Creature,
-        mode: RollMode,
-        force_crit: bool,
-        modifiers: &[AttackModifier],
-        extra_damage: &[DamageRoll],
-        ac_bonus: i32,
-        reaction_available: bool,
-    ) -> (i32, Landed, bool) {
-        let (landed, consumed) = sample_hit_with_reaction(
-            rng,
-            self.to_hit,
-            mode,
-            target.ac,
-            modifiers,
-            ac_bonus,
-            reaction_available,
-        );
-        let landed = if force_crit && landed == Landed::Hit {
-            Landed::Crit
-        } else {
-            landed
-        };
-        let crit = match landed {
-            Landed::Miss => return (0, landed, consumed),
-            Landed::Hit => false,
-            Landed::Crit => true,
-        };
-        let total = self
-            .damage
-            .iter()
-            .chain(extra_damage)
-            .map(|roll| roll.sample(rng, crit, target.reduction(roll.kind)))
-            .sum();
-        (total, landed, consumed)
     }
 
     pub fn mean_damage(&self, target: &Creature) -> f64 {
@@ -334,6 +465,15 @@ impl SaveEffect {
     }
 
     fn sample_share(&self, rng: &mut Rng, target: &Creature, share: Share) -> i32 {
+        self.sample_share_by(rng, &|kind| target.reduction(kind), share)
+    }
+
+    fn sample_share_by(
+        &self,
+        rng: &mut Rng,
+        reduce: &dyn Fn(DamageKind) -> Reduction,
+        share: Share,
+    ) -> i32 {
         if share == Share::None {
             return 0;
         }
@@ -345,9 +485,28 @@ impl SaveEffect {
                 if share == Share::Half {
                     dealt /= 2;
                 }
-                target.reduction(roll.kind).apply(dealt)
+                reduce(roll.kind).apply(dealt)
             })
             .sum()
+    }
+
+    /// As [`SaveEffect::sample_known`], with `target`'s reductions scoped to
+    /// `attacker` via [`Creature::reduction_from`] - the path `sim::duel`
+    /// takes, so an attacker-side immunity downgrade applies to a save's
+    /// damage exactly as it does to a hit's.
+    pub fn sample_known_from(
+        &self,
+        rng: &mut Rng,
+        attacker: &Creature,
+        target: &Creature,
+        saved: bool,
+        evasion: bool,
+    ) -> i32 {
+        self.sample_share_by(
+            rng,
+            &|kind| target.reduction_from(kind, attacker),
+            self.share(saved, evasion),
+        )
     }
 
     /// Roll the save only, for a caller that wants to react to the result -
@@ -464,7 +623,8 @@ pub enum Effect {
     Stance {
         condition: Condition,
     },
-    /// Restores hit points to whoever it targets - Healing Word, Cure Wounds.
+    /// Restores hit points to one of the user's own side - Healing Word, Cure
+    /// Wounds, a potion; `sim::duel` picks who, a downed ally first.
     /// The only effect that makes HP go up instead of down, which is why it
     /// contributes nothing to `mean_damage`/`damage_pmf` and gets its own
     /// `heal_pmf` instead.
@@ -628,10 +788,9 @@ pub enum MoveKind {
     /// Activating a magic item that would otherwise cost the Magic action -
     /// a wand, a staff, most consumable magic items.
     MagicItem,
-    /// Casting a spell. Nothing yet spends a spell slot when a move tagged
-    /// this way is taken - that wiring is a separate concern from the tag
-    /// existing at all, the same way `MoveKind` existed before
-    /// `FastHandsPlugin` had anything to promote.
+    /// Casting a spell. What it costs is separate from the tag -
+    /// [`Move::spell_slot_level`] for a slot, [`Move::cost`] for a wand's
+    /// charges - so a free cantrip and a slotted spell are both `Spell`.
     Spell,
 }
 
@@ -658,18 +817,16 @@ pub struct Move {
     /// down. `false` for every ordinary move, which is why this defaults with
     /// the rest of [`Move::new`] rather than needing its own builder call.
     pub concentration: bool,
-    /// RAW-Action bookkeeping for plugins like Fast Hands; see [`MoveKind`].
-    /// Irrelevant to how the move actually resolves - only which list it
-    /// ends up in.
+    /// What kind of activity this is; see [`MoveKind`]. Read by Fast Hands
+    /// (which list a move may be promoted into) and by a condition that
+    /// blocks casting or item use ([`Condition::blocks_magic`]).
     pub kind: MoveKind,
-    /// The spell slot level this move spends, if any - 1st through 9th.
-    /// Distinct from `cost`: a slot is drawn from the caster's
-    /// [`crate::rules::creature::SpellSlots`], nine independent counters,
-    /// never a named [`crate::rules::creature::Resource`] pool, so a move
-    /// can spend both a slot and a resource without either accounting
-    /// system needing to know about the other. `None` for anything that is
-    /// not a spell.
-    pub spell_level: Option<u32>,
+    /// Resolve this move before the same turn's action rather than after it.
+    /// Only meaningful for a bonus action: Steady Aim is taken *before* the
+    /// attack it is meant to help, while almost everything else a bonus
+    /// action does - an off-hand strike, a Spiritual Weapon swing - follows
+    /// the action. `false` for every ordinary move.
+    pub before_action: bool,
     /// Set on a move-taking that spent a limited-use charge to be exempt from
     /// whatever casting-restriction mechanism might apply to it elsewhere -
     /// being silenced, unable to speak or gesture, and so on. `false` for
@@ -699,7 +856,7 @@ impl Move {
             effect,
             concentration: false,
             kind: MoveKind::Standard,
-            spell_level: None,
+            before_action: false,
             bypasses_casting_restrictions: false,
         }
     }
@@ -736,10 +893,10 @@ impl Move {
         self
     }
 
-    /// Spend one slot of `level` (1st through 9th) from the caster's
-    /// [`crate::rules::creature::SpellSlots`] to use this move.
-    pub fn with_spell_level(mut self, level: u32) -> Self {
-        self.spell_level = Some(level);
+    /// Resolve this move before the turn's action - see
+    /// [`Move::before_action`].
+    pub fn with_before_action(mut self) -> Self {
+        self.before_action = true;
         self
     }
 
@@ -756,7 +913,6 @@ impl Move {
         matches!(self.uses, Uses::Unlimited)
             && self.cost.is_none()
             && self.spell_slot_level.is_none()
-            && self.spell_level.is_none()
     }
 
     /// Spend this move's spell slot, if it has one, from `caster`'s own

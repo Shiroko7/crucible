@@ -46,24 +46,35 @@ times, reported.
 | `scenario` | `dsl::scenario` | scenario parser supporting both external creature configs (`source:`) and inline declarations |
 | `duel` | `sim::duel` | team combat rounds: initiative, action economy, reactions, condition lifetimes, legendary actions between turns |
 | `analysis` | `sim::analysis` | win and death probability, CVaR of the bad tail, exact pacing check |
-| riders | `rules::creature::rider` | Evasion, Legendary Resistance, Stunning Strike, Deflect Attacks, a reaction that boosts AC against a targeting attack - as general mechanisms |
+| riders | `rules::creature::rider` | Evasion, Legendary Resistance, Stunning Strike, Sneak Attack and Cunning Strike, bonus dice against a creature type, weapon buffs armed by a condition, injury poisons, immunity downgrades, and reactions (Deflect Attacks, Uncanny Dodge, a reactive AC boost) - as general mechanisms, all applied in live fights |
 | policies | `sim::duel::policy` | eight of the nine from `DESIGN.md`: `solver`, `nova`, `greedy`, `focus-fire`, `scattered`, `in-order`, `defensive`, `attrition`, `thrifty` |
 | search | `sim::duel` | flat Monte Carlo over one turn, to a depth budget |
 | content | `content/` | data-driven PC (`content/characters/`) and Monster (`content/monsters/`) formatted configurations |
-| event pipeline | `sim::duel` | riders fire at four fixed points; they do not yet subscribe to hooks |
+| event pipeline | `sim::duel` | riders fire at fixed points (as an attack is rolled, on being targeted, on a hit's damage, on a hit, on a failed save, on a save for half); they do not yet subscribe to hooks |
 | `fitted` policy | | blocked: it means fitting parameters to logged play, and there are no logs |
 
 ### What is and is not modelled
 
 A triggered modifier is data, not an engine branch, which is the property that
-has to hold for the full ruleset to be reachable. Four mechanisms cover a lot:
+has to hold for the full ruleset to be reachable. A handful of mechanisms cover a
+lot:
 
 | mechanism | features it carries |
 |---|---|
 | `NothingOnSuccess` | Evasion, Danger Sense |
 | `AlwaysSucceed` | Legendary Resistance, Indomitable |
 | `SaveOrCondition` | Stunning Strike, knockdowns, on-hit poisons, breath weapon riders |
-| `ReduceDamage` | Deflect Attacks, Uncanny Dodge, Heavy Armor Master |
+| `ConditionalExtraDamage` | Sneak Attack, with Cunning Strike spending its dice |
+| `BonusDamageVsCreatureType` | a slaying weapon, Favored Enemy damage |
+| `ReduceDamage` | Deflect Attacks, Heavy Armor Master |
+| `HalveAttackDamage` | Uncanny Dodge |
+| `ReactionOnTargeted` | the Shield spell, an item raised against ranged weapon attacks |
+
+A creature has one reaction a round, shared by every reaction it knows, and
+none while Incapacitated. Heals go to the healer's own side - a downed player
+character first - and a player character dropped by less than massive damage
+is down, not dead, until healed or the fight ends. Under the 2024 rules at most
+one spell slot is spent per turn.
 
 **Positioning is the gap that matters.** There is no movement, reach, or flight,
 so a dragon with an 80-foot fly speed stands still and trades hits. Anything
@@ -72,9 +83,16 @@ Defense as a way to survive a round - is therefore out of scope until there is a
 movement model. So is everything non-combat: languages, tool proficiencies,
 Hold Breath.
 
-One deliberate simplification: a creature gets one once-per-turn rider trigger
-per turn in total rather than one per rider. That is exact for Stunning Strike
-and understates anything with two, which is the safe direction here.
+"An ally within 5 feet of the target", which Sneak Attack asks about, has no
+geometry to read, so it is read off who is fighting what: an ally counts if it is
+up, not Incapacitated, leads with a melee attack, and is going after the same
+target. A party's archers never count for each other; its front line counts for
+everyone.
+
+One deliberate simplification: a creature gets one once-per-turn trigger for
+Stunning-Strike-style riders per turn in total rather than one per rider. That is
+exact for Stunning Strike and understates anything with two, which is the safe
+direction here. Sneak Attack keeps its own once-per-turn budget.
 
 ### The objective needs a margin term
 
@@ -163,7 +181,7 @@ the exact distribution calls impossible.
 ## Working on it
 
 ```bash
-cargo test                                # 86 tests: unit, agreement, property
+cargo test                                # unit, agreement, property
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 ```
@@ -184,3 +202,9 @@ SRD material is CC-BY-4.0 and ships with attribution. Non-SRD material is loaded
 data files and never committed — `scenarios/local/` is gitignored for that. The Monad Plugin
 Architecture ensures that new or missing mechanics are implemented as reusable plugins,
 while PCs and monsters are expressed purely as structured data.
+
+`crates/crucible-core/tests/multiclass_rogue_caster.rs` is the worked example of a whole
+multiclass build written that way - a rogue with a secondary spellcasting grant, magic
+weapons, items used through Fast Hands and reactions - with every plugin and trait keyword
+it needs, and fights proving each one is live. `dsl::scenario`'s module docs list the move
+and trait syntax.

@@ -218,6 +218,22 @@ mod tests {
             Some(crate::rules::creature::CreatureType::Dragon)
         );
         assert_eq!(dragon.size, crate::rules::creature::Size::Huge);
+        // Everything cast through its Spellcasting is a spell; its Rends are
+        // melee weapon attacks.
+        use crate::rules::creature::MoveKind;
+        let kinds: Vec<(&str, MoveKind)> = dragon
+            .actions
+            .iter()
+            .chain(&dragon.legendary)
+            .map(|m| (m.name.as_str(), m.kind))
+            .collect();
+        for (name, kind) in kinds {
+            let spell = matches!(
+                name,
+                "Fireball" | "Scorching Ray" | "Commanding Presence" | "Fiery Rays"
+            );
+            assert_eq!(kind == MoveKind::Spell, spell, "{name}");
+        }
     }
 
     #[test]

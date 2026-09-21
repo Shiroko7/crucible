@@ -41,23 +41,15 @@ pub struct DeflectAttacksPlugin {
     pub dice_sides: u32,
     pub bonus: i32,
     pub kinds: Vec<DamageKind>,
-    pub per_round: u32,
 }
 
 impl DeflectAttacksPlugin {
-    pub fn new(
-        dice_count: u32,
-        dice_sides: u32,
-        bonus: i32,
-        kinds: Vec<DamageKind>,
-        per_round: u32,
-    ) -> Self {
+    pub fn new(dice_count: u32, dice_sides: u32, bonus: i32, kinds: Vec<DamageKind>) -> Self {
         Self {
             dice_count,
             dice_sides,
             bonus,
             kinds,
-            per_round,
         }
     }
 }
@@ -80,7 +72,6 @@ impl FeaturePlugin for DeflectAttacksPlugin {
                 self.bonus,
                 DamageKind::Force,
             ),
-            per_round: self.per_round,
         });
         Ok(())
     }

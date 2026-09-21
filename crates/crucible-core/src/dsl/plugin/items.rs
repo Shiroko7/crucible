@@ -10,7 +10,7 @@ use crate::rules::creature::{
 };
 
 use super::rogue::FastHandsPlugin;
-use super::traits::{CreatureBuilder, FeaturePlugin, FeatureResult};
+use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
 
 /// A limited-use item, activatable as a Bonus Action via Fast Hands, that
 /// forces a saving throw on a single target and, on a failure, applies a
@@ -46,17 +46,15 @@ use super::traits::{CreatureBuilder, FeaturePlugin, FeatureResult};
 /// this one wants; see [`Duration`]'s own docs for why the three shapes
 /// differ.
 ///
-/// Like `FastHandsPlugin` and `ReliableTalentPlugin`, this has no
-/// [`super::registry::FeatureRegistry`] TOML factory yet: `duration` is a
-/// [`Duration`], and the registry's toml-parameter factories have no
-/// convention yet for building one of those (see `FeatureRegistry`'s own
-/// note on why `fast_hands` has no entry either).
+/// `dc` is either a fixed number printed on the item, or `None` for an item
+/// whose save is "against your spell save DC" - read off the wielder's own
+/// [`crate::rules::creature::SpellCastingProfile`] when the plugin applies.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LimitedUseDebuffItemPlugin {
     pub name: String,
     pub uses_per_day: u32,
     pub ability: Ability,
-    pub dc: i32,
+    pub dc: Option<i32>,
     pub duration: Duration,
 }
 
@@ -72,7 +70,24 @@ impl LimitedUseDebuffItemPlugin {
             name: name.into(),
             uses_per_day,
             ability,
-            dc,
+            dc: Some(dc),
+            duration,
+        }
+    }
+
+    /// As [`LimitedUseDebuffItemPlugin::new`], for an item whose save is
+    /// against the wielder's own spell save DC rather than a printed number.
+    pub fn against_spell_dc(
+        name: impl Into<String>,
+        uses_per_day: u32,
+        ability: Ability,
+        duration: Duration,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            uses_per_day,
+            ability,
+            dc: None,
             duration,
         }
     }
@@ -83,12 +98,12 @@ impl LimitedUseDebuffItemPlugin {
     /// this engine's absence of a positioning model (see `DESIGN.md`'s
     /// "Positioning is the gap that matters") - the same reading a
     /// second-level Command's `Some(2)` already uses.
-    fn item_move(&self) -> Move {
+    fn item_move(&self, dc: i32) -> Move {
         Move::new(
             self.name.clone(),
             Effect::Save(SaveEffect {
                 ability: self.ability,
-                dc: self.dc,
+                dc,
                 damage: Vec::new(),
                 half_on_success: false,
                 on_failure: vec![(Condition::Suppressed, self.duration)],
@@ -111,7 +126,17 @@ impl FeaturePlugin for LimitedUseDebuffItemPlugin {
     }
 
     fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
-        FastHandsPlugin::new(self.item_move()).apply(builder)
+        let dc = match self.dc {
+            Some(dc) => dc,
+            None => builder.creature.spell_save_dc().ok_or_else(|| {
+                FeatureError::InvalidConfiguration(format!(
+                    "{}'s save is against its wielder's spell save DC, so {} needs a \
+                     spellcasting profile declared first",
+                    self.name, builder.creature.name
+                ))
+            })?,
+        };
+        FastHandsPlugin::new(self.item_move(dc)).apply(builder)
     }
 }
 
@@ -157,6 +182,32 @@ mod tests {
             }
             other => panic!("expected a save effect, got {other:?}"),
         }
+    }
+
+    /// "Against your spell save DC" reads the wielder's own profile, and a
+    /// wielder without one is a configuration error rather than a DC of 0.
+    #[test]
+    fn a_spell_dc_item_reads_the_wielders_own_save_dc() {
+        use crate::rules::creature::SpellCastingProfile;
+        let item = LimitedUseDebuffItemPlugin::against_spell_dc(
+            "Test Card",
+            1,
+            Ability::Wis,
+            Duration::Rounds(10),
+        );
+        let mut caster = CreatureBuilder::new("Caster", 15, 40);
+        caster.set_spellcasting(SpellCastingProfile::new(Ability::Wis, 5, 4).with_item_bonus(2));
+        let built = caster.apply_feature(&item).unwrap().build().unwrap();
+        let Effect::Save(save) = &built.bonus_actions[0].effect else {
+            panic!("expected a save effect");
+        };
+        assert_eq!(save.dc, 19);
+
+        let mut not_a_caster = CreatureBuilder::new("Fighter", 15, 40);
+        assert!(matches!(
+            item.apply(&mut not_a_caster),
+            Err(FeatureError::InvalidConfiguration(_))
+        ));
     }
 
     /// The whole point of a plugin over a hardcoded item: name, charges,

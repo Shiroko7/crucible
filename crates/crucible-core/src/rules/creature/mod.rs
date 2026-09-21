@@ -7,7 +7,7 @@ pub mod rider;
 pub mod types;
 
 pub use action::{
-    apply_healing, is_down, Effect, HealRoll, Move, MoveKind, SaveEffect, Strike, Uses,
+    apply_healing, is_down, AttackKind, Effect, HealRoll, Move, MoveKind, SaveEffect, Strike, Uses,
 };
 pub use combatant::Creature;
 pub use damage::{DamageKind, DamageRoll};
@@ -384,6 +384,13 @@ mod tests {
             Condition::SteadyAim,
             Condition::Suppressed,
             Condition::Marked,
+            Condition::SaveDisadvantage(Ability::Str),
+            Condition::SaveDisadvantage(Ability::Dex),
+            Condition::SaveDisadvantage(Ability::Con),
+            Condition::SaveDisadvantage(Ability::Int),
+            Condition::SaveDisadvantage(Ability::Wis),
+            Condition::SaveDisadvantage(Ability::Cha),
+            Condition::Silenced,
         ] {
             assert_eq!(Condition::parse(c.name()), Some(c));
         }
@@ -432,7 +439,7 @@ mod tests {
     #[test]
     fn suppressed_only_blocks_magic_items_saves_and_own_damage() {
         assert!(Condition::Suppressed.blocks_magic());
-        assert!(Condition::Suppressed.disadvantage_on_saves());
+        assert!(Condition::Suppressed.disadvantage_on_save(Ability::Wis));
         assert!(Condition::Suppressed.halves_own_damage());
 
         assert!(!Condition::Suppressed.incapacitated());
@@ -455,7 +462,7 @@ mod tests {
         ] {
             assert!(!c.blocks_magic(), "{c:?} should not block magic");
             assert!(
-                !c.disadvantage_on_saves(),
+                !c.disadvantage_on_save(Ability::Con),
                 "{c:?} should not disadvantage saves"
             );
             assert!(!c.halves_own_damage(), "{c:?} should not halve own damage");
@@ -510,5 +517,38 @@ mod tests {
         assert!(!Condition::Marked.auto_fails(Ability::Str));
         assert!(!Condition::Marked.blocks_riders());
         assert!(!Condition::Marked.auto_crits());
+    }
+
+    /// An injury poison's burden touches exactly one kind of save and
+    /// nothing else.
+    #[test]
+    fn a_save_disadvantage_burdens_only_its_own_ability() {
+        let burden = Condition::SaveDisadvantage(Ability::Wis);
+        assert!(burden.disadvantage_on_save(Ability::Wis));
+        assert!(!burden.disadvantage_on_save(Ability::Con));
+        assert!(!burden.incapacitated());
+        assert!(!burden.advantage_to_attackers());
+        assert!(!burden.disadvantage_on_attacks());
+        assert!(!burden.blocks_magic());
+        assert!(!burden.halves_own_damage());
+    }
+
+    /// The four standard shapes of attack roll, and the two questions
+    /// features ask of them.
+    #[test]
+    fn attack_kinds_answer_the_sneak_attack_and_ranged_weapon_gates() {
+        assert!(!AttackKind::MELEE_WEAPON.finesse_or_ranged_weapon());
+        let rapier = AttackKind {
+            finesse: true,
+            ..AttackKind::MELEE_WEAPON
+        };
+        assert!(rapier.finesse_or_ranged_weapon());
+        assert!(!rapier.ranged_weapon());
+        assert!(AttackKind::RANGED_WEAPON.finesse_or_ranged_weapon());
+        assert!(AttackKind::RANGED_WEAPON.ranged_weapon());
+        assert!(!AttackKind::RANGED_SPELL.finesse_or_ranged_weapon());
+        assert!(!AttackKind::RANGED_SPELL.ranged_weapon());
+        assert!(!AttackKind::MELEE_SPELL.finesse_or_ranged_weapon());
+        assert_eq!(Strike::new(5, Vec::new()).kind, AttackKind::MELEE_WEAPON);
     }
 }

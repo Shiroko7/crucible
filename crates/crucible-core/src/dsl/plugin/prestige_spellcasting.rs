@@ -8,8 +8,8 @@
 //!
 //! Every number here - which two abilities gate it and by how much, the
 //! sneak-attack-dice minimum, the granted slot table, and the granted
-//! casting ability/bonus - belongs to whichever specific build's TOML
-//! supplies it, the same way [`super::rogue::SneakAttackPlugin`]'s
+//! casting ability and proficiency bonus - belongs to whichever specific
+//! build's TOML supplies it, the same way [`super::rogue::SneakAttackPlugin`]'s
 //! `dice_count` belongs to the rogue wearing it rather than to the plugin.
 //! None of it is hardcoded here.
 
@@ -38,10 +38,14 @@ impl AbilityRequirement {
 /// On success this sets the creature's
 /// [`crate::rules::creature::SpellSlots`] pool to exactly `slots` (index 0 is
 /// 1st level spell slots, ... index 8 is 9th) and its [`SpellCastingProfile`]
-/// to `ability`/`attack_bonus`. There is no separate `dc` parameter: the
-/// profile already derives the save DC as `8 + attack_bonus`, the standard
-/// 5e formula ARCH-05 encodes once, so a second field here would just be a
-/// second place for the same number to go stale.
+/// to `ability`, with that ability's modifier read off the creature's own
+/// score and `proficiency_bonus` alongside it - the same three fields any
+/// other caster's profile has, so everything that reads the modifier alone
+/// (Spiritual Weapon's and True Strike's damage, a healing spell's bonus)
+/// gets the modifier and not the whole attack bonus. There is no separate
+/// `dc` parameter: the profile already derives the save DC from those, the
+/// standard 5e formula ARCH-05 encodes once, so a second field here would
+/// just be a second place for the same number to go stale.
 ///
 /// Any `item_bonus` already sitting on the creature's spellcasting profile -
 /// from an equipment plugin that ran earlier in the feature list - is
@@ -55,7 +59,7 @@ pub struct PrestigeSpellcastingPlugin {
     pub minimum_sneak_attack_dice: u32,
     pub slots: [u32; SPELL_LEVELS as usize],
     pub ability: Ability,
-    pub attack_bonus: i32,
+    pub proficiency_bonus: i32,
 }
 
 impl PrestigeSpellcastingPlugin {
@@ -66,7 +70,7 @@ impl PrestigeSpellcastingPlugin {
         minimum_sneak_attack_dice: u32,
         slots: [u32; SPELL_LEVELS as usize],
         ability: Ability,
-        attack_bonus: i32,
+        proficiency_bonus: i32,
     ) -> Self {
         Self {
             name: name.into(),
@@ -74,7 +78,7 @@ impl PrestigeSpellcastingPlugin {
             minimum_sneak_attack_dice,
             slots,
             ability,
-            attack_bonus,
+            proficiency_bonus,
         }
     }
 
@@ -130,6 +134,18 @@ impl FeaturePlugin for PrestigeSpellcastingPlugin {
             )));
         }
 
+        let score = builder.creature.ability_score(self.ability);
+        if score <= 0 {
+            return Err(FeatureError::InvalidConfiguration(format!(
+                "{} casts with {}, so {} needs its {} score declared",
+                self.name,
+                self.ability.name(),
+                builder.creature.name,
+                self.ability.name(),
+            )));
+        }
+        let ability_modifier = (score - 10).div_euclid(2);
+
         for level in 1..=SPELL_LEVELS {
             builder.set_spell_slot_max(level, self.slots[(level - 1) as usize]);
         }
@@ -140,7 +156,7 @@ impl FeaturePlugin for PrestigeSpellcastingPlugin {
             .map(|p| p.item_bonus)
             .unwrap_or(0);
         builder.set_spellcasting(
-            SpellCastingProfile::new(self.ability, self.attack_bonus, 0)
+            SpellCastingProfile::new(self.ability, ability_modifier, self.proficiency_bonus)
                 .with_item_bonus(item_bonus),
         );
 
@@ -171,6 +187,7 @@ mod tests {
         let mut builder = CreatureBuilder::new("Test Subject", 15, 40);
         builder.set_ability_score(Ability::Dex, dex);
         builder.set_ability_score(Ability::Int, int);
+        builder.set_ability_score(Ability::Wis, 20);
         if sneak_attack_dice > 0 {
             builder.add_rider(Rider::ConditionalExtraDamage {
                 dice_count: sneak_attack_dice,
@@ -190,7 +207,7 @@ mod tests {
             2,
             slots_1_and_2(4, 3),
             Ability::Wis,
-            11,
+            4,
         );
 
         plugin.apply(&mut builder).expect("prerequisites are met");
@@ -207,9 +224,14 @@ mod tests {
             .spellcasting
             .expect("spellcasting profile granted");
         assert_eq!(profile.ability, Ability::Wis);
-        assert_eq!(profile.attack_bonus(), 11);
+        // The modifier is read off the creature's own Wis 20, and kept
+        // separate from proficiency - anything that adds "your spellcasting
+        // modifier" to damage must see +5, never the whole attack bonus.
+        assert_eq!(profile.ability_modifier, 5);
+        assert_eq!(profile.proficiency_bonus, 4);
+        assert_eq!(profile.attack_bonus(), 9);
         // DC is derived, not a separate parameter: 8 + attack bonus.
-        assert_eq!(profile.save_dc(), 19);
+        assert_eq!(profile.save_dc(), 17);
     }
 
     /// A second, distinctly different parameter set, to prove none of the
@@ -226,11 +248,13 @@ mod tests {
             5,
             slots_1_and_2(2, 1),
             Ability::Cha,
-            6,
+            3,
         );
-        // This instance's requirements are Str/Wis, so give it those too.
+        // This instance's requirements are Str/Wis, and it casts with Cha, so
+        // give it those too.
         builder.set_ability_score(Ability::Str, 15);
         builder.set_ability_score(Ability::Wis, 15);
+        builder.set_ability_score(Ability::Cha, 16);
 
         plugin.apply(&mut builder).expect("prerequisites are met");
 
@@ -242,6 +266,7 @@ mod tests {
             .spellcasting
             .expect("spellcasting profile granted");
         assert_eq!(profile.ability, Ability::Cha);
+        assert_eq!(profile.ability_modifier, 3);
         assert_eq!(profile.attack_bonus(), 6);
         assert_eq!(profile.save_dc(), 14);
     }
@@ -256,7 +281,7 @@ mod tests {
             2,
             slots_1_and_2(4, 3),
             Ability::Wis,
-            11,
+            4,
         );
 
         plugin.apply(&mut builder).expect("prerequisites are met");
@@ -265,9 +290,31 @@ mod tests {
         assert_eq!(profile.item_bonus, 3, "the item bonus survives the grant");
         assert_eq!(
             profile.attack_bonus(),
-            14,
+            12,
             "the granted bonus and the item bonus compose additively"
         );
+        assert_eq!(
+            profile.ability_modifier, 5,
+            "the item bonus never leaks into the modifier"
+        );
+    }
+
+    /// Casting from an ability the creature never declared a score for is
+    /// a configuration error, not a silent -5 modifier.
+    #[test]
+    fn rejects_a_casting_ability_with_no_declared_score() {
+        let mut builder = qualifying_builder(13, 13, 2);
+        let plugin = PrestigeSpellcastingPlugin::new(
+            "Test Prestige Caster",
+            requirements(),
+            2,
+            slots_1_and_2(4, 3),
+            Ability::Cha,
+            4,
+        );
+        let err = plugin.apply(&mut builder).unwrap_err();
+        assert!(matches!(err, FeatureError::InvalidConfiguration(_)));
+        assert!(builder.creature.spellcasting.is_none());
     }
 
     #[test]
@@ -279,7 +326,7 @@ mod tests {
             2,
             slots_1_and_2(4, 3),
             Ability::Wis,
-            11,
+            4,
         );
 
         let err = plugin.apply(&mut builder).unwrap_err();
@@ -300,7 +347,7 @@ mod tests {
             2,
             slots_1_and_2(4, 3),
             Ability::Wis,
-            11,
+            4,
         );
 
         let err = plugin.apply(&mut builder).unwrap_err();
@@ -317,7 +364,7 @@ mod tests {
             2,
             slots_1_and_2(4, 3),
             Ability::Wis,
-            11,
+            4,
         );
 
         let err = plugin.apply(&mut builder).unwrap_err();
@@ -334,7 +381,7 @@ mod tests {
             2,
             slots_1_and_2(4, 3),
             Ability::Wis,
-            11,
+            4,
         );
 
         let err = plugin.apply(&mut builder).unwrap_err();

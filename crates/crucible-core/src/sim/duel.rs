@@ -12,16 +12,22 @@
 //! a window after *every* enemy's turn rather than one a round, which is most of
 //! what a party of four changes about fighting one.
 //!
-//! Riders fire at five fixed points, which is where the event pipeline
-//! `DESIGN.md` describes will eventually go:
+//! Riders fire at fixed points, which is where the event pipeline `DESIGN.md`
+//! describes will eventually go:
 //!
+//! - **as an attack roll is made**, the attacker's damage riders are gathered:
+//!   Sneak Attack if the roll qualifies (see [`Fight::extra_damage_plan`]),
+//!   bonus dice against the target's creature type, a weapon buff armed by an
+//!   earlier condition - and Cunning Strike decides what to spend dice on;
 //! - **on being targeted, before an attack's hit or miss is finalized**,
 //!   [`Rider::ReactionOnTargeted`] spends a reaction to add an AC bonus,
 //!   capable of turning that one attack's hit into a miss;
-//! - **on an incoming attack's damage**, [`Rider::ReduceDamage`] spends a
-//!   reaction to cut it;
+//! - **on an incoming attack's damage**, [`Rider::ReduceDamage`] or
+//!   [`Rider::HalveAttackDamage`] spends a reaction to cut it - one reaction
+//!   a round between all of them;
 //! - **on a hit**, [`Rider::SaveOrCondition`] forces a save and may apply a
-//!   condition;
+//!   condition, [`Rider::ConditionOnHit`] applies one outright, a Cunning
+//!   Strike effect resolves, and an [`Rider::InjuryPoison`] dose is used up;
 //! - **on a failed save**, [`Rider::AlwaysSucceed`] may buy it back;
 //! - **on a save for half**, [`Rider::NothingOnSuccess`] reshapes the outcome.
 //!
@@ -33,15 +39,17 @@
 //! costs more than it used to. There is no movement, reach or flight, so an area
 //! effect is assumed to catch every enemy - the pessimistic reading, since a
 //! party that spread out would not all be in one cone. `max_targets` on a saving
-//! throw is the only control over that.
+//! throw is the only control over that. "An ally within 5 feet of the target",
+//! which Sneak Attack asks about, is read off who is fighting what instead: see
+//! [`Fight::ally_adjacent`].
 
 use crate::prob::rng::Rng;
 use crate::rules::combat::{
-    sample_save_modifier_bonus, AttackModifier, Landed, RollMode, SaveModifier,
+    hit_outcomes_with, sample_save_modifier_bonus, AttackModifier, Landed, RollMode, SaveModifier,
 };
 use crate::rules::creature::{
-    apply_healing, Ability, AttackTrigger, Condition, Cost, Creature, Duration, Effect, Move,
-    MoveKind, Rider, SpellSlots, Uses,
+    apply_healing, Ability, AttackKind, Condition, Cost, Creature, DamageKind, DamageRoll,
+    Duration, Effect, HealRoll, Move, MoveKind, Rider, Size, SpellSlots, Strike, Uses,
 };
 
 /// Which side of the fight. A side is a team, of any size.
@@ -265,6 +273,28 @@ struct Fighter<'a> {
     /// go through.
     save_modifiers: Vec<SaveModifier>,
     once_per_turn_spent: bool,
+    /// Sneak Attack's own once-per-turn budget. "Once per turn" means any
+    /// creature's turn, so it comes back at the start of every turn rather
+    /// than only this creature's own, and it is kept apart from
+    /// `once_per_turn_spent` so a creature with both a Stunning-Strike-style
+    /// rider and Sneak Attack gets one of each.
+    sneak_attack_spent: bool,
+    /// This creature's one reaction per round, shared by every reaction rider
+    /// it has - see [`Rider::is_reaction`]. Back at the start of its own turn.
+    reaction: bool,
+    /// Parallel to `creature.riders`: whether each
+    /// [`Rider::ConditionTriggeredWeaponDamage`] has been armed by this
+    /// creature landing its trigger condition on an enemy.
+    armed: Vec<bool>,
+    /// Whether this creature fights in melee - see [`fights_in_melee`] - which
+    /// is what [`Fight::ally_adjacent`] reads.
+    melee: bool,
+    /// Killed outright by massive damage, so healing cannot bring it back.
+    /// See [`Creature::player_character`].
+    dead: bool,
+    /// A spell slot has already been expended this turn - see
+    /// [`Fighter::can_cast`]. Back at the start of this creature's turn.
+    slot_spent_this_turn: bool,
     dealt: i64,
     /// Resource points and limited uses burnt. This is the second column of the
     /// table `DESIGN.md` wants, because a win probability means nothing without
@@ -307,6 +337,12 @@ impl<'a> Fighter<'a> {
             attack_modifiers: Vec::new(),
             save_modifiers: Vec::new(),
             once_per_turn_spent: false,
+            sneak_attack_spent: false,
+            reaction: true,
+            armed: vec![false; creature.riders.len()],
+            melee: fights_in_melee(creature),
+            dead: false,
+            slot_spent_this_turn: false,
             dealt: 0,
             spent: 0,
         }
@@ -314,6 +350,12 @@ impl<'a> Fighter<'a> {
 
     fn alive(&self) -> bool {
         self.hp > 0
+    }
+
+    /// Down but not dead: a player character at 0 hit points that healing
+    /// can still bring back.
+    fn can_revive(&self) -> bool {
+        !self.alive() && !self.dead && self.creature.player_character
     }
 
     fn bloodied(&self) -> bool {
@@ -341,14 +383,23 @@ impl<'a> Fighter<'a> {
         self.incapacitated() || self.has(|c| matches!(c, Condition::Compelled))
     }
 
-    /// Is this creature currently allowed to take a move of `kind`? Only
+    /// Is this creature currently allowed to take `m`? Only
     /// [`MoveKind::Spell`] and [`MoveKind::MagicItem`] are ever blocked - by
-    /// [`Condition::blocks_magic`] - so an ordinary attack or stance is
-    /// unaffected whatever else is active. Checked everywhere a move's
-    /// legality is checked: [`Policy::choose`], [`Fight::legal`],
+    /// [`Condition::blocks_magic`], and a spell also by
+    /// [`Condition::blocks_casting`] unless it is cast without components
+    /// ([`Move::bypasses_casting_restrictions`]) - so an ordinary attack or
+    /// stance is unaffected whatever else is active. Checked everywhere a
+    /// move's legality is checked: [`Policy::choose`], [`Fight::legal`],
     /// [`Fight::turn`]'s execution-time recheck, and [`Fight::repair`].
-    fn move_allowed(&self, kind: MoveKind) -> bool {
-        !matches!(kind, MoveKind::Spell | MoveKind::MagicItem) || !self.has(Condition::blocks_magic)
+    fn move_allowed(&self, m: &Move) -> bool {
+        match m.kind {
+            MoveKind::Spell => {
+                !self.has(Condition::blocks_magic)
+                    && (m.bypasses_casting_restrictions || !self.has(Condition::blocks_casting))
+            }
+            MoveKind::MagicItem => !self.has(Condition::blocks_magic),
+            MoveKind::Standard | MoveKind::ObjectUse => true,
+        }
     }
 
     /// Is this creature willing to spend a finite resource right now?
@@ -389,37 +440,28 @@ impl<'a> Fighter<'a> {
 
     /// Is a slot of exactly `level` available and something this policy is
     /// willing to spend? A spell slot is exactly the kind of finite resource
-    /// `will_spend` already gates `cost` behind.
-    ///
-    /// Two independent fields on `Move` name a spell-slot cost -
-    /// `spell_slot_level` (Healing Word/Cure Wounds/Hold Person's own line)
-    /// and `spell_level` (Bless/Bane's) - both spending from this same
-    /// `spell_slots` pool. A given `Move` only ever sets one of the two, so
-    /// callers check (and spend) against both fields; this one shared method
-    /// is what each of those checks calls.
+    /// `will_spend` already gates `cost` behind. And only one a turn: under
+    /// the 2024 rules a creature can expend at most one spell slot on a
+    /// single turn, so a slotted action and a slotted bonus action never go
+    /// together.
     fn can_cast(&self, level: Option<u32>) -> bool {
         match level {
             None => true,
-            Some(lvl) => self.will_spend() && self.spell_slots.available(lvl) > 0,
+            Some(lvl) => {
+                self.will_spend()
+                    && !self.slot_spent_this_turn
+                    && self.spell_slots.available(lvl) > 0
+            }
         }
     }
 
-    /// Spend a slot of `level` (the `spell_slot_level` field's shape),
-    /// counting it the same way `pay` counts a resource cost.
+    /// Spend a slot of `level`, counting it the same way `pay` counts a
+    /// resource cost. A no-op for a move with no slot cost.
     fn cast_spell_slot(&mut self, level: Option<u32>) {
         if let Some(lvl) = level {
             self.spell_slots.cast(lvl);
             self.spent += 1;
-        }
-    }
-
-    /// Spend one slot at `spell_level` (the `spell_level` field's shape),
-    /// counting it against `spent` like any other burnt resource. A no-op
-    /// for a move with no spell cost.
-    fn cast(&mut self, spell_level: Option<u32>) {
-        if let Some(level) = spell_level {
-            self.spell_slots.cast(level);
-            self.spent += 1;
+            self.slot_spent_this_turn = true;
         }
     }
 
@@ -448,6 +490,12 @@ impl<'a> Fighter<'a> {
 enum Expiry {
     /// Cleared at the start of this roster index's turn.
     TurnStart(usize),
+    /// Cleared at the end of this roster index's turn, once `ends_left` of
+    /// them have passed - see [`Duration::ApplierNextTurnEnd`].
+    TurnEnd { who: usize, ends_left: u8 },
+    /// Cleared once `left` of this roster index's turns have started - see
+    /// [`Duration::Rounds`].
+    Rounds { who: usize, left: u32 },
     /// A saving throw at the end of the victim's own turn, clearing the
     /// condition on a success. See [`Duration::SaveEndTurn`].
     SaveEachTurn {
@@ -592,6 +640,10 @@ struct Fight<'a> {
     /// this turn worth if I keep doing it", which has a useful answer, rather
     /// than "what is this turn worth if I immediately stop", which does not.
     rollout_plan: Option<(usize, Plan)>,
+    /// Whose turn is being resolved right now, if anyone's - a legendary
+    /// action between turns has none. Decides whether "the end of the
+    /// applier's next turn" is this turn's end or the one after.
+    acting: Option<usize>,
 }
 
 impl<'a> Fight<'a> {
@@ -640,6 +692,7 @@ impl<'a> Fight<'a> {
             max_rounds,
             budget,
             rollout_plan: None,
+            acting: None,
         }
     }
 
@@ -762,9 +815,14 @@ impl<'a> Fight<'a> {
         log: &mut Option<Vec<String>>,
         plan: Option<Plan>,
     ) {
+        self.start_of_turn(who);
         if !self.fighters[who].alive() {
+            // A creature that is down keeps its place in the order: whatever
+            // was set to last until the start or end of its turn ends anyway.
+            self.end_of_turn(who);
             return;
         }
+        self.acting = Some(who);
         if !self.turn(round, who, rng, log, plan) {
             self.turns_lost[self.fighters[who].side.index()] += 1;
         }
@@ -772,6 +830,40 @@ impl<'a> Fight<'a> {
         // creature still reaches the end of its own turn, which is exactly
         // when its next chance to shake the condition off falls.
         self.end_of_turn_saves(round, who, rng, log);
+        self.end_of_turn(who);
+        self.acting = None;
+    }
+
+    /// Everything that happens as `who`'s turn starts, whether or not it is
+    /// able to act: conditions lasting until then end - the stun a monk
+    /// landed ends on the monk's turn, not the dragon's - one more round
+    /// comes off anything timed in `who`'s rounds, and every creature's
+    /// once-per-turn Sneak Attack budget comes back.
+    fn start_of_turn(&mut self, who: usize) {
+        for f in self.fighters.iter_mut() {
+            f.sneak_attack_spent = false;
+            f.conditions.retain_mut(|(_, expiry)| match expiry {
+                Expiry::TurnStart(x) => *x != who,
+                Expiry::Rounds { who: w, left } if *w == who => {
+                    *left = left.saturating_sub(1);
+                    *left > 0
+                }
+                _ => true,
+            });
+        }
+    }
+
+    /// Conditions lasting until the end of `who`'s turn, counted down.
+    fn end_of_turn(&mut self, who: usize) {
+        for f in self.fighters.iter_mut() {
+            f.conditions.retain_mut(|(_, expiry)| match expiry {
+                Expiry::TurnEnd { who: w, ends_left } if *w == who => {
+                    *ends_left = ends_left.saturating_sub(1);
+                    *ends_left > 0
+                }
+                _ => true,
+            });
+        }
     }
 
     /// Returns whether the creature actually got to act.
@@ -783,16 +875,6 @@ impl<'a> Fight<'a> {
         log: &mut Option<Vec<String>>,
         plan: Option<Plan>,
     ) -> bool {
-        // Conditions that end at the start of this creature's turn, wherever they
-        // sit - the stun a monk landed ends on the monk's turn, not the dragon's.
-        // A `SaveEachTurn` condition is untouched here; it only ever leaves via
-        // `end_of_turn_saves`.
-        for f in self.fighters.iter_mut() {
-            f.conditions.retain(
-                |&(_, expiry)| !matches!(expiry, Expiry::TurnStart(cleared_by) if cleared_by == me),
-            );
-        }
-
         let creature = self.fighters[me].creature;
         // Recharge is rolled at the start of the creature's turn; reactions and
         // legendary actions come back then too.
@@ -823,9 +905,21 @@ impl<'a> Fight<'a> {
             None => self.decide(round, me, target, rng),
         };
 
+        // Almost every bonus action follows the action; one that sets the
+        // action up - Steady Aim - has to come first.
+        let bonus_first = plan
+            .bonus
+            .and_then(|i| creature.bonus_actions.get(i))
+            .is_some_and(|m| m.before_action);
+        let order = if bonus_first {
+            [(Slot::Bonus, plan.bonus), (Slot::Action, plan.action)]
+        } else {
+            [(Slot::Action, plan.action), (Slot::Bonus, plan.bonus)]
+        };
+
         let record = log.is_some();
         let mut line = String::new();
-        for (slot, pick) in [(Slot::Action, plan.action), (Slot::Bonus, plan.bonus)] {
+        for (slot, pick) in order {
             let Some(pick) = pick else { continue };
             if !self.fighters[target].alive() {
                 let Some(new_target) = self.pick_target(me) else {
@@ -844,14 +938,12 @@ impl<'a> Fight<'a> {
             if !slot.states(&self.fighters[me])[pick].available()
                 || !self.fighters[me].can_pay(chosen.cost)
                 || !self.fighters[me].can_cast(chosen.spell_slot_level)
-                || !self.fighters[me].can_cast(chosen.spell_level)
-                || !self.fighters[me].move_allowed(chosen.kind)
+                || !self.fighters[me].move_allowed(chosen)
             {
                 continue;
             }
             self.fighters[me].pay(chosen.cost);
             self.fighters[me].cast_spell_slot(chosen.spell_slot_level);
-            self.fighters[me].cast(chosen.spell_level);
             self.fighters[me].spend_move(slot, pick, chosen.uses);
             self.apply(chosen, rng, me, target, record, &mut line);
         }
@@ -894,12 +986,12 @@ impl<'a> Fight<'a> {
             .iter()
             .filter_map(|&(condition, expiry)| match expiry {
                 Expiry::SaveEachTurn { ability, dc, .. } => Some((condition, ability, dc)),
-                Expiry::TurnStart(_) => None,
+                _ => None,
             })
             .collect();
 
         for (condition, ability, dc) in pending {
-            let (saved, resisted) = saving_throw(&mut self.fighters, rng, me, ability, dc);
+            let (saved, resisted) = saving_throw(&mut self.fighters, rng, me, ability, dc, false);
             if !saved {
                 continue;
             }
@@ -953,6 +1045,13 @@ impl<'a> Fight<'a> {
 
     /// What to do this turn: ask the search if this creature searches, otherwise
     /// ask the policy for each slot.
+    ///
+    /// The action is chosen first. A bonus action that sets the action up -
+    /// a stance granting advantage on this creature's own next attack, taken
+    /// before it ([`Move::before_action`]) - is then worth exactly what that
+    /// advantage adds to the chosen action, Sneak Attack it unlocks included,
+    /// so it competes on the same footing as a bonus action that simply
+    /// deals damage.
     fn decide(&self, round: u32, me: usize, target: usize, rng: &mut Rng) -> Plan {
         if let Some((who, plan)) = self.rollout_plan {
             if who == me {
@@ -963,15 +1062,18 @@ impl<'a> Fight<'a> {
         if f.policy == Policy::Solver {
             return self.search(round, me, rng);
         }
-        let against = self.fighters[target].creature;
-        Plan {
-            action: f
-                .policy
-                .choose(Slot::Action.moves(f.creature), &f.actions, f, against),
-            bonus: f
-                .policy
-                .choose(Slot::Bonus.moves(f.creature), &f.bonus_actions, f, against),
-        }
+        let action = f
+            .policy
+            .choose(Slot::Action.moves(f.creature), &f.actions, f, |m| {
+                self.move_value(me, target, m, false)
+            });
+        let lead = action.map(|i| &f.creature.actions[i]);
+        let bonus = f
+            .policy
+            .choose(Slot::Bonus.moves(f.creature), &f.bonus_actions, f, |m| {
+                self.bonus_value(me, target, m, lead)
+            });
+        Plan { action, bonus }
     }
 
     /// Keep a rollout on the plan under test, falling back slot by slot to greedy
@@ -982,21 +1084,21 @@ impl<'a> Fight<'a> {
     /// still evaluated as itself.
     fn repair(&self, me: usize, target: usize, plan: Plan) -> Plan {
         let f = &self.fighters[me];
-        let against = self.fighters[target].creature;
         let fix = |slot: Slot, pick: Option<usize>| -> Option<usize> {
             let still_legal = pick.is_some_and(|i| {
                 slot.moves(f.creature).get(i).is_some_and(|m| {
                     slot.states(f)[i].available()
                         && f.can_pay(m.cost)
                         && f.can_cast(m.spell_slot_level)
-                        && f.can_cast(m.spell_level)
-                        && f.move_allowed(m.kind)
+                        && f.move_allowed(m)
                 })
             });
             if pick.is_none() || still_legal {
                 pick
             } else {
-                Policy::Greedy.choose(slot.moves(f.creature), slot.states(f), f, against)
+                Policy::Greedy.choose(slot.moves(f.creature), slot.states(f), f, |m| {
+                    self.move_value(me, target, m, false)
+                })
             }
         };
         Plan {
@@ -1022,8 +1124,7 @@ impl<'a> Fight<'a> {
             if state.available()
                 && f.can_pay(m.cost)
                 && f.can_cast(m.spell_slot_level)
-                && f.can_cast(m.spell_level)
-                && f.move_allowed(m.kind)
+                && f.move_allowed(m)
             {
                 out.push(Some(i));
             }
@@ -1109,21 +1210,21 @@ impl<'a> Fight<'a> {
 
         let record = log.is_some();
         let mut line = String::new();
-        let against = self.fighters[target].creature;
         let pick = {
             let f = &self.fighters[me];
             // Legendary actions are chosen by policy even for the search, which
             // only plans whole turns. Searching them too would multiply the
             // rollout count by the number of windows.
-            f.policy
-                .choose(&creature.legendary, &f.legendary, f, against)
+            f.policy.choose(&creature.legendary, &f.legendary, f, |m| {
+                self.move_value(me, target, m, false)
+            })
         };
         let Some(pick) = pick else { return };
         let chosen = &creature.legendary[pick];
 
         self.fighters[me].legendary_left -= 1;
         self.fighters[me].pay(chosen.cost);
-        self.fighters[me].cast(chosen.spell_level);
+        self.fighters[me].cast_spell_slot(chosen.spell_slot_level);
         self.fighters[me].spend_move(Slot::Legendary, pick, chosen.uses);
         self.apply(chosen, rng, me, target, record, &mut line);
 
@@ -1212,61 +1313,90 @@ impl<'a> Fight<'a> {
         match effect {
             Effect::Strikes { strike, count } => {
                 let mut current_target = target;
-                let mut against = self.fighters[current_target].creature;
-                let mut mode = self.attack_mode_consuming_mark(strike.mode, me, current_target);
-                // Paralyzed: any hit against it is an automatic critical hit.
-                let mut force_crit = self.fighters[current_target].has(Condition::auto_crits);
                 // Ongoing attack-roll modifiers this attacker is carrying -
                 // Bless, Bane. Cloned once: they do not change mid-move, and
                 // `self.fighters` cannot stay borrowed here across the
                 // mutable borrows the loop below takes for `current_target`.
                 let modifiers = self.fighters[me].attack_modifiers.clone();
+                let attacker = self.fighters[me].creature;
                 for _ in 0..*count {
                     if !self.fighters[current_target].alive() {
                         let Some(new_target) = self.pick_target(me) else {
                             break;
                         };
                         current_target = new_target;
-                        against = self.fighters[current_target].creature;
-                        mode = self.attack_mode_consuming_mark(strike.mode, me, current_target);
-                        force_crit = self.fighters[current_target].has(Condition::auto_crits);
                     }
-                    let reaction =
-                        ac_boost_reaction(&self.fighters[current_target], AttackTrigger::AnyAttack);
-                    let (ac_bonus, reaction_available) = match reaction {
-                        Some((_, bonus)) => (bonus, true),
-                        None => (0, false),
-                    };
-                    let (raw, landed, consumed) = strike.sample_forcing_crit_with_reaction(
+                    let against = self.fighters[current_target].creature;
+                    // Worked out per swing: a mark or Steady Aim is used up by
+                    // the first roll it helps, so a multiattack's later swings
+                    // roll without it.
+                    let mode = self.attack_mode_consuming(strike.mode, me, current_target);
+                    // Paralyzed: any hit against it is an automatic critical hit.
+                    let force_crit = self.fighters[current_target].has(Condition::auto_crits);
+                    let boost = ac_boost_reaction(&self.fighters[current_target], strike.kind);
+                    let plan =
+                        self.extra_damage_plan(me, current_target, strike, move_riders, mode, true);
+                    let (raw, landed, consumed) = strike.sample_from(
                         rng,
+                        attacker,
                         against,
                         mode,
                         force_crit,
                         &modifiers,
-                        &[],
-                        ac_bonus,
-                        reaction_available,
+                        &plan.rolls,
+                        boost.unwrap_or(0),
+                        boost.is_some(),
                     );
                     if consumed {
-                        if let Some((i, _)) = reaction {
-                            self.fighters[current_target].rider_uses[i] -= 1;
-                        }
+                        self.fighters[current_target].reaction = false;
                     }
-                    let (dealt, cut) =
-                        reduce_incoming(rng, &mut self.fighters[current_target], strike, raw);
+                    let (dealt, answer) =
+                        react_to_hit(rng, &mut self.fighters[current_target], strike, raw);
                     let dealt = halve_if_suppressed(&self.fighters, me, dealt);
                     self.fighters[me].dealt += i64::from(dealt);
                     self.apply_damage(rng, current_target, dealt);
                     if record {
-                        notes.push(match landed {
-                            Landed::Miss if consumed => "miss (AC boosted)".to_string(),
-                            Landed::Miss => "miss".to_string(),
-                            _ if cut > 0 => format!("{dealt} (deflected {cut})"),
-                            Landed::Crit => format!("{dealt} crit"),
-                            Landed::Hit => dealt.to_string(),
+                        let sneak = if plan.sneak_attack && landed != Landed::Miss {
+                            " sneak"
+                        } else {
+                            ""
+                        };
+                        notes.push(match (landed, answer) {
+                            (Landed::Miss, _) if consumed => "miss (AC boosted)".to_string(),
+                            (Landed::Miss, _) => "miss".to_string(),
+                            (_, Some(Answer::Deflected(cut))) => {
+                                format!("{dealt}{sneak} (deflected {cut})")
+                            }
+                            (_, Some(Answer::Halved)) => format!("{dealt}{sneak} (halved)"),
+                            (Landed::Crit, None) => format!("{dealt} crit{sneak}"),
+                            (Landed::Hit, None) => format!("{dealt}{sneak}"),
                         });
                     }
                     if landed != Landed::Miss {
+                        if plan.sneak_attack {
+                            self.fighters[me].sneak_attack_spent = true;
+                        }
+                        if let Some(choice) = plan.cunning {
+                            self.resolve_cunning_strike(
+                                rng,
+                                me,
+                                current_target,
+                                choice,
+                                record,
+                                notes,
+                                landed_conditions,
+                            );
+                        }
+                        if strike.kind.weapon {
+                            self.resolve_injury_poison(
+                                rng,
+                                me,
+                                current_target,
+                                record,
+                                notes,
+                                landed_conditions,
+                            );
+                        }
                         self.fire_on_hit(
                             rng,
                             me,
@@ -1297,21 +1427,33 @@ impl<'a> Fight<'a> {
                 if let Some(max) = save.max_targets {
                     caught.truncate(max as usize);
                 }
+                let attacker = self.fighters[me].creature;
                 for i in caught {
                     let against = self.fighters[i].creature;
+                    let (conditions, advantage) = self.conditions_against(me, i, &save.on_failure);
+                    if save.damage.is_empty()
+                        && !save.on_failure.is_empty()
+                        && conditions.is_empty()
+                    {
+                        // Immune to everything it could do: nothing to roll
+                        // against, and no Legendary Resistance to waste on it.
+                        if record {
+                            notes.push(format!("{} immune", self.fighters[i].creature.name));
+                        }
+                        continue;
+                    }
                     let (saved, resisted) =
-                        saving_throw(&mut self.fighters, rng, i, save.ability, save.dc);
+                        saving_throw(&mut self.fighters, rng, i, save.ability, save.dc, advantage);
                     // Evasion is explicitly unavailable while Incapacitated.
                     let evasion = against.has_evasion(save.ability)
                         && !self.fighters[i].has(Condition::blocks_riders);
-                    let dealt = save.sample_known(rng, against, saved, evasion);
+                    let dealt = save.sample_known_from(rng, attacker, against, saved, evasion);
                     let dealt = halve_if_suppressed(&self.fighters, me, dealt);
                     self.fighters[me].dealt += i64::from(dealt);
                     self.apply_damage(rng, i, dealt);
                     if !saved {
-                        for &(condition, duration) in &save.on_failure {
-                            self.apply_condition(i, condition, expiry(me, i, duration));
-                            landed_conditions.push((i, condition));
+                        for &(condition, duration) in &conditions {
+                            self.land_condition(me, i, condition, duration, landed_conditions);
                         }
                     }
                     if record {
@@ -1320,9 +1462,9 @@ impl<'a> Fight<'a> {
                             (true, false) => "saved",
                             _ => "failed",
                         };
-                        let extra = if !saved && !save.on_failure.is_empty() {
+                        let extra = if !saved && !conditions.is_empty() {
                             let names: Vec<&str> =
-                                save.on_failure.iter().map(|&(c, _)| c.name()).collect();
+                                conditions.iter().map(|&(c, _)| c.name()).collect();
                             format!(" and {}", names.join(" and "))
                         } else {
                             String::new()
@@ -1342,23 +1484,24 @@ impl<'a> Fight<'a> {
                 }
             }
             Effect::Heal(roll) => {
-                // Healing Word, Cure Wounds. `target` is whoever this move was
-                // aimed at, exactly like a strike or a save - the engine only
-                // ever targets the opposing side today (see
-                // `dsl::plugin::spells`'s module doc), so in the current duel
-                // loop this only ever fires on an enemy. The math is written
-                // to be right regardless of who it lands on, ready for the
-                // day a policy can aim it at a downed ally instead.
+                // Healing Word, Cure Wounds, a potion: always aimed at the
+                // user's own side, whoever `target` - the enemy the turn is
+                // about - happens to be. See `Fight::heal_target`.
+                let who = self.heal_target(me);
                 let healed = roll.sample(rng);
-                let current_hp = self.fighters[target].hp;
-                let max_hp = self.fighters[target].creature.hp;
-                let (new_hp, revived) = apply_healing(current_hp, max_hp, healed);
-                self.fighters[target].hp = new_hp;
+                let f = &mut self.fighters[who];
+                let (new_hp, revived) = if f.dead {
+                    (f.hp, false)
+                } else {
+                    apply_healing(f.hp.max(0), f.creature.hp, healed)
+                };
+                f.hp = new_hp;
                 if record {
+                    let name = &f.creature.name;
                     notes.push(if revived {
-                        format!("heals {healed} (revives)")
+                        format!("heals {name} {healed} (revives)")
                     } else {
-                        format!("heals {healed}")
+                        format!("heals {name} {healed}")
                     });
                 }
             }
@@ -1367,6 +1510,7 @@ impl<'a> Fight<'a> {
                 // Retargeting on a mid-resolution kill mirrors `Strikes` -
                 // Magic Missile's darts do not stop because an earlier one
                 // dropped the target.
+                let attacker = self.fighters[me].creature;
                 let mut current_target = target;
                 for roll in damage {
                     if !self.fighters[current_target].alive() {
@@ -1376,9 +1520,11 @@ impl<'a> Fight<'a> {
                         current_target = new_target;
                     }
                     let against = self.fighters[current_target].creature;
-                    let dealt = roll.sample(rng, false, against.reduction(roll.kind));
+                    let dealt =
+                        roll.sample(rng, false, against.reduction_from(roll.kind, attacker));
+                    let dealt = halve_if_suppressed(&self.fighters, me, dealt);
                     self.fighters[me].dealt += i64::from(dealt);
-                    self.fighters[current_target].hp -= dealt;
+                    self.apply_damage(rng, current_target, dealt);
                     if record {
                         notes.push(dealt.to_string());
                     }
@@ -1440,7 +1586,8 @@ impl<'a> Fight<'a> {
                 );
                 let mut debuffed = Vec::new();
                 for i in caught {
-                    let (saved, resisted) = saving_throw(&mut self.fighters, rng, i, *ability, dc);
+                    let (saved, resisted) =
+                        saving_throw(&mut self.fighters, rng, i, *ability, dc, false);
                     if !saved {
                         self.fighters[i].attack_modifiers.push(*attack_modifier);
                         self.fighters[i].save_modifiers.push(*save_modifier);
@@ -1503,6 +1650,12 @@ impl<'a> Fight<'a> {
                     if *once_per_turn && self.fighters[me].once_per_turn_spent {
                         continue;
                     }
+                    let (conditions, advantage) =
+                        self.conditions_against(me, target, &[(*condition, *duration)]);
+                    if conditions.is_empty() {
+                        // Immune: nothing to spend the rider on.
+                        continue;
+                    }
                     if !self.fighters[me].can_pay(*cost) {
                         continue;
                     }
@@ -1512,10 +1665,9 @@ impl<'a> Fight<'a> {
                     }
 
                     let (saved, resisted) =
-                        saving_throw(&mut self.fighters, rng, target, *ability, *dc);
+                        saving_throw(&mut self.fighters, rng, target, *ability, *dc, advantage);
                     if !saved {
-                        self.apply_condition(target, *condition, expiry(me, target, *duration));
-                        landed_conditions.push((target, *condition));
+                        self.land_condition(me, target, *condition, *duration, landed_conditions);
                     }
                     if record {
                         notes.push(format!(
@@ -1533,14 +1685,206 @@ impl<'a> Fight<'a> {
                     condition,
                     duration,
                 } => {
-                    self.apply_condition(target, *condition, expiry(me, target, *duration));
-                    landed_conditions.push((target, *condition));
-                    if record {
-                        notes.push(format!("{} (no save)", condition.name()));
+                    let (conditions, _) =
+                        self.conditions_against(me, target, &[(*condition, *duration)]);
+                    for (condition, duration) in conditions {
+                        self.land_condition(me, target, condition, duration, landed_conditions);
+                        if record {
+                            notes.push(format!("{} (no save)", condition.name()));
+                        }
                     }
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// The Cunning Strike effect [`Fight::extra_damage_plan`] already paid a
+    /// Sneak Attack die for, resolved once the hit has landed: a saving throw
+    /// against the rogue's Cunning Strike DC, through the same save handling
+    /// as every other rider - Legendary Resistance, a condition-immunity
+    /// downgrade and all.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_cunning_strike(
+        &mut self,
+        rng: &mut Rng,
+        me: usize,
+        target: usize,
+        choice: Cunning,
+        record: bool,
+        notes: &mut Vec<String>,
+        landed_conditions: &mut Vec<(usize, Condition)>,
+    ) {
+        if !self.fighters[target].alive() {
+            return;
+        }
+        let (ability, dc, condition, duration) = match choice {
+            // 2024 Poison: a Constitution save or Poisoned for a minute,
+            // repeating the save at the end of each of its turns.
+            Cunning::Poison { dc } => (
+                Ability::Con,
+                dc,
+                Condition::Poisoned,
+                Duration::SaveEndTurn {
+                    ability: Ability::Con,
+                    dc,
+                },
+            ),
+            // 2024 Trip: a Dexterity save or Prone, until it stands up on its
+            // own next turn.
+            Cunning::Trip { dc } => (Ability::Dex, dc, Condition::Prone, Duration::VictimTurn),
+        };
+        let (conditions, advantage) = self.conditions_against(me, target, &[(condition, duration)]);
+        if conditions.is_empty() {
+            return;
+        }
+        let (saved, resisted) =
+            saving_throw(&mut self.fighters, rng, target, ability, dc, advantage);
+        if !saved {
+            self.land_condition(me, target, condition, duration, landed_conditions);
+        }
+        if record {
+            notes.push(format!(
+                "cunning strike {} {}",
+                condition.name(),
+                match (saved, resisted) {
+                    (true, true) => "shrugged off (legendary resistance)",
+                    (true, false) => "saved",
+                    _ => "LANDED",
+                }
+            ));
+        }
+    }
+
+    /// Use up the attacker's injury-poison dose, if it has one left, on a
+    /// weapon hit: the forcing save, and on a failure the burden and any
+    /// condition it carries. See [`Rider::InjuryPoison`].
+    fn resolve_injury_poison(
+        &mut self,
+        rng: &mut Rng,
+        me: usize,
+        target: usize,
+        record: bool,
+        notes: &mut Vec<String>,
+        landed_conditions: &mut Vec<(usize, Condition)>,
+    ) {
+        if !self.fighters[target].alive() {
+            return;
+        }
+        let creature = self.fighters[me].creature;
+        let Some(i) = creature.riders.iter().enumerate().position(|(i, r)| {
+            matches!(r, Rider::InjuryPoison { .. }) && self.fighters[me].rider_uses[i] > 0
+        }) else {
+            return;
+        };
+        self.fighters[me].rider_uses[i] -= 1;
+        let rider = &creature.riders[i];
+        let Some((ability, dc, _, _)) = rider.injury_poison() else {
+            return;
+        };
+        let (conditions, advantage) =
+            self.conditions_against(me, target, &rider.injury_poison_conditions());
+        if conditions.is_empty() {
+            return;
+        }
+        let (saved, resisted) =
+            saving_throw(&mut self.fighters, rng, target, ability, dc, advantage);
+        if !saved {
+            for (condition, duration) in &conditions {
+                self.land_condition(me, target, *condition, *duration, landed_conditions);
+            }
+        }
+        if record {
+            notes.push(format!(
+                "injury poison {}",
+                match (saved, resisted) {
+                    (true, true) => "shrugged off (legendary resistance)",
+                    (true, false) => "saved",
+                    _ => "LANDED",
+                }
+            ));
+        }
+    }
+
+    /// Which of `conditions` `applier` can actually give `victim`, and
+    /// whether the save against them is rolled with advantage.
+    ///
+    /// A condition the victim is immune to is dropped - unless the applier
+    /// carries a [`Rider::DowngradeImmunity`] naming it, in which case it
+    /// stays and the victim saves with advantage instead of shrugging it off.
+    fn conditions_against(
+        &self,
+        applier: usize,
+        victim: usize,
+        conditions: &[(Condition, Duration)],
+    ) -> (Vec<(Condition, Duration)>, bool) {
+        let attacker = self.fighters[applier].creature;
+        let target = self.fighters[victim].creature;
+        let mut advantage = false;
+        let kept = conditions
+            .iter()
+            .copied()
+            .filter(|&(c, _)| {
+                if !target.immune_to_condition(c) {
+                    return true;
+                }
+                let downgraded = attacker
+                    .riders
+                    .iter()
+                    .any(|r| r.downgrades_condition_immunity(c));
+                advantage |= downgraded;
+                downgraded
+            })
+            .collect();
+        (kept, advantage)
+    }
+
+    /// Give `victim` a condition `applier` inflicted, and arm any of
+    /// `applier`'s weapon buffs that wait for exactly that condition to land
+    /// on an enemy - see [`Rider::arms_on_condition`].
+    fn land_condition(
+        &mut self,
+        applier: usize,
+        victim: usize,
+        condition: Condition,
+        duration: Duration,
+        landed_conditions: &mut Vec<(usize, Condition)>,
+    ) {
+        let expiry = self.expiry(applier, victim, duration);
+        self.apply_condition(victim, condition, expiry);
+        landed_conditions.push((victim, condition));
+        if self.fighters[applier].side != self.fighters[victim].side {
+            let creature = self.fighters[applier].creature;
+            for (i, rider) in creature.riders.iter().enumerate() {
+                if rider.arms_on_condition(condition) {
+                    self.fighters[applier].armed[i] = true;
+                }
+            }
+        }
+    }
+
+    /// How a just-applied condition ends, once `duration` is pinned to the
+    /// specific applier and victim that made it real.
+    fn expiry(&self, applier: usize, victim: usize, duration: Duration) -> Expiry {
+        match duration {
+            Duration::ApplierTurn => Expiry::TurnStart(applier),
+            Duration::VictimTurn => Expiry::TurnStart(victim),
+            // Applied on the applier's own turn, "the end of your next turn"
+            // is the second turn end from now; applied at any other moment,
+            // the first.
+            Duration::ApplierNextTurnEnd => Expiry::TurnEnd {
+                who: applier,
+                ends_left: if self.acting == Some(applier) { 2 } else { 1 },
+            },
+            Duration::Rounds(n) => Expiry::Rounds {
+                who: applier,
+                left: n.max(1),
+            },
+            Duration::SaveEndTurn { ability, dc } => Expiry::SaveEachTurn {
+                victim,
+                ability,
+                dc,
+            },
         }
     }
 
@@ -1555,39 +1899,355 @@ impl<'a> Fight<'a> {
         }
     }
 
-    /// As [`attack_mode`], but also consumes [`Condition::Marked`] on
-    /// `target` if it carries one.
-    ///
-    /// The mark is used up by "the next attack roll made against this
-    /// target", not only a hit, so it has to be cleared here - the instant
-    /// it has been read into this roll's mode - rather than waiting for a
-    /// turn boundary the way every other condition's [`Expiry`] does.
-    ///
-    /// [`Effect::Strikes`] computes one roll mode per resolution and reuses
-    /// it across however many strikes a multiattack makes (see its loop
-    /// below), so a multiattack consumes the mark on its first swing and the
-    /// rest roll without it - the same one-shot-per-resolution
-    /// simplification the once-per-turn rider budget already makes.
-    fn attack_mode_consuming_mark(
+    /// As [`attack_mode`], but also uses up the one-shot sources of
+    /// advantage the roll just drew on: [`Condition::Marked`] on `target` -
+    /// "the next attack roll made against this target", hit or miss - and
+    /// Steady Aim on `attacker` - "your next attack roll". Both are cleared
+    /// the instant they have been read into this roll's mode rather than
+    /// waiting for a turn boundary the way every other condition's
+    /// [`Expiry`] does.
+    fn attack_mode_consuming(
         &mut self,
         base: RollMode,
         attacker: usize,
         target: usize,
     ) -> RollMode {
-        let mode = attack_mode(base, &self.fighters[attacker], &self.fighters[target]);
+        let mode = attack_mode(
+            base,
+            &self.fighters[attacker],
+            &self.fighters[target],
+            false,
+        );
         self.fighters[target]
             .conditions
             .retain(|&(c, _)| c != Condition::Marked);
+        self.fighters[attacker]
+            .conditions
+            .retain(|&(c, _)| !c.advantage_on_attacks());
         mode
     }
 
+    /// The extra damage one attack roll from `me` against `target` carries,
+    /// rolled in `mode` - worked out before the roll, because Cunning
+    /// Strike's dice come off Sneak Attack before anything is rolled:
+    ///
+    /// - bonus dice against the target's creature type, from the attacker
+    ///   itself or from this move's own weapon
+    ///   ([`Rider::BonusDamageVsCreatureType`]);
+    /// - a weapon buff an earlier condition armed
+    ///   ([`Rider::ConditionTriggeredWeaponDamage`]), on a weapon attack;
+    /// - Sneak Attack ([`Rider::ConditionalExtraDamage`]), if `allow_sneak`,
+    ///   its once-per-turn budget is unspent, and the roll qualifies: a
+    ///   finesse or ranged weapon (or a spell attack, for a creature carrying
+    ///   [`Rider::ExtraDamageAppliesToSpellAttacks`]), not at disadvantage,
+    ///   with advantage or an ally next to the target
+    ///   ([`Fight::ally_adjacent`]). Its dice take the triggering strike's
+    ///   own damage type - the weapon's, or the spell's.
+    ///
+    /// Pure, so the same plan a live attack rolls is the one a policy scores.
+    fn extra_damage_plan(
+        &self,
+        me: usize,
+        target: usize,
+        strike: &Strike,
+        move_riders: &[Rider],
+        mode: RollMode,
+        allow_sneak: bool,
+    ) -> ExtraPlan {
+        let attacker = &self.fighters[me];
+        let creature = attacker.creature;
+        let victim = self.fighters[target].creature;
+        let own_kind = strike.primary_kind().unwrap_or(DamageKind::Force);
+        let mut plan = ExtraPlan::default();
+
+        for rider in creature.riders.iter().chain(move_riders) {
+            if let (Some(r), Rider::BonusDamageVsCreatureType { damage_kind, .. }) = (
+                rider.bonus_damage_vs_creature_type(victim.creature_type),
+                rider,
+            ) {
+                plan.rolls.push(DamageRoll::new(
+                    r.dice_count,
+                    r.dice_sides,
+                    r.bonus,
+                    *damage_kind,
+                ));
+            }
+        }
+
+        if strike.kind.weapon {
+            for (i, rider) in creature.riders.iter().enumerate() {
+                if let (Some(r), Rider::ConditionTriggeredWeaponDamage { damage_kind, .. }) =
+                    (rider.weapon_damage_if_armed(attacker.armed[i]), rider)
+                {
+                    plan.rolls.push(DamageRoll::new(
+                        r.dice_count,
+                        r.dice_sides,
+                        r.bonus,
+                        *damage_kind,
+                    ));
+                }
+            }
+        }
+
+        if allow_sneak {
+            let extended = creature.extra_damage_applies_to_spell_attacks();
+            let adjacent = self.ally_adjacent(me, target);
+            if let Some(pool) = creature.riders.iter().find_map(|r| {
+                r.extra_damage_for_strike(
+                    strike.kind,
+                    strike.primary_kind(),
+                    mode,
+                    adjacent,
+                    attacker.sneak_attack_spent,
+                    extended,
+                )
+            }) {
+                let mut dice = pool.dice_count;
+                plan.cunning = self.cunning_strike_choice(me, target, strike, dice);
+                if plan.cunning.is_some() {
+                    dice -= 1;
+                }
+                plan.rolls.push(DamageRoll::new(
+                    dice,
+                    pool.dice_sides,
+                    pool.bonus,
+                    pool.kind.unwrap_or(own_kind),
+                ));
+                plan.sneak_attack = true;
+            }
+        }
+        plan
+    }
+
+    /// What a rogue with Cunning Strike spends a Sneak Attack die on, if
+    /// anything - one effect per hit, as at 5th level.
+    ///
+    /// Poison whenever the target is not already Poisoned and can be:
+    /// disadvantage on every attack roll it makes is worth far more than one
+    /// die of damage against anything that attacks. Otherwise Trip, for a
+    /// melee attacker whose target is Large or smaller and still standing -
+    /// never a ranged one, for whom a Prone target is harder to hit, not
+    /// easier. Never Withdraw: there is no movement here for it to buy.
+    fn cunning_strike_choice(
+        &self,
+        me: usize,
+        target: usize,
+        strike: &Strike,
+        dice: u32,
+    ) -> Option<Cunning> {
+        let creature = self.fighters[me].creature;
+        let dc = creature.riders.iter().find_map(Rider::cunning_strike_dc)?;
+        if dice == 0 {
+            return None;
+        }
+        let victim = &self.fighters[target];
+        let can_take = |c: Condition| {
+            !victim.creature.immune_to_condition(c)
+                || creature
+                    .riders
+                    .iter()
+                    .any(|r| r.downgrades_condition_immunity(c))
+        };
+        if !victim.has(|c| c == Condition::Poisoned) && can_take(Condition::Poisoned) {
+            return Some(Cunning::Poison { dc });
+        }
+        let knows_trip = creature
+            .riders
+            .iter()
+            .any(|r| matches!(r, Rider::CunningStrikeTrip));
+        if knows_trip
+            && !strike.kind.ranged
+            && victim.creature.size <= Size::Large
+            && !victim.has(|c| c == Condition::Prone)
+            && can_take(Condition::Prone)
+        {
+            return Some(Cunning::Trip { dc });
+        }
+        None
+    }
+
+    /// Is an ally of `me` within 5 feet of `target`, for Sneak Attack?
+    ///
+    /// There is no positioning here, so this is read off who is fighting
+    /// what: another creature on `me`'s side, alive and not Incapacitated,
+    /// that fights in melee ([`fights_in_melee`]) and is going after this
+    /// same target ([`Fight::pick_target`]). A party's archers never count
+    /// for each other; its front line counts for everyone.
+    fn ally_adjacent(&self, me: usize, target: usize) -> bool {
+        let side = self.fighters[me].side;
+        self.fighters.iter().enumerate().any(|(i, f)| {
+            i != me
+                && f.side == side
+                && f.alive()
+                && !f.incapacitated()
+                && f.melee
+                && self.pick_target(i) == Some(target)
+        })
+    }
+
+    /// Who on `me`'s side a heal goes to: a downed ally that can still be
+    /// brought back first, otherwise whoever alive is missing the most hit
+    /// points - `me` itself when nobody is hurt.
+    fn heal_target(&self, me: usize) -> usize {
+        let side = self.fighters[me].side;
+        let allies = || (0..self.fighters.len()).filter(move |&i| self.fighters[i].side == side);
+        if let Some(i) = allies().find(|&i| self.fighters[i].can_revive()) {
+            return i;
+        }
+        let missing = |i: usize| self.fighters[i].creature.hp - self.fighters[i].hp;
+        allies()
+            .filter(|&i| self.fighters[i].alive())
+            .fold(None, |best: Option<usize>, i| match best {
+                Some(b) if missing(b) >= missing(i) => Some(b),
+                _ => Some(i),
+            })
+            .unwrap_or(me)
+    }
+
+    /// What `m` is worth to `me` against `target` right now, in expected hit
+    /// points: the damage it deals - every damage rider the attack would
+    /// actually carry included, so Sneak Attack and a slaying weapon's dice
+    /// count towards choosing the move that earns them - or, for a heal, the
+    /// downed ally it would bring back. `steady` scores an attack as though
+    /// the attacker had advantage on it.
+    fn move_value(&self, me: usize, target: usize, m: &Move, steady: bool) -> f64 {
+        self.effect_value(me, target, &m.effect, &m.riders, steady)
+    }
+
+    fn effect_value(
+        &self,
+        me: usize,
+        target: usize,
+        effect: &Effect,
+        riders: &[Rider],
+        steady: bool,
+    ) -> f64 {
+        match effect {
+            Effect::Strikes { strike, count } => {
+                self.expected_strikes(me, target, strike, *count, riders, steady)
+            }
+            Effect::Heal(roll) => self.heal_value(me, roll),
+            Effect::Sequence(parts) => parts
+                .iter()
+                .map(|p| self.effect_value(me, target, p, riders, steady))
+                .sum(),
+            // A save only some creature types are subject to, against a
+            // target that is not one: it catches nobody.
+            Effect::Save(save)
+                if save
+                    .requires_type
+                    .as_ref()
+                    .is_some_and(|t| !self.fighters[target].creature.is_creature_type(t)) =>
+            {
+                f64::NEG_INFINITY
+            }
+            other => other.mean_damage(self.fighters[target].creature),
+        }
+    }
+
+    /// A bonus action's worth, given the action this turn already leads
+    /// with: its own value, or - for one that sets that action up
+    /// ([`Move::before_action`] with a stance granting advantage on the
+    /// attacker's own roll, Steady Aim) - exactly what the advantage adds to
+    /// it.
+    ///
+    /// Two things the action already settles are worth nothing again: a
+    /// second spell slot this turn (the action spent the one allowed), and a
+    /// second heal for the same downed ally the action is already bringing
+    /// back.
+    fn bonus_value(&self, me: usize, target: usize, m: &Move, lead: Option<&Move>) -> f64 {
+        if let Some(a) = lead {
+            let second_slot = a.spell_slot_level.is_some() && m.spell_slot_level.is_some();
+            let second_heal =
+                matches!(a.effect, Effect::Heal(_)) && matches!(m.effect, Effect::Heal(_));
+            if second_slot || second_heal {
+                return f64::NEG_INFINITY;
+            }
+        }
+        let sets_up = m.before_action
+            && m.effect
+                .stance()
+                .is_some_and(Condition::advantage_on_attacks);
+        if !sets_up {
+            return self.move_value(me, target, m, false);
+        }
+        lead.map_or(0.0, |a| {
+            self.move_value(me, target, a, true) - self.move_value(me, target, a, false)
+        })
+    }
+
+    /// Expected damage of `count` strikes, the first with every rider that
+    /// would apply to it; later swings without the once-per-turn Sneak
+    /// Attack the first one would already have claimed.
+    fn expected_strikes(
+        &self,
+        me: usize,
+        target: usize,
+        strike: &Strike,
+        count: u32,
+        riders: &[Rider],
+        steady: bool,
+    ) -> f64 {
+        let attacker = &self.fighters[me];
+        let victim = &self.fighters[target];
+        let mode = attack_mode(strike.mode, attacker, victim, steady);
+        let force_crit = victim.has(Condition::auto_crits);
+        let first = self.extra_damage_plan(me, target, strike, riders, mode, true);
+        let mut total = expected_hit(
+            attacker.creature,
+            victim.creature,
+            strike,
+            mode,
+            force_crit,
+            &attacker.attack_modifiers,
+            &first.rolls,
+        );
+        if count > 1 {
+            let rest = self.extra_damage_plan(me, target, strike, riders, mode, false);
+            total += f64::from(count - 1)
+                * expected_hit(
+                    attacker.creature,
+                    victim.creature,
+                    strike,
+                    mode,
+                    force_crit,
+                    &attacker.attack_modifiers,
+                    &rest.rolls,
+                );
+        }
+        total
+    }
+
+    /// A heal is worth a whole ally back in the fight when one is down - its
+    /// hit point maximum - and nothing otherwise: topping up someone still
+    /// standing is almost never worth a turn in a fight this short.
+    fn heal_value(&self, me: usize, _roll: &HealRoll) -> f64 {
+        let side = self.fighters[me].side;
+        self.fighters
+            .iter()
+            .filter(|f| f.side == side && f.can_revive())
+            .map(|f| f64::from(f.creature.hp))
+            .fold(0.0, f64::max)
+    }
+
     /// Apply damage already run through resistance and reactions, then
-    /// handle what it does to the target's concentration: dropping to 0 HP
-    /// ends it outright (no save offered, same as Incapacitated), and
+    /// handle what it does to the target: dropping to 0 HP ends its
+    /// concentration outright (no save offered, same as Incapacitated), and
     /// surviving damage forces the save that might end it anyway.
+    ///
+    /// Hit points stop at 0. Damage left over past 0 that reaches the
+    /// creature's hit point maximum kills it outright - no healing brings
+    /// that back - while anything less leaves a player character down but
+    /// revivable.
     fn apply_damage(&mut self, rng: &mut Rng, target: usize, dealt: i32) {
-        self.fighters[target].hp -= dealt;
-        if !self.fighters[target].alive() {
+        let f = &mut self.fighters[target];
+        let before = f.hp;
+        f.hp -= dealt;
+        if f.hp <= 0 {
+            if before > 0 && dealt - before >= f.creature.hp {
+                f.dead = true;
+            }
+            f.hp = 0;
             self.end_concentration(target);
         } else if dealt > 0 {
             self.concentration_check(rng, target, dealt);
@@ -1603,7 +2263,8 @@ impl<'a> Fight<'a> {
             return;
         }
         let dc = concentration_dc(damage);
-        let (saved, _resisted) = saving_throw(&mut self.fighters, rng, who, Ability::Con, dc);
+        let (saved, _resisted) =
+            saving_throw(&mut self.fighters, rng, who, Ability::Con, dc, false);
         if !saved {
             self.end_concentration(who);
         }
@@ -1639,18 +2300,80 @@ impl<'a> Fight<'a> {
     }
 }
 
-/// How a just-applied condition ends, once `duration` is pinned to the
-/// specific applier and victim that made it real.
-fn expiry(applier: usize, victim: usize, duration: Duration) -> Expiry {
-    match duration {
-        Duration::ApplierTurn => Expiry::TurnStart(applier),
-        Duration::VictimTurn => Expiry::TurnStart(victim),
-        Duration::SaveEndTurn { ability, dc } => Expiry::SaveEachTurn {
-            victim,
-            ability,
-            dc,
-        },
+/// The extra damage and side effects one attack roll will carry - see
+/// [`Fight::extra_damage_plan`].
+#[derive(Debug, Clone, Default)]
+struct ExtraPlan {
+    rolls: Vec<DamageRoll>,
+    /// Sneak Attack qualified, so a hit spends its once-per-turn budget.
+    sneak_attack: bool,
+    /// The Cunning Strike effect a Sneak Attack die was spent on.
+    cunning: Option<Cunning>,
+}
+
+/// A Cunning Strike effect, at the rogue's Cunning Strike DC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cunning {
+    Poison { dc: i32 },
+    Trip { dc: i32 },
+}
+
+/// How a reaction answered a hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    /// [`Rider::ReduceDamage`], and by how much.
+    Deflected(i32),
+    /// [`Rider::HalveAttackDamage`].
+    Halved,
+}
+
+/// Does `creature` fight in melee? Read off its first action that makes an
+/// attack roll - the one its declaration order says it leads with, the
+/// in-order policy's own reading.
+fn fights_in_melee(creature: &Creature) -> bool {
+    creature
+        .actions
+        .iter()
+        .find_map(|m| first_strike(&m.effect))
+        .is_some_and(|s| !s.kind.ranged)
+}
+
+fn first_strike(effect: &Effect) -> Option<&Strike> {
+    match effect {
+        Effect::Strikes { strike, .. } => Some(strike),
+        Effect::Sequence(parts) => parts.iter().find_map(first_strike),
+        _ => None,
     }
+}
+
+/// Expected damage of one attack roll in `mode`, with `extra` riding on a
+/// hit: the probability of each outcome times the mean of each damage
+/// component, reduced the way `target` reduces it against `attacker`. A
+/// `force_crit` target turns every hit into a critical one.
+fn expected_hit(
+    attacker: &Creature,
+    target: &Creature,
+    strike: &Strike,
+    mode: RollMode,
+    force_crit: bool,
+    modifiers: &[AttackModifier],
+    extra: &[DamageRoll],
+) -> f64 {
+    let o = hit_outcomes_with(strike.to_hit, mode, target.ac, modifiers);
+    let landed = |crit: bool| -> f64 {
+        strike
+            .damage
+            .iter()
+            .chain(extra)
+            .map(|r| r.pmf(crit, target.reduction_from(r.kind, attacker)).mean())
+            .sum()
+    };
+    let (hit, crit) = if force_crit {
+        (0.0, o.hit + o.crit)
+    } else {
+        (o.hit, o.crit)
+    };
+    hit * landed(false) + crit * landed(true)
 }
 
 /// Which of the three move lists is being read. Exists so the borrow of a list
@@ -1701,18 +2424,14 @@ fn refresh(f: &mut Fighter<'_>, rng: &mut Rng) {
     }
     f.legendary_left = creature.legendary_uses;
     f.once_per_turn_spent = false;
-    for (uses, rider) in f.rider_uses.iter_mut().zip(&creature.riders) {
-        match rider {
-            Rider::ReduceDamage { per_round, .. } | Rider::ReactionOnTargeted { per_round, .. } => {
-                *uses = *per_round;
-            }
-            _ => {}
-        }
-    }
+    f.reaction = true;
+    f.slot_spent_this_turn = false;
 }
 
 impl Policy {
-    /// Index of the chosen move, or `None` if nothing is available.
+    /// Index of the chosen move, or `None` if nothing is available. `value`
+    /// is what a move is worth right now - [`Fight::move_value`] - which the
+    /// ranking policies compare.
     ///
     /// Ties go to the earlier move, so the choice is a function of the scenario
     /// file and not of floating-point noise.
@@ -1721,7 +2440,7 @@ impl Policy {
         moves: &[Move],
         states: &[MoveState],
         f: &Fighter<'_>,
-        target: &Creature,
+        value: impl Fn(&Move) -> f64,
     ) -> Option<usize> {
         let bloodied = f.bloodied();
         let mut best: Option<(usize, (f64, f64))> = None;
@@ -1729,8 +2448,7 @@ impl Policy {
             if !state.available()
                 || !f.can_pay(m.cost)
                 || !f.can_cast(m.spell_slot_level)
-                || !f.can_cast(m.spell_level)
-                || !f.move_allowed(m.kind)
+                || !f.move_allowed(m)
             {
                 continue;
             }
@@ -1739,10 +2457,16 @@ impl Policy {
             if !m.is_free() && !f.will_spend() {
                 continue;
             }
+            // A move that cannot do anything here - aimed at a creature type
+            // the target is not, a second slot this turn - is not a choice.
+            let v = value(m);
+            if v == f64::NEG_INFINITY {
+                continue;
+            }
             if self == Policy::InOrder {
                 return Some(i);
             }
-            let rank = self.rank(m, target, bloodied);
+            let rank = self.rank(m, v, bloodied);
             if best.is_none_or(|(_, b)| rank.0 > b.0 || (rank.0 == b.0 && rank.1 > b.1)) {
                 best = Some((i, rank));
             }
@@ -1758,14 +2482,20 @@ impl Policy {
     ///
     /// `FocusFire` and `Scattered` land in the same arm as `Greedy`: they are
     /// rules about *which target*, which is [`Fight::pick_target`]'s job.
-    fn rank(self, m: &Move, target: &Creature, bloodied: bool) -> (f64, f64) {
-        let damage = m.effect.mean_damage(target);
+    fn rank(self, m: &Move, value: f64, bloodied: bool) -> (f64, f64) {
         match self {
-            Policy::Nova => (f64::from(spend_weight(m)), damage),
-            // Once things are going badly a stance beats any amount of damage,
-            // and before that it is worth nothing.
-            Policy::Defensive if bloodied && m.effect.stance().is_some() => (f64::INFINITY, 0.0),
-            _ => (damage, 0.0),
+            Policy::Nova => (f64::from(spend_weight(m)), value),
+            // Once things are going badly a defensive stance beats any amount
+            // of damage, and before that it is worth nothing.
+            Policy::Defensive
+                if bloodied
+                    && m.effect
+                        .stance()
+                        .is_some_and(Condition::disadvantage_to_attackers) =>
+            {
+                (f64::INFINITY, 0.0)
+            }
+            _ => (value, 0.0),
         }
     }
 }
@@ -1778,13 +2508,18 @@ fn spend_weight(m: &Move) -> u32 {
     m.cost.map_or(0, |c| c.amount)
         + u32::from(!matches!(m.uses, Uses::Unlimited))
         + m.spell_slot_level.unwrap_or(0)
-        + m.spell_level.unwrap_or(0)
 }
 
 /// The 5e stacking rule: any advantage and any disadvantage cancel to a flat
-/// roll, however many of each there are.
-fn attack_mode(base: RollMode, attacker: &Fighter<'_>, target: &Fighter<'_>) -> RollMode {
-    let mut advantage = base == RollMode::Advantage;
+/// roll, however many of each there are. `steady` adds one more source of
+/// advantage - a policy asking what Steady Aim would be worth.
+fn attack_mode(
+    base: RollMode,
+    attacker: &Fighter<'_>,
+    target: &Fighter<'_>,
+    steady: bool,
+) -> RollMode {
+    let mut advantage = base == RollMode::Advantage || steady;
     let mut disadvantage = base == RollMode::Disadvantage;
     for &(c, _) in &target.conditions {
         advantage |= c.advantage_to_attackers();
@@ -1803,43 +2538,38 @@ fn attack_mode(base: RollMode, attacker: &Fighter<'_>, target: &Fighter<'_>) -> 
 }
 
 /// The same stacking rule [`attack_mode`] applies to attack rolls, applied
-/// here to a creature's own saving throws: any source of disadvantage
-/// composes with any other rather than overriding it, so a second condition
-/// that also touches this creature's saves is additive with this one, not a
-/// replacement for it. Nothing yet grants advantage on a save to cancel
-/// against, but the shape is written the same way regardless, for when
-/// something does.
-fn save_mode(f: &Fighter<'_>) -> RollMode {
-    let mut disadvantage = false;
-    for &(c, _) in &f.conditions {
-        disadvantage |= c.disadvantage_on_saves();
-    }
-    if disadvantage {
-        RollMode::Disadvantage
-    } else {
-        RollMode::Normal
+/// here to a creature's own `ability` saving throw: any source of
+/// disadvantage (Suppressed, an injury poison's burden) and any source of
+/// advantage (a save against a condition it is immune to, downgraded) cancel
+/// rather than override one another.
+fn save_mode(f: &Fighter<'_>, ability: Ability, advantage: bool) -> RollMode {
+    let disadvantage = f.has(|c| c.disadvantage_on_save(ability));
+    match (advantage, disadvantage) {
+        (true, false) => RollMode::Advantage,
+        (false, true) => RollMode::Disadvantage,
+        _ => RollMode::Normal,
     }
 }
 
-/// Roll a saving throw, letting conditions force a failure or disadvantage
-/// the roll, and [`Rider::AlwaysSucceed`] buy one back.
+/// Roll a saving throw, letting conditions force a failure or change the
+/// roll's mode, and [`Rider::AlwaysSucceed`] buy one back. `advantage` is a
+/// source of advantage the caller knows about and the fighter's conditions
+/// do not - see [`Fight::conditions_against`].
 fn saving_throw(
     fighters: &mut [Fighter<'_>],
     rng: &mut Rng,
     who: usize,
     ability: crate::rules::creature::Ability,
     dc: i32,
+    advantage: bool,
 ) -> (bool, bool) {
     let f = &fighters[who];
     let auto_fail = f.has(|c| c.auto_fails(ability));
     // `save_modifiers` covers every saving throw `who` makes, this one
     // included - so a blessed creature's own concentration check picks up
     // its `+1d4` the same way any other save does, with no special case
-    // needed here for that being "the same creature". `save_mode` folds in
-    // any condition (Suppressed) that forces the roll itself to
-    // disadvantage, composing with the modifier list rather than
-    // overriding it.
-    let mode = save_mode(f);
+    // needed here for that being "the same creature".
+    let mode = save_mode(f, ability, advantage);
     let bonus = sample_save_modifier_bonus(rng, &f.save_modifiers);
     let rolled = !auto_fail && mode.roll(rng) + f.creature.save(ability) + bonus >= dc;
     if rolled {
@@ -1866,50 +2596,48 @@ fn saving_throw(
     (false, false)
 }
 
-/// The AC bonus [`Rider::ReactionOnTargeted`] offers against an incoming
-/// attack matching `trigger`, and which rider slot it would spend - so the
-/// caller can debit the right per-round counter once it learns whether the
-/// reaction actually fired. `None` when the creature has no such rider for
-/// this trigger, or its reaction is already spent this round.
-fn ac_boost_reaction(f: &Fighter<'_>, trigger: AttackTrigger) -> Option<(usize, i32)> {
-    f.creature.riders.iter().enumerate().find_map(|(i, rider)| {
-        let Rider::ReactionOnTargeted {
-            trigger: t,
-            ac_bonus,
-            ..
-        } = rider
-        else {
-            return None;
-        };
-        if *t != trigger || f.rider_uses[i] == 0 {
-            return None;
-        }
-        Some((i, *ac_bonus))
+/// The AC bonus a [`Rider::ReactionOnTargeted`] offers against an incoming
+/// attack of `kind`, if this creature has one that answers it and a reaction
+/// left to spend on it - never while Incapacitated.
+fn ac_boost_reaction(f: &Fighter<'_>, kind: AttackKind) -> Option<i32> {
+    if !f.reaction || f.incapacitated() {
+        return None;
+    }
+    f.creature.riders.iter().find_map(|rider| match rider {
+        Rider::ReactionOnTargeted { trigger, ac_bonus } if trigger.answers(kind) => Some(*ac_bonus),
+        _ => None,
     })
 }
 
-/// Spend a reaction to cut an incoming attack's damage, if anything can.
-fn reduce_incoming(
+/// Spend this creature's reaction to cut an incoming hit's damage, if it has
+/// one left and a rider that answers this hit - the first in declaration
+/// order: [`Rider::ReduceDamage`] against the damage types it names, or
+/// [`Rider::HalveAttackDamage`] against anything.
+fn react_to_hit(
     rng: &mut Rng,
     f: &mut Fighter<'_>,
-    strike: &crate::rules::creature::Strike,
+    strike: &Strike,
     damage: i32,
-) -> (i32, i32) {
-    if damage <= 0 {
-        return (damage, 0);
+) -> (i32, Option<Answer>) {
+    if damage <= 0 || !f.reaction || f.incapacitated() {
+        return (damage, None);
     }
     let creature = f.creature;
-    for (i, rider) in creature.riders.iter().enumerate() {
-        if let Rider::ReduceDamage { kinds, roll, .. } = rider {
-            if f.rider_uses[i] == 0 || !strike.deals_any(kinds) {
-                continue;
+    for rider in &creature.riders {
+        match rider {
+            Rider::ReduceDamage { kinds, roll } if strike.deals_any(kinds) => {
+                f.reaction = false;
+                let cut = roll.sample_raw(rng).min(damage);
+                return (damage - cut, Some(Answer::Deflected(cut)));
             }
-            f.rider_uses[i] -= 1;
-            let cut = roll.sample_raw(rng).min(damage);
-            return (damage - cut, cut);
+            Rider::HalveAttackDamage => {
+                f.reaction = false;
+                return (damage / 2, Some(Answer::Halved));
+            }
+            _ => {}
         }
     }
-    (damage, 0)
+    (damage, None)
 }
 
 /// This creature's own outgoing damage, halved if
@@ -1951,6 +2679,27 @@ fn value(o: &Outcome, side: Side, max_hp: [i32; 2]) -> f64 {
         _ => 0.0,
     };
     outcome + margin - LAMBDA * f64::from(o.resources_spent[me])
+}
+
+/// What `m` is worth when `attacker` uses it on `target` at the start of a
+/// fight, in expected damage - the number the ranking policies compare, with
+/// every rider that would apply to the attack included (a slaying weapon's
+/// dice, say) and none that needs a situation the fight has not produced yet
+/// (Sneak Attack without advantage or an ally beside the target).
+pub fn expected_damage(attacker: &Creature, m: &Move, target: &Creature) -> f64 {
+    let fight = Fight {
+        fighters: vec![
+            Fighter::new(attacker, Side::A, Policy::Greedy, 0),
+            Fighter::new(target, Side::B, Policy::Greedy, 1),
+        ],
+        order: vec![0, 1],
+        turns_lost: [0; 2],
+        max_rounds: 1,
+        budget: Budget::default(),
+        rollout_plan: None,
+        acting: None,
+    };
+    fight.move_value(0, 1, m, false)
 }
 
 /// Resolve a single one-against-one fight.
@@ -2006,7 +2755,7 @@ mod tests {
     use super::*;
     use crate::rules::combat::{save_success_chance, Reduction};
     use crate::rules::creature::{
-        Ability, DamageKind, DamageRoll, HealRoll, MoveKind, Resource, SaveEffect,
+        Ability, AttackTrigger, DamageKind, DamageRoll, HealRoll, MoveKind, Resource, SaveEffect,
         SpellCastingProfile, Strike,
     };
 
@@ -2395,7 +3144,6 @@ mod tests {
             c.riders.push(Rider::ReduceDamage {
                 kinds: vec![DamageKind::Slashing],
                 roll: DamageRoll::new(1, 10, 7, DamageKind::Slashing),
-                per_round: 1,
             });
             c
         };
@@ -2454,7 +3202,6 @@ mod tests {
                 // Large enough that, whenever the reaction fires, it always
                 // succeeds in turning the hit into a miss.
                 ac_bonus: 100,
-                per_round: 1,
             });
             c
         };
@@ -2487,31 +3234,27 @@ mod tests {
         assert!(with_reaction > base / 4);
     }
 
-    /// The per-round budget in isolation: available at the start, gone the
-    /// instant it is spent, and back only once the creature's turn refreshes
-    /// it - the same lifecycle [`Rider::ReduceDamage`] already has.
+    /// The reaction in isolation: available at the start, gone the instant
+    /// it is spent, and back only once the creature's turn refreshes it.
     #[test]
     fn a_reaction_on_targeted_is_available_once_then_spent_for_the_round() {
         let mut c = Creature::new("defender", 15, 20);
         c.riders.push(Rider::ReactionOnTargeted {
             trigger: AttackTrigger::AnyAttack,
             ac_bonus: 5,
-            per_round: 1,
         });
         let mut f = Fighter::new(&c, Side::A, Policy::Greedy, 0);
 
-        let reaction = ac_boost_reaction(&f, AttackTrigger::AnyAttack);
         assert_eq!(
-            reaction,
-            Some((0, 5)),
+            ac_boost_reaction(&f, AttackKind::MELEE_WEAPON),
+            Some(5),
             "the reaction should be available before anything spends it"
         );
 
         // Spend it exactly the way the strike-resolution loop does.
-        let (i, _) = reaction.unwrap();
-        f.rider_uses[i] -= 1;
+        f.reaction = false;
         assert_eq!(
-            ac_boost_reaction(&f, AttackTrigger::AnyAttack),
+            ac_boost_reaction(&f, AttackKind::MELEE_WEAPON),
             None,
             "spent this round, it must not be offered again"
         );
@@ -2521,10 +3264,30 @@ mod tests {
         let mut rng = Rng::new(1);
         refresh(&mut f, &mut rng);
         assert_eq!(
-            ac_boost_reaction(&f, AttackTrigger::AnyAttack),
-            Some((0, 5)),
+            ac_boost_reaction(&f, AttackKind::MELEE_WEAPON),
+            Some(5),
             "a new turn should refresh the reaction"
         );
+
+        // And nothing is spent while Incapacitated.
+        f.conditions
+            .push((Condition::Stunned, Expiry::TurnStart(0)));
+        assert_eq!(ac_boost_reaction(&f, AttackKind::MELEE_WEAPON), None);
+    }
+
+    /// A reaction limited to ranged weapon attacks answers exactly those:
+    /// not a sword, and not a spell attack from range.
+    #[test]
+    fn a_ranged_weapon_reaction_ignores_melee_and_spell_attacks() {
+        let mut c = Creature::new("defender", 15, 20);
+        c.riders.push(Rider::ReactionOnTargeted {
+            trigger: AttackTrigger::RangedWeaponAttack,
+            ac_bonus: 5,
+        });
+        let f = Fighter::new(&c, Side::A, Policy::Greedy, 0);
+        assert_eq!(ac_boost_reaction(&f, AttackKind::RANGED_WEAPON), Some(5));
+        assert_eq!(ac_boost_reaction(&f, AttackKind::MELEE_WEAPON), None);
+        assert_eq!(ac_boost_reaction(&f, AttackKind::RANGED_SPELL), None);
     }
 
     /// A multiattack throws several attack rolls in one turn, but a reaction
@@ -2549,7 +3312,6 @@ mod tests {
         defender.riders.push(Rider::ReactionOnTargeted {
             trigger: AttackTrigger::AnyAttack,
             ac_bonus: 100,
-            per_round: 1,
         });
 
         let mut rng = Rng::new(3);
@@ -3339,17 +4101,15 @@ mod tests {
         assert!(!fight.fighters[1].has(|c| c == Condition::Poisoned));
     }
 
-    /// `Fight::resolve` is exercised directly rather than through a whole
-    /// `run`: the duel engine has no ally targeting yet (see
-    /// `dsl::plugin::spells`'s module doc), so there is no scenario today
-    /// where a policy actually aims Healing Word or Cure Wounds at a downed
-    /// friendly. This pins the mechanical half - the HP math and the revive -
-    /// so it is right once targeting catches up.
+    /// A heal goes to the healer's own side whoever the turn's target is,
+    /// and a downed player character comes back up.
     #[test]
-    fn heal_effect_revives_a_downed_target() {
+    fn heal_effect_revives_a_downed_ally() {
         let healer = puncher("healer", 10, 20, 5, 2);
-        let downed = puncher("downed", 10, 30, 5, 2);
-        let roster = [(&healer, Side::A), (&downed, Side::B)];
+        let mut downed = puncher("downed", 10, 30, 5, 2);
+        downed.player_character = true;
+        let enemy = puncher("enemy", 10, 30, 5, 2);
+        let roster = [(&healer, Side::A), (&downed, Side::A), (&enemy, Side::B)];
         let mut rng = Rng::new(1);
         let mut fight = Fight::new(
             &mut rng,
@@ -3365,11 +4125,12 @@ mod tests {
         // the revive is deterministic without pinning the roll.
         let heal = Effect::Heal(HealRoll::new(1, 4, 3));
         let mut notes = Vec::new();
+        // Aimed at the enemy (index 2), as every move's target is.
         fight.resolve(
             &heal,
             &mut rng,
             0,
-            1,
+            2,
             &[],
             true,
             &mut notes,
@@ -3378,17 +4139,68 @@ mod tests {
         );
 
         assert!((4..=7).contains(&fight.fighters[1].hp));
+        assert_eq!(fight.fighters[2].hp, 30, "the enemy is never healed");
         assert!(
             notes.iter().any(|n| n.contains("revives")),
             "regaining hp from 0 should revive: {notes:?}"
         );
     }
 
+    /// A monster at 0 is dead, and so is a player character dropped by a
+    /// blow with its hit point maximum left over: no heal brings either
+    /// back.
+    #[test]
+    fn the_dead_are_not_revived() {
+        let healer = puncher("healer", 10, 20, 5, 2);
+        let mut pc = puncher("pc", 10, 30, 5, 2);
+        pc.player_character = true;
+        let monster = puncher("monster", 10, 30, 5, 2);
+        let enemy = puncher("enemy", 10, 30, 5, 2);
+        let roster = [
+            (&healer, Side::A),
+            (&pc, Side::A),
+            (&monster, Side::A),
+            (&enemy, Side::B),
+        ];
+        let mut rng = Rng::new(1);
+        let mut fight = Fight::new(
+            &mut rng,
+            &roster,
+            [Policy::InOrder; 2],
+            1,
+            Budget::default(),
+            &mut None,
+        );
+        // 10 hp left, then a 40-point hit: 30 over, a whole maximum.
+        fight.fighters[1].hp = 10;
+        fight.apply_damage(&mut rng, 1, 40);
+        assert!(fight.fighters[1].dead);
+        fight.fighters[2].hp = 0;
+
+        assert!(!fight.fighters[1].can_revive());
+        assert!(!fight.fighters[2].can_revive(), "a monster dies at 0");
+        let heal = Effect::Heal(HealRoll::new(1, 4, 3));
+        fight.resolve(
+            &heal,
+            &mut rng,
+            0,
+            3,
+            &[],
+            false,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut None,
+        );
+        assert_eq!(fight.fighters[1].hp, 0);
+        assert_eq!(fight.fighters[2].hp, 0);
+    }
+
     #[test]
     fn heal_effect_clamps_at_max_hp_and_does_not_revive_the_merely_wounded() {
         let healer = puncher("healer", 10, 20, 5, 2);
         let wounded = puncher("wounded", 10, 10, 5, 2);
-        let roster = [(&healer, Side::A), (&wounded, Side::B)];
+        let enemy = puncher("enemy", 10, 30, 5, 2);
+        let roster = [(&healer, Side::A), (&wounded, Side::A), (&enemy, Side::B)];
         let mut rng = Rng::new(1);
         let mut fight = Fight::new(
             &mut rng,
@@ -3408,7 +4220,7 @@ mod tests {
             &heal,
             &mut rng,
             0,
-            1,
+            2,
             &[],
             true,
             &mut notes,
@@ -3450,7 +4262,7 @@ mod tests {
             },
         )
         .with_uses(Uses::Limited(1))
-        .with_spell_level(2)
+        .with_spell_slot(2)
     }
 
     /// The repeat: an identical strike, free and unlimited, so once the
@@ -3614,7 +4426,7 @@ mod tests {
             },
         )
         .with_concentration()
-        .with_spell_level(1)
+        .with_spell_slot(1)
     }
 
     fn bane_move() -> Move {
@@ -3628,7 +4440,7 @@ mod tests {
             },
         )
         .with_concentration()
-        .with_spell_level(1)
+        .with_spell_slot(1)
     }
 
     /// Bless buffs up to three creatures on the caster's own side - the
@@ -3982,7 +4794,8 @@ mod tests {
         let n = 100_000;
         let mut successes = 0usize;
         for _ in 0..n {
-            let (saved, _) = saving_throw(&mut fight.fighters, &mut rng, 0, Ability::Con, dc);
+            let (saved, _) =
+                saving_throw(&mut fight.fighters, &mut rng, 0, Ability::Con, dc, false);
             if saved {
                 successes += 1;
             }
@@ -4006,13 +4819,13 @@ mod tests {
         let mut rogue = Fighter::new(&plain, Side::A, Policy::Greedy, 0);
         let target = Fighter::new(&plain, Side::B, Policy::Greedy, 0);
         assert_eq!(
-            attack_mode(RollMode::Normal, &rogue, &target),
+            attack_mode(RollMode::Normal, &rogue, &target, false),
             RollMode::Normal
         );
 
         rogue.add_condition(Condition::SteadyAim, Expiry::TurnStart(0));
         assert_eq!(
-            attack_mode(RollMode::Normal, &rogue, &target),
+            attack_mode(RollMode::Normal, &rogue, &target, false),
             RollMode::Advantage,
             "Steady Aim should grant advantage on the attacker's own roll"
         );
@@ -4021,7 +4834,7 @@ mod tests {
         // the same 5e stacking rule every other pair of conditions follows.
         rogue.add_condition(Condition::Poisoned, Expiry::TurnStart(0));
         assert_eq!(
-            attack_mode(RollMode::Normal, &rogue, &target),
+            attack_mode(RollMode::Normal, &rogue, &target, false),
             RollMode::Normal,
             "advantage and disadvantage from unrelated sources should cancel"
         );
@@ -4037,6 +4850,10 @@ mod tests {
     // only ever gets unit-tested in isolation is exactly the kind that goes
     // unwired by accident.
 
+    fn move_of(kind: MoveKind) -> Move {
+        Move::new("x", Effect::Sequence(Vec::new())).with_kind(kind)
+    }
+
     #[test]
     fn suppressed_blocks_only_spell_and_magic_item_moves() {
         let creature = Creature::new("x", 10, 10);
@@ -4048,7 +4865,7 @@ mod tests {
             MoveKind::Spell,
         ] {
             assert!(
-                fighter.move_allowed(kind),
+                fighter.move_allowed(&move_of(kind)),
                 "{kind:?} should be unblocked with no conditions active"
             );
         }
@@ -4056,37 +4873,61 @@ mod tests {
         fighter
             .conditions
             .push((Condition::Suppressed, Expiry::TurnStart(0)));
-        assert!(fighter.move_allowed(MoveKind::Standard));
-        assert!(fighter.move_allowed(MoveKind::ObjectUse));
+        assert!(fighter.move_allowed(&move_of(MoveKind::Standard)));
+        assert!(fighter.move_allowed(&move_of(MoveKind::ObjectUse)));
         assert!(
-            !fighter.move_allowed(MoveKind::MagicItem),
+            !fighter.move_allowed(&move_of(MoveKind::MagicItem)),
             "a magic item activation must be blocked while suppressed"
         );
         assert!(
-            !fighter.move_allowed(MoveKind::Spell),
+            !fighter.move_allowed(&move_of(MoveKind::Spell)),
             "casting a spell must be blocked while suppressed"
+        );
+        assert!(
+            !fighter.move_allowed(&move_of(MoveKind::Spell).with_bypasses_casting_restrictions()),
+            "casting without components does not get round being unable to cast at all"
         );
 
         // Expiry: once the condition is gone, both are usable again.
         fighter.conditions.clear();
-        assert!(fighter.move_allowed(MoveKind::MagicItem));
-        assert!(fighter.move_allowed(MoveKind::Spell));
+        assert!(fighter.move_allowed(&move_of(MoveKind::MagicItem)));
+        assert!(fighter.move_allowed(&move_of(MoveKind::Spell)));
+    }
+
+    /// Silenced stops ordinary casting and nothing else - and a cast made
+    /// without components gets through it.
+    #[test]
+    fn silenced_blocks_spells_unless_cast_without_components() {
+        let creature = Creature::new("x", 10, 10);
+        let mut fighter = Fighter::new(&creature, Side::A, Policy::Greedy, 0);
+        fighter
+            .conditions
+            .push((Condition::Silenced, Expiry::TurnStart(0)));
+        assert!(!fighter.move_allowed(&move_of(MoveKind::Spell)));
+        assert!(
+            fighter.move_allowed(&move_of(MoveKind::Spell).with_bypasses_casting_restrictions())
+        );
+        assert!(fighter.move_allowed(&move_of(MoveKind::MagicItem)));
+        assert!(fighter.move_allowed(&move_of(MoveKind::Standard)));
     }
 
     #[test]
     fn suppressed_grants_disadvantage_on_saves_until_it_expires() {
         let creature = Creature::new("x", 10, 10);
         let mut fighter = Fighter::new(&creature, Side::A, Policy::Greedy, 0);
-        assert_eq!(save_mode(&fighter), RollMode::Normal);
+        assert_eq!(save_mode(&fighter, Ability::Dex, false), RollMode::Normal);
 
         fighter
             .conditions
             .push((Condition::Suppressed, Expiry::TurnStart(0)));
-        assert_eq!(save_mode(&fighter), RollMode::Disadvantage);
+        assert_eq!(
+            save_mode(&fighter, Ability::Dex, false),
+            RollMode::Disadvantage
+        );
 
         fighter.conditions.clear();
         assert_eq!(
-            save_mode(&fighter),
+            save_mode(&fighter, Ability::Dex, false),
             RollMode::Normal,
             "the disadvantage must not outlive the condition"
         );
@@ -4108,10 +4949,10 @@ mod tests {
         let trials = 20_000;
         let (mut fails_plain, mut fails_suppressed) = (0u32, 0u32);
         for _ in 0..trials {
-            if !saving_throw(&mut plain, &mut rng, 0, Ability::Dex, 11).0 {
+            if !saving_throw(&mut plain, &mut rng, 0, Ability::Dex, 11, false).0 {
                 fails_plain += 1;
             }
-            if !saving_throw(&mut suppressed, &mut rng, 0, Ability::Dex, 11).0 {
+            if !saving_throw(&mut suppressed, &mut rng, 0, Ability::Dex, 11, false).0 {
                 fails_suppressed += 1;
             }
         }
@@ -4246,7 +5087,7 @@ mod tests {
 
         // A completely different attacker (index 2, not whoever applied the
         // mark at index 0) still gets Advantage off it.
-        let mode = fight.attack_mode_consuming_mark(RollMode::Normal, 2, 1);
+        let mode = fight.attack_mode_consuming(RollMode::Normal, 2, 1);
         assert_eq!(mode, RollMode::Advantage);
         assert!(
             !fight.fighters[1].has(|c| c == Condition::Marked),
@@ -4254,15 +5095,17 @@ mod tests {
         );
 
         // A further attack against the same target no longer benefits.
-        let mode = fight.attack_mode_consuming_mark(RollMode::Normal, 0, 1);
+        let mode = fight.attack_mode_consuming(RollMode::Normal, 0, 1);
         assert_eq!(mode, RollMode::Normal);
     }
 
     /// If nothing attacks the marked creature first, the mark still goes
-    /// away on its own - at the start of its holder's own next turn, the
-    /// same [`Expiry::TurnStart`] every other condition already clears on.
+    /// away on its own - at the end of the caster's *next* turn
+    /// ([`Duration::ApplierNextTurnEnd`]). Applied during the caster's turn,
+    /// it survives that turn's end and the holder's own turn in between, so
+    /// the caster can still cash it in themselves.
     #[test]
-    fn marked_expires_at_the_start_of_its_holders_own_next_turn_if_never_used() {
+    fn a_mark_lasts_until_the_end_of_the_casters_next_turn_if_never_used() {
         let a = Creature::new("a", 10, 20);
         let b = Creature::new("b", 10, 20);
         let roster = [(&a, Side::A), (&b, Side::B)];
@@ -4277,13 +5120,35 @@ mod tests {
             &mut log,
         );
 
-        fight.apply_condition(1, Condition::Marked, Expiry::TurnStart(1));
+        // Cast on the caster's own turn.
+        fight.acting = Some(0);
+        let mut landed = Vec::new();
+        fight.land_condition(
+            0,
+            1,
+            Condition::Marked,
+            Duration::ApplierNextTurnEnd,
+            &mut landed,
+        );
+        fight.end_of_turn(0);
+        fight.acting = None;
+        assert!(
+            fight.fighters[1].has(|c| c == Condition::Marked),
+            "the mark survives the end of the turn it was cast on"
+        );
+
+        // The holder's own turn in between does not clear it.
+        fight.start_of_turn(1);
+        fight.end_of_turn(1);
         assert!(fight.fighters[1].has(|c| c == Condition::Marked));
 
-        fight.take_turn(1, 1, &mut rng, &mut log, None);
+        // The end of the caster's next turn does.
+        fight.start_of_turn(0);
+        assert!(fight.fighters[1].has(|c| c == Condition::Marked));
+        fight.end_of_turn(0);
         assert!(
             !fight.fighters[1].has(|c| c == Condition::Marked),
-            "an unused mark should clear at the start of its holder's own next turn"
+            "an unused mark should clear at the end of the caster's next turn"
         );
     }
 
@@ -4323,5 +5188,679 @@ mod tests {
 
         assert!(fight.fighters[1].has(|c| c == Condition::Marked));
         assert_eq!(landed_conditions, vec![(1, Condition::Marked)]);
+    }
+
+    // --- Riders in a live fight ------------------------------------------
+    //
+    // Every damage rider, Cunning Strike choice, injury dose, weapon buff and
+    // reaction below existed and was unit-tested as a mechanism before the
+    // fight loop actually used any of them. These pin them to the loop.
+
+    fn fight_of<'a>(roster: &[(&'a Creature, Side)], seed: u64) -> (Fight<'a>, Rng) {
+        let mut rng = Rng::new(seed);
+        let fight = Fight::new(
+            &mut rng,
+            roster,
+            [Policy::Greedy; 2],
+            10,
+            Budget::default(),
+            &mut None,
+        );
+        (fight, rng)
+    }
+
+    /// Resolve `m` from `me` at `target` once, returning the damage done.
+    fn strike_once(
+        fight: &mut Fight<'_>,
+        rng: &mut Rng,
+        me: usize,
+        target: usize,
+        m: &Move,
+    ) -> i32 {
+        let before = fight.fighters[target].hp;
+        fight.resolve(
+            &m.effect,
+            rng,
+            me,
+            target,
+            &m.riders,
+            false,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut None,
+        );
+        before - fight.fighters[target].hp
+    }
+
+    fn sneak_attacker(name: &str) -> Creature {
+        Creature::new(name, 15, 50).with_rider(Rider::ConditionalExtraDamage {
+            dice_count: 3,
+            dice_sides: 6,
+            once_per_turn: true,
+        })
+    }
+
+    fn bow(to_hit: i32, mode: RollMode) -> Move {
+        let mut strike = Strike::new(to_hit, vec![DamageRoll::new(1, 8, 3, DamageKind::Piercing)])
+            .with_kind(AttackKind::RANGED_WEAPON);
+        strike.mode = mode;
+        Move::new("Bow", Effect::Strikes { strike, count: 1 })
+    }
+
+    /// The live attack is the exact model's attack: rolled through the fight
+    /// loop, with Sneak Attack qualifying on advantage and a slaying weapon's
+    /// dice against its favoured prey, the damage done must follow the
+    /// exact distribution of the same strike with the same riders - against
+    /// a target that resists part of it.
+    #[test]
+    fn a_live_attack_with_riders_agrees_with_the_exact_path() {
+        let rogue = sneak_attacker("rogue");
+        let mut dragon = Creature::new("dragon", 16, 100_000)
+            .with_creature_type(crate::rules::creature::CreatureType::Dragon);
+        dragon
+            .reductions
+            .push((DamageKind::Fire, Reduction::Resistant));
+        let mut m = bow(7, RollMode::Advantage);
+        if let Effect::Strikes { strike, .. } = &mut m.effect {
+            strike
+                .damage
+                .push(DamageRoll::new(1, 6, 0, DamageKind::Fire));
+        }
+        m.riders.push(Rider::BonusDamageVsCreatureType {
+            dice_count: 2,
+            dice_sides: 6,
+            bonus: 0,
+            damage_kind: DamageKind::Piercing,
+            creature_type: crate::rules::creature::CreatureType::Dragon,
+        });
+        let roster = [(&rogue, Side::A), (&dragon, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 21);
+
+        let Effect::Strikes { strike, .. } = &m.effect else {
+            unreachable!()
+        };
+        let plan = fight.extra_damage_plan(0, 1, strike, &m.riders, RollMode::Advantage, true);
+        assert!(
+            plan.sneak_attack,
+            "advantage with a ranged weapon qualifies"
+        );
+        assert_eq!(plan.rolls.len(), 2, "the slaying dice and the sneak attack");
+        let exact = strike.damage_pmf_from(&rogue, &dragon, RollMode::Advantage, &[], &plan.rolls);
+
+        let n = 100_000;
+        let (lo, hi) = (exact.min(), exact.max());
+        let mut counts = vec![0usize; (hi - lo + 1) as usize];
+        for _ in 0..n {
+            fight.fighters[1].hp = 100_000;
+            fight.fighters[0].sneak_attack_spent = false;
+            let d = strike_once(&mut fight, &mut rng, 0, 1, &m);
+            counts[(d - lo) as usize] += 1;
+        }
+        for (i, &c) in counts.iter().enumerate() {
+            let value = lo + i as i32;
+            let want = exact.prob(value);
+            let got = c as f64 / n as f64;
+            let tol = 5.0 * (want * (1.0 - want) / n as f64).sqrt() + 1e-4;
+            assert!(
+                (got - want).abs() < tol,
+                "P(damage = {value}) sampled {got:.5}, exact {want:.5}, tol {tol:.5}"
+            );
+        }
+    }
+
+    /// Sneak Attack's gate, live: advantage qualifies; a plain roll with no
+    /// ally beside the target does not; a melee ally engaging the same
+    /// target does; a ranged ally does not; disadvantage overrides an ally.
+    #[test]
+    fn sneak_attack_qualifies_live_on_advantage_or_a_melee_ally() {
+        let rogue = sneak_attacker("rogue");
+        let target = Creature::new("target", 10, 1_000);
+        let brawler = puncher("brawler", 10, 50, 5, 2);
+        let archer = sneak_attacker("archer").with_action(bow(5, RollMode::Normal));
+        let normal = bow(5, RollMode::Normal);
+        let Effect::Strikes { strike, .. } = &normal.effect else {
+            unreachable!()
+        };
+
+        let alone = [(&rogue, Side::A), (&target, Side::B)];
+        let (fight, _) = fight_of(&alone, 1);
+        assert!(
+            !fight
+                .extra_damage_plan(0, 1, strike, &[], RollMode::Normal, true)
+                .sneak_attack
+        );
+        assert!(
+            fight
+                .extra_damage_plan(0, 1, strike, &[], RollMode::Advantage, true)
+                .sneak_attack
+        );
+
+        let with_brawler = [(&rogue, Side::A), (&target, Side::B), (&brawler, Side::A)];
+        let (mut fight, _) = fight_of(&with_brawler, 1);
+        assert!(fight.ally_adjacent(0, 1));
+        assert!(
+            fight
+                .extra_damage_plan(0, 1, strike, &[], RollMode::Normal, true)
+                .sneak_attack
+        );
+        assert!(
+            !fight
+                .extra_damage_plan(0, 1, strike, &[], RollMode::Disadvantage, true)
+                .sneak_attack,
+            "disadvantage overrides an adjacent ally"
+        );
+        fight.fighters[2]
+            .conditions
+            .push((Condition::Stunned, Expiry::TurnStart(2)));
+        assert!(
+            !fight.ally_adjacent(0, 1),
+            "an incapacitated ally does not count"
+        );
+
+        let with_archer = [(&rogue, Side::A), (&target, Side::B), (&archer, Side::A)];
+        let (fight, _) = fight_of(&with_archer, 1);
+        assert!(
+            !fight.ally_adjacent(0, 1),
+            "an archer is not beside the target"
+        );
+    }
+
+    /// Once per turn: a second qualifying hit in the same turn gets no
+    /// extra dice, and the budget comes back when the next turn starts.
+    #[test]
+    fn sneak_attack_is_spent_once_per_turn_live() {
+        let rogue = sneak_attacker("rogue");
+        let target = Creature::new("target", 1, 1_000);
+        let roster = [(&rogue, Side::A), (&target, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 3);
+        // +30 against AC 1: a miss only on a natural 1.
+        let m = bow(30, RollMode::Advantage);
+        let Effect::Strikes { strike, .. } = &m.effect else {
+            unreachable!()
+        };
+
+        let mut first = 0;
+        while first == 0 {
+            first = strike_once(&mut fight, &mut rng, 0, 1, &m);
+        }
+        assert!(fight.fighters[0].sneak_attack_spent);
+        assert!(
+            !fight
+                .extra_damage_plan(0, 1, strike, &[], RollMode::Advantage, true)
+                .sneak_attack
+        );
+        fight.start_of_turn(1);
+        assert!(
+            !fight.fighters[0].sneak_attack_spent,
+            "back on the next turn"
+        );
+    }
+
+    /// A weapon's own bonus against a creature type rides only that weapon,
+    /// and only against that type.
+    #[test]
+    fn a_weapons_bonus_vs_creature_type_applies_only_to_its_prey() {
+        let archer = Creature::new("archer", 15, 50);
+        let dragon = Creature::new("dragon", 10, 1_000)
+            .with_creature_type(crate::rules::creature::CreatureType::Dragon);
+        let giant = Creature::new("giant", 10, 1_000)
+            .with_creature_type(crate::rules::creature::CreatureType::Giant);
+        let mut slayer = bow(5, RollMode::Normal);
+        slayer.riders.push(Rider::BonusDamageVsCreatureType {
+            dice_count: 3,
+            dice_sides: 6,
+            bonus: 0,
+            damage_kind: DamageKind::Piercing,
+            creature_type: crate::rules::creature::CreatureType::Dragon,
+        });
+        let Effect::Strikes { strike, .. } = &slayer.effect else {
+            unreachable!()
+        };
+        let roster = [(&archer, Side::A), (&dragon, Side::B), (&giant, Side::B)];
+        let (fight, _) = fight_of(&roster, 1);
+        let vs_dragon =
+            fight.extra_damage_plan(0, 1, strike, &slayer.riders, RollMode::Normal, true);
+        let vs_giant =
+            fight.extra_damage_plan(0, 2, strike, &slayer.riders, RollMode::Normal, true);
+        assert_eq!(
+            vs_dragon.rolls,
+            vec![DamageRoll::new(3, 6, 0, DamageKind::Piercing)]
+        );
+        assert!(vs_giant.rolls.is_empty());
+    }
+
+    fn cunning_rogue() -> Creature {
+        sneak_attacker("rogue")
+            .with_rider(Rider::CunningStrike { dc: 99 })
+            .with_rider(Rider::CunningStrikeTrip)
+    }
+
+    /// Cunning Strike, live: a die comes off Sneak Attack for Poison while
+    /// the target is not yet poisoned, the save is forced (and failed, at DC
+    /// 99), and once it is poisoned the rogue goes back to full damage - or
+    /// trips a small enough target in melee.
+    #[test]
+    fn cunning_strike_spends_a_die_on_poison_then_on_trip_in_melee() {
+        let rogue = cunning_rogue();
+        let target = Creature::new("target", 1, 1_000);
+        let roster = [(&rogue, Side::A), (&target, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 5);
+        let ranged = bow(30, RollMode::Advantage);
+        let Effect::Strikes { strike, .. } = &ranged.effect else {
+            unreachable!()
+        };
+
+        let plan = fight.extra_damage_plan(0, 1, strike, &[], RollMode::Advantage, true);
+        assert_eq!(plan.cunning, Some(Cunning::Poison { dc: 99 }));
+        assert_eq!(plan.rolls[0].count, 2, "3d6 less the die spent");
+
+        while !fight.fighters[1].has(|c| c == Condition::Poisoned) {
+            fight.fighters[0].sneak_attack_spent = false;
+            strike_once(&mut fight, &mut rng, 0, 1, &ranged);
+        }
+        fight.fighters[0].sneak_attack_spent = false;
+        let plan = fight.extra_damage_plan(0, 1, strike, &[], RollMode::Advantage, true);
+        assert_eq!(plan.cunning, None, "never trips from range");
+        assert_eq!(plan.rolls[0].count, 3);
+
+        let mut melee = strike.clone();
+        melee.kind = AttackKind {
+            finesse: true,
+            ..AttackKind::MELEE_WEAPON
+        };
+        let plan = fight.extra_damage_plan(0, 1, &melee, &[], RollMode::Advantage, true);
+        assert_eq!(plan.cunning, Some(Cunning::Trip { dc: 99 }));
+
+        // A Huge target cannot be tripped at all.
+        let huge = Creature::new("huge", 1, 1_000).with_size(Size::Huge);
+        let roster = [(&rogue, Side::A), (&huge, Side::B)];
+        let (mut fight, _) = fight_of(&roster, 5);
+        fight.fighters[1]
+            .conditions
+            .push((Condition::Poisoned, Expiry::TurnStart(1)));
+        let plan = fight.extra_damage_plan(0, 1, &melee, &[], RollMode::Advantage, true);
+        assert_eq!(plan.cunning, None);
+    }
+
+    /// A weapon buff armed by landing its trigger condition: nothing until
+    /// the rogue poisons someone, then extra dice on every weapon attack -
+    /// and never on a spell attack.
+    #[test]
+    fn a_condition_triggered_weapon_buff_arms_when_the_condition_lands() {
+        let rogue = cunning_rogue().with_rider(Rider::ConditionTriggeredWeaponDamage {
+            trigger: Condition::Poisoned,
+            dice_count: 1,
+            dice_sides: 6,
+            bonus: 0,
+            damage_kind: DamageKind::Poison,
+        });
+        let target = Creature::new("target", 1, 1_000);
+        let roster = [(&rogue, Side::A), (&target, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 7);
+        let m = bow(30, RollMode::Normal);
+        let Effect::Strikes { strike, .. } = &m.effect else {
+            unreachable!()
+        };
+        assert!(fight
+            .extra_damage_plan(0, 1, strike, &[], RollMode::Normal, true)
+            .rolls
+            .is_empty());
+
+        let mut landed = Vec::new();
+        fight.land_condition(0, 1, Condition::Poisoned, Duration::VictimTurn, &mut landed);
+        let buff = rogue
+            .riders
+            .iter()
+            .position(|r| matches!(r, Rider::ConditionTriggeredWeaponDamage { .. }))
+            .unwrap();
+        assert!(fight.fighters[0].armed[buff]);
+        let plan = fight.extra_damage_plan(0, 1, strike, &[], RollMode::Normal, true);
+        assert_eq!(
+            plan.rolls,
+            vec![DamageRoll::new(1, 6, 0, DamageKind::Poison)]
+        );
+
+        let mut spell = strike.clone();
+        spell.kind = AttackKind::RANGED_SPELL;
+        assert!(fight
+            .extra_damage_plan(0, 1, &spell, &[], RollMode::Normal, true)
+            .rolls
+            .is_empty());
+        let _ = strike_once(&mut fight, &mut rng, 0, 1, &m);
+    }
+
+    /// One dose: the first weapon hit uses it up, forces the save, and on a
+    /// failure leaves both the burden and the extra condition; the burdened
+    /// save then really rolls at disadvantage.
+    #[test]
+    fn an_injury_poison_dose_is_used_up_by_the_first_weapon_hit() {
+        let poisoner = Creature::new("poisoner", 15, 50).with_rider(Rider::InjuryPoison {
+            ability: Ability::Con,
+            dc: 99,
+            debuffed_ability: Ability::Wis,
+            condition: Some(Condition::Poisoned),
+            duration: Duration::Rounds(10),
+        });
+        let target = Creature::new("target", 1, 1_000);
+        let roster = [(&poisoner, Side::A), (&target, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 9);
+        let m = bow(30, RollMode::Normal);
+        while fight.fighters[0].rider_uses[0] > 0 {
+            strike_once(&mut fight, &mut rng, 0, 1, &m);
+        }
+        assert!(fight.fighters[1].has(|c| c == Condition::Poisoned));
+        assert!(fight.fighters[1].has(|c| c == Condition::SaveDisadvantage(Ability::Wis)));
+        assert_eq!(
+            save_mode(&fight.fighters[1], Ability::Wis, false),
+            RollMode::Disadvantage
+        );
+        assert_eq!(
+            save_mode(&fight.fighters[1], Ability::Con, false),
+            RollMode::Normal
+        );
+    }
+
+    /// Uncanny Dodge halves one hit a round, and shares that one reaction
+    /// with every other reaction the creature has.
+    #[test]
+    fn halving_an_attack_spends_the_one_reaction_a_round() {
+        let rogue = Creature::new("rogue", 1, 1_000)
+            .with_rider(Rider::HalveAttackDamage)
+            .with_rider(Rider::ReactionOnTargeted {
+                trigger: AttackTrigger::AnyAttack,
+                ac_bonus: 100,
+            });
+        let mut f = Fighter::new(&rogue, Side::A, Policy::Greedy, 0);
+        let strike = Strike::new(5, vec![DamageRoll::new(1, 6, 0, DamageKind::Slashing)]);
+        let mut rng = Rng::new(1);
+        assert_eq!(
+            react_to_hit(&mut rng, &mut f, &strike, 21),
+            (10, Some(Answer::Halved))
+        );
+        assert_eq!(react_to_hit(&mut rng, &mut f, &strike, 21), (21, None));
+        assert_eq!(
+            ac_boost_reaction(&f, AttackKind::MELEE_WEAPON),
+            None,
+            "the same reaction cannot also boost AC"
+        );
+        f.conditions
+            .push((Condition::Stunned, Expiry::TurnStart(0)));
+        refresh(&mut f, &mut rng);
+        assert_eq!(
+            react_to_hit(&mut rng, &mut f, &strike, 21),
+            (21, None),
+            "nothing while Incapacitated"
+        );
+    }
+
+    /// Steady Aim goes before the attack it sets up, grants that attack
+    /// advantage (and with it Sneak Attack), and is gone after one roll. A
+    /// ranking policy takes it when advantage is worth more than any other
+    /// bonus action - here, the only other one does nothing.
+    #[test]
+    fn steady_aim_is_chosen_resolved_first_and_used_up_by_the_attack() {
+        let mut rogue = sneak_attacker("rogue").with_action(bow(5, RollMode::Normal));
+        rogue.bonus_actions.push(
+            Move::new(
+                "Steady Aim",
+                Effect::Stance {
+                    condition: Condition::SteadyAim,
+                },
+            )
+            .with_before_action(),
+        );
+        rogue
+            .bonus_actions
+            .push(Move::new("Dash", Effect::Sequence(Vec::new())));
+        let target = Creature::new("target", 12, 1_000);
+        let roster = [(&rogue, Side::A), (&target, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 11);
+
+        let plan = fight.decide(1, 0, 1, &mut rng);
+        assert_eq!(
+            plan,
+            Plan {
+                action: Some(0),
+                bonus: Some(0)
+            }
+        );
+
+        let mut log = Some(Vec::new());
+        fight.acting = Some(0);
+        fight.turn(1, 0, &mut rng, &mut log, Some(plan));
+        let line = log.unwrap().join("\n");
+        assert!(
+            line.find("steady_aim").unwrap() < line.find("Bow").unwrap(),
+            "Steady Aim resolves before the attack: {line}"
+        );
+        assert!(
+            !fight.fighters[0].has(|c| c == Condition::SteadyAim),
+            "used up by the attack roll"
+        );
+    }
+
+    /// Defensive means a defensive stance: Steady Aim, a stance too, is not
+    /// what a bloodied Defensive creature reaches for.
+    #[test]
+    fn a_defensive_policy_does_not_mistake_steady_aim_for_a_defence() {
+        let steady = Move::new(
+            "Steady Aim",
+            Effect::Stance {
+                condition: Condition::SteadyAim,
+            },
+        );
+        let dodge = Move::new(
+            "Dodge",
+            Effect::Stance {
+                condition: Condition::Dodging,
+            },
+        );
+        assert_eq!(Policy::Defensive.rank(&steady, 3.0, true), (3.0, 0.0));
+        assert_eq!(
+            Policy::Defensive.rank(&dodge, 0.0, true),
+            (f64::INFINITY, 0.0)
+        );
+    }
+
+    /// A spell only one creature type is subject to is never taken against
+    /// anything else - not even by a policy that ranks on what it spends.
+    #[test]
+    fn a_type_restricted_save_is_never_chosen_against_the_wrong_type() {
+        let mut caster = puncher("caster", 10, 30, 5, 2);
+        caster.spell_slots.set_max(2, 3);
+        caster.actions.insert(
+            0,
+            Move::new(
+                "Hold",
+                Effect::Save(SaveEffect {
+                    ability: Ability::Wis,
+                    dc: 15,
+                    damage: Vec::new(),
+                    half_on_success: false,
+                    on_failure: vec![(Condition::Paralyzed, Duration::VictimTurn)],
+                    max_targets: Some(1),
+                    requires_type: Some("humanoid".to_string()),
+                }),
+            )
+            .with_spell_slot(2),
+        );
+        let dragon = puncher("dragon", 10, 100, 5, 2)
+            .with_creature_type(crate::rules::creature::CreatureType::Dragon);
+        let bandit = puncher("bandit", 10, 100, 5, 2)
+            .with_creature_type(crate::rules::creature::CreatureType::Humanoid);
+        for (foe, expected) in [(&dragon, Some(1)), (&bandit, Some(0))] {
+            let roster = [(&caster, Side::A), (foe, Side::B)];
+            let mut rng = Rng::new(1);
+            let mut fight = Fight::new(
+                &mut rng,
+                &roster,
+                [Policy::Nova; 2],
+                5,
+                Budget::default(),
+                &mut None,
+            );
+            assert_eq!(fight.decide(1, 0, 1, &mut rng).action, expected);
+            fight.fighters[0].policy = Policy::InOrder;
+            assert_eq!(fight.decide(1, 0, 1, &mut rng).action, expected);
+        }
+    }
+
+    /// A ranking policy spends its bonus action bringing a downed ally back
+    /// rather than on a little damage.
+    #[test]
+    fn a_heal_is_worth_a_downed_ally() {
+        let mut healer = puncher("healer", 10, 20, 5, 2);
+        healer.bonus_actions.push(Move::new(
+            "Jab",
+            Effect::Strikes {
+                strike: Strike::new(5, vec![DamageRoll::new(1, 4, 0, DamageKind::Piercing)]),
+                count: 1,
+            },
+        ));
+        healer.bonus_actions.push(Move::new(
+            "Healing Word",
+            Effect::Heal(HealRoll::new(1, 4, 3)),
+        ));
+        let mut friend = puncher("friend", 10, 30, 5, 2);
+        friend.player_character = true;
+        let enemy = puncher("enemy", 10, 30, 5, 2);
+        let roster = [(&healer, Side::A), (&friend, Side::A), (&enemy, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 13);
+
+        assert_eq!(
+            fight.decide(1, 0, 2, &mut rng).bonus,
+            Some(0),
+            "nobody down: jab"
+        );
+        fight.fighters[1].hp = 0;
+        assert_eq!(
+            fight.decide(1, 0, 2, &mut rng).bonus,
+            Some(1),
+            "friend down: heal"
+        );
+    }
+
+    /// An attacker that downgrades poison immunity deals half, not nothing,
+    /// to a poison-immune target, and makes a Poisoned-immune target roll -
+    /// with advantage - instead of shrugging the condition off.
+    #[test]
+    fn a_downgraded_immunity_applies_live() {
+        let corrupter = Creature::new("corrupter", 15, 50).with_rider(Rider::DowngradeImmunity {
+            damage: Some(DamageKind::Poison),
+            condition: Some(Condition::Poisoned),
+        });
+        let plain = Creature::new("plain", 15, 50);
+        let mut golem =
+            Creature::new("golem", 10, 1_000).with_condition_immunity(Condition::Poisoned);
+        golem
+            .reductions
+            .push((DamageKind::Poison, Reduction::Immune));
+        let roster = [(&corrupter, Side::A), (&golem, Side::B), (&plain, Side::A)];
+        let (mut fight, mut rng) = fight_of(&roster, 15);
+
+        let venom = Move::new(
+            "Venom",
+            Effect::AutoHit {
+                damage: vec![DamageRoll::new(0, 1, 10, DamageKind::Poison)],
+            },
+        );
+        assert_eq!(strike_once(&mut fight, &mut rng, 0, 1, &venom), 5);
+        assert_eq!(strike_once(&mut fight, &mut rng, 2, 1, &venom), 0);
+
+        let poisoning = [(Condition::Poisoned, Duration::VictimTurn)];
+        assert_eq!(
+            fight.conditions_against(0, 1, &poisoning),
+            (poisoning.to_vec(), true)
+        );
+        assert_eq!(
+            fight.conditions_against(2, 1, &poisoning),
+            (Vec::new(), false)
+        );
+    }
+
+    /// A fixed number of rounds, counted on the applier's turns.
+    #[test]
+    fn a_condition_for_n_rounds_lasts_exactly_that_long() {
+        let a = Creature::new("a", 10, 20);
+        let b = Creature::new("b", 10, 20);
+        let roster = [(&a, Side::A), (&b, Side::B)];
+        let (mut fight, _) = fight_of(&roster, 17);
+        fight.acting = Some(0);
+        let mut landed = Vec::new();
+        fight.land_condition(
+            0,
+            1,
+            Condition::Suppressed,
+            Duration::Rounds(3),
+            &mut landed,
+        );
+        fight.acting = None;
+        for round in 1..=2 {
+            fight.start_of_turn(0);
+            assert!(
+                fight.fighters[1].has(|c| c == Condition::Suppressed),
+                "still there at the start of round {}",
+                round + 1
+            );
+        }
+        fight.start_of_turn(0);
+        assert!(!fight.fighters[1].has(|c| c == Condition::Suppressed));
+    }
+
+    /// Something that lasts "until the start of your next turn" still ends
+    /// then if the one who applied it has dropped in the meantime - a stun
+    /// from a monk who goes down does not last forever.
+    #[test]
+    fn a_turn_start_condition_ends_even_if_its_applier_is_down() {
+        let monk = puncher("monk", 10, 20, 5, 2);
+        let dragon = puncher("dragon", 10, 200, 5, 2);
+        let roster = [(&monk, Side::A), (&dragon, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 19);
+        fight.apply_condition(1, Condition::Stunned, Expiry::TurnStart(0));
+        fight.fighters[0].hp = 0;
+        fight.take_turn(2, 0, &mut rng, &mut None, None);
+        assert!(!fight.fighters[1].has(|c| c == Condition::Stunned));
+    }
+
+    /// Only one spell slot a turn: once the action has spent one, a slotted
+    /// bonus action is not castable until the caster's next turn.
+    #[test]
+    fn only_one_spell_slot_is_spent_a_turn() {
+        let mut caster = Creature::new("caster", 10, 50);
+        caster.spell_slots.set_max(1, 4);
+        let mut f = Fighter::new(&caster, Side::A, Policy::Greedy, 0);
+        f.cast_spell_slot(Some(1));
+        assert!(!f.can_cast(Some(1)), "a second slot this turn");
+        assert!(f.can_cast(None), "a cantrip is fine");
+        let mut rng = Rng::new(1);
+        refresh(&mut f, &mut rng);
+        assert!(f.can_cast(Some(1)), "a new turn, a new slot");
+    }
+
+    /// Slots are one pool per level, spent by whichever spell of that level
+    /// is cast, and a move needing an empty level is not offered.
+    #[test]
+    fn spells_of_one_level_share_one_pool_of_slots() {
+        let mut caster = Creature::new("caster", 10, 50);
+        caster.spell_slots.set_max(1, 1);
+        let bolt = bow(5, RollMode::Normal).with_spell_slot(1);
+        let blessing = Move::new(
+            "Blessing",
+            Effect::Buff {
+                attack_modifier: AttackModifier::BonusDice { count: 1, sides: 4 },
+                save_modifier: SaveModifier::BonusDice { count: 1, sides: 4 },
+                max_targets: Some(1),
+            },
+        )
+        .with_spell_slot(1);
+        caster.actions = vec![bolt.clone(), blessing];
+        let mut f = Fighter::new(&caster, Side::A, Policy::Greedy, 0);
+        assert!(f.can_cast(bolt.spell_slot_level));
+        f.cast_spell_slot(bolt.spell_slot_level);
+        refresh(&mut f, &mut Rng::new(1));
+        assert!(
+            !f.can_cast(Some(1)),
+            "the only 1st-level slot is gone for both"
+        );
     }
 }

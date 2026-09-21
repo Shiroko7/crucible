@@ -343,10 +343,12 @@ fn a_reactive_ac_boost_agrees_with_the_exact_path_on_a_multi_type_strike() {
         let strike = rend();
         let exact =
             strike.damage_pmf_with_reaction(&defender, RollMode::Normal, ac_bonus, available);
+        let attacker = Creature::new("attacker", 10, 10);
         agree(name, seed as u64 + 950, &exact, |rng| {
             strike
-                .sample_forcing_crit_with_reaction(
+                .sample_from(
                     rng,
+                    &attacker,
                     &defender,
                     RollMode::Normal,
                     false,
