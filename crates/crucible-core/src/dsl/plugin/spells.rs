@@ -7,27 +7,22 @@
 //! and Command both fit entirely inside the existing `Effect::Save` /
 //! `Condition` / `Duration` machinery ARCH-01 and ARCH-05 already built.
 //!
+//! Every move a spell plugin registers is tagged [`MoveKind::Spell`], so a
+//! condition that stops a creature casting ([`Condition::blocks_magic`])
+//! stops these too.
+//!
 //! ## What pays for a cast
 //!
-//! Two payment mechanisms coexist here, both legitimate:
-//!
-//! - Healing Word and Cure Wounds spend directly from the caster's own
-//!   [`crate::rules::creature::SpellSlots`] via [`crate::rules::creature::Move::with_spell_slot`]
-//!   and [`crate::rules::creature::Move::pay_spell_cost`].
-//! - Blindness/Deafness, Command, and Magic Missile take their cost as data
-//!   instead: [`SpellCost`] names a resource pool and an amount, resolved
-//!   against whatever the caster's config already declared (see
-//!   `dsl::config::apply_resources`). `SpellSlots` (ARCH-05) exists as a data
-//!   type on `Creature`, but nothing in `sim::duel`'s action economy spends
-//!   from it yet - `Fighter::pay`/`can_pay` only ever look at the generic
-//!   `resources` pool via `Cost`. Wiring real per-level slot spending into the
-//!   duel's turn loop would be a change to that shared economy, not a
-//!   spell-plugin concern, so it is left alone here and noted as a found gap
-//!   rather than worked around with something bespoke. A wizard's real spell
-//!   slot and a wand's limited charges are the same mechanism under this
-//!   scheme - "spend `amount` from a named pool" - so which one a cast draws
-//!   from is a constructor parameter, never hardcoded to a resource name
-//!   inside a plugin.
+//! A slotted spell spends from the caster's own
+//! [`crate::rules::creature::SpellSlots`] via
+//! [`crate::rules::creature::Move::with_spell_slot`] - one pool per level,
+//! shared by every spell of that level, which `sim::duel` spends from and
+//! refuses to overdraw. The spells a build might instead power from
+//! somewhere else - Blindness/Deafness, Command and Magic Missile, which a
+//! wand or a once-a-rest feature can cast as easily as a slot can - take
+//! [`SpellCost`] as data: either a slot level, or a named resource pool
+//! (`wand_charges`, a feature's own uses) resolved against whatever the
+//! caster's config already declared, or nothing at all for an at-will cast.
 //!
 //! Also True Strike (2024 cantrip): see [`TrueStrikePlugin`] below. Also
 //! Spiritual Weapon: see [`SpiritualWeaponPlugin`] below. Also Guiding Bolt:
@@ -38,21 +33,14 @@
 //! conscious" rule - so it is implemented once, in
 //! [`crate::rules::creature::apply_healing`], and inherited by both healing
 //! spells (and anything else that ever heals) rather than re-implemented per
-//! spell.
+//! spell. `sim::duel` aims a heal at the caster's own side: a downed ally
+//! first, otherwise whoever is missing the most hit points.
 //!
 //! Not modelled, on purpose:
 //! - **Range.** `DESIGN.md` already rules positioning out of scope entirely
 //!   ("Positioning is the gap that matters") - there is no notion of distance
 //!   for a melee weapon either, so a spell's range in feet is flavour text
 //!   here, not a mechanic.
-//! - **Ally targeting.** The duel engine (`sim::duel`) only ever targets the
-//!   opposing side right now - no move of any kind can target a friendly
-//!   creature yet. These plugins produce fully-formed, fully-testable
-//!   `Move`s (the right action economy, slot cost, and heal formula), but
-//!   wiring "cast this on a bloodied ally" into the automated turn engine is
-//!   a separate, considerably larger feature (self/ally targeting for every
-//!   effect, plus a policy that decides when to heal) and is left for a
-//!   follow-up rather than bolted on here.
 //! - **Upcasting.** Every spell here is implemented at its base cast only;
 //!   scaling with a higher slot is skipped.
 //!
@@ -96,8 +84,8 @@
 
 use crate::rules::combat::{Attack, AttackModifier, DamageRider, SaveModifier};
 use crate::rules::creature::{
-    Ability, Condition, Cost, DamageKind, DamageRoll, Duration, Effect, HealRoll, Move, Rider,
-    SaveEffect, SpellCastingProfile, Strike, Uses,
+    Ability, AttackKind, Condition, Cost, DamageKind, DamageRoll, Duration, Effect, HealRoll, Move,
+    MoveKind, Rider, SaveEffect, SpellCastingProfile, Strike, Uses,
 };
 
 use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
@@ -159,7 +147,8 @@ impl FeaturePlugin for HealingWordPlugin {
     fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
         let modifier = spellcasting_ability_modifier(builder, "Healing Word")?;
         let heal = Move::new("Healing Word", Effect::Heal(HealRoll::new(1, 4, modifier)))
-            .with_spell_slot(BASE_SLOT_LEVEL);
+            .with_spell_slot(BASE_SLOT_LEVEL)
+            .with_kind(MoveKind::Spell);
         builder.add_bonus_action(heal);
         Ok(())
     }
@@ -188,7 +177,8 @@ impl FeaturePlugin for CureWoundsPlugin {
     fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
         let modifier = spellcasting_ability_modifier(builder, "Cure Wounds")?;
         let heal = Move::new("Cure Wounds", Effect::Heal(HealRoll::new(2, 8, modifier)))
-            .with_spell_slot(BASE_SLOT_LEVEL);
+            .with_spell_slot(BASE_SLOT_LEVEL)
+            .with_kind(MoveKind::Spell);
         builder.add_action(heal);
         Ok(())
     }
@@ -223,13 +213,20 @@ impl FeaturePlugin for CureWoundsPlugin {
 /// that - Sneak Attack, most obviously. [`TrueStrikePlugin::attack`] flags
 /// the resulting [`Attack`] with both [`Attack::is_spell_attack`] (it is a
 /// spell) and [`Attack::finesse_or_ranged`] (whenever the wielded weapon
-/// itself has that property). The two are independent and additive: a rogue
-/// using True Strike with a rapier still qualifies for Sneak Attack through
-/// the ordinary weapon gate - [`crate::rules::creature::Rider::extra_damage_for`] -
-/// with or without any build that also extends Sneak Attack to spell
-/// attacks (see
+/// itself has that property), and the live move carries the same two facts
+/// in its strike's [`AttackKind`]. The two are independent and additive: a
+/// rogue using True Strike with a rapier still qualifies for Sneak Attack
+/// through the ordinary weapon gate -
+/// [`crate::rules::creature::Rider::extra_damage_for`] - with or without any
+/// build that also extends Sneak Attack to spell attacks (see
 /// [`crate::rules::creature::Rider::extra_damage_for_with_spell_attack_extension`]).
-#[derive(Debug, Clone, Copy)]
+///
+/// The attack is made *with* the wielded weapon, so whatever that weapon
+/// brings comes along: its magic bonus (and its ammunition's) to both the
+/// attack and damage roll - [`TrueStrikePlugin::weapon_bonus`] - and any
+/// damage rider it carries, like a slaying weapon's extra dice against its
+/// favoured prey - [`TrueStrikePlugin::weapon_riders`].
+#[derive(Debug, Clone)]
 pub struct TrueStrikePlugin {
     /// The wielded weapon's own damage dice - unrelated to the caster's
     /// level, since it is the weapon that determines this, not the spell.
@@ -240,6 +237,17 @@ pub struct TrueStrikePlugin {
     /// [`Attack::finesse_or_ranged`]. `false` for anything else (a
     /// non-finesse melee weapon).
     pub finesse_or_ranged: bool,
+    /// Whether the wielded weapon is a ranged one specifically - which part
+    /// of `finesse_or_ranged` holds. Decides whether the live strike is a
+    /// melee or a ranged attack roll.
+    pub ranged: bool,
+    /// The wielded weapon's own magic bonus, plus its ammunition's - added to
+    /// the attack roll and to the weapon's damage roll, exactly as it would
+    /// be for an ordinary attack with that weapon.
+    pub weapon_bonus: i32,
+    /// Damage riders the wielded weapon itself carries onto every hit - a
+    /// slaying weapon's [`Rider::BonusDamageVsCreatureType`].
+    pub weapon_riders: Vec<Rider>,
     /// The cantrip-scaling tier's bonus Radiant dice count - 2 at the base
     /// tier, more at higher character levels.
     pub radiant_dice_count: u32,
@@ -263,9 +271,45 @@ impl TrueStrikePlugin {
             weapon_dice_sides,
             weapon_damage_kind,
             finesse_or_ranged,
+            ranged: false,
+            weapon_bonus: 0,
+            weapon_riders: Vec::new(),
             radiant_dice_count,
             radiant_dice_sides,
             radiant_damage_kind,
+        }
+    }
+
+    /// The wielded weapon is a ranged one - see [`TrueStrikePlugin::ranged`].
+    /// Implies `finesse_or_ranged`.
+    pub fn with_ranged(mut self) -> Self {
+        self.ranged = true;
+        self.finesse_or_ranged = true;
+        self
+    }
+
+    /// The wielded weapon's (and ammunition's) magic bonus - see
+    /// [`TrueStrikePlugin::weapon_bonus`].
+    pub fn with_weapon_bonus(mut self, bonus: i32) -> Self {
+        self.weapon_bonus = bonus;
+        self
+    }
+
+    /// A damage rider the wielded weapon carries - see
+    /// [`TrueStrikePlugin::weapon_riders`].
+    pub fn with_weapon_rider(mut self, rider: Rider) -> Self {
+        self.weapon_riders.push(rider);
+        self
+    }
+
+    /// The live strike's [`AttackKind`]: a weapon attack made as part of a
+    /// spell, ranged or finesse per the wielded weapon.
+    fn attack_kind(&self) -> AttackKind {
+        AttackKind {
+            weapon: true,
+            spell: true,
+            ranged: self.ranged,
+            finesse: self.finesse_or_ranged && !self.ranged,
         }
     }
 
@@ -305,10 +349,10 @@ impl TrueStrikePlugin {
     /// built up.
     pub fn attack(&self, profile: SpellCastingProfile) -> Attack {
         Attack::new(
-            profile.attack_bonus(),
+            profile.attack_bonus() + self.weapon_bonus,
             self.weapon_dice_count,
             self.weapon_dice_sides,
-            profile.ability_modifier,
+            profile.ability_modifier + self.weapon_bonus,
         )
         .with_is_spell_attack(true)
         .with_finesse_or_ranged(self.finesse_or_ranged)
@@ -335,12 +379,12 @@ impl FeaturePlugin for TrueStrikePlugin {
             )
         })?;
         let strike = Strike::new(
-            profile.attack_bonus(),
+            profile.attack_bonus() + self.weapon_bonus,
             vec![
                 DamageRoll::new(
                     self.weapon_dice_count,
                     self.weapon_dice_sides,
-                    profile.ability_modifier,
+                    profile.ability_modifier + self.weapon_bonus,
                     self.weapon_damage_kind,
                 ),
                 DamageRoll::new(
@@ -350,11 +394,14 @@ impl FeaturePlugin for TrueStrikePlugin {
                     self.radiant_damage_kind,
                 ),
             ],
-        );
-        builder.add_action(Move::new(
-            "True Strike",
-            Effect::Strikes { strike, count: 1 },
-        ));
+        )
+        .with_kind(self.attack_kind());
+        let mut mv = Move::new("True Strike", Effect::Strikes { strike, count: 1 })
+            .with_kind(MoveKind::Spell);
+        for rider in &self.weapon_riders {
+            mv = mv.with_rider(rider.clone());
+        }
+        builder.add_action(mv);
         Ok(())
     }
 }
@@ -403,14 +450,15 @@ impl FeaturePlugin for TrueStrikePlugin {
 pub struct SpiritualWeaponPlugin;
 
 impl SpiritualWeaponPlugin {
-    /// Both bonus actions share this strike profile; only their `Uses` and
-    /// `spell_level` differ.
+    /// Both bonus actions share this strike profile - a melee spell attack -
+    /// and differ only in their `Uses` and slot cost.
     fn strike(to_hit: i32, ability_modifier: i32) -> Effect {
         Effect::Strikes {
             strike: Strike::new(
                 to_hit,
                 vec![DamageRoll::new(1, 8, ability_modifier, DamageKind::Force)],
-            ),
+            )
+            .with_kind(AttackKind::MELEE_SPELL),
             count: 1,
         }
     }
@@ -440,7 +488,8 @@ impl FeaturePlugin for SpiritualWeaponPlugin {
         builder.add_bonus_action(
             Move::new("Spiritual Weapon", Self::strike(to_hit, ability_modifier))
                 .with_uses(Uses::Limited(1))
-                .with_spell_level(2),
+                .with_spell_slot(2)
+                .with_kind(MoveKind::Spell),
         );
         builder.add_bonus_action(Move::new(
             "Spiritual Weapon (Strike Again)",
@@ -454,29 +503,17 @@ impl FeaturePlugin for SpiritualWeaponPlugin {
 /// Guiding Bolt (SRD 5.2, 1st-level Evocation): a ranged spell attack for
 /// 4d6 Radiant damage, using the caster's own spell attack bonus. On a hit,
 /// the target is marked - [`Condition::Marked`] - so the next attack roll
-/// made against it before the start of its own next turn, by anyone, has
-/// Advantage.
+/// made against it before the end of the caster's next turn, by anyone, has
+/// Advantage ([`Duration::ApplierNextTurnEnd`]).
 ///
 /// `dice_count`/`dice_sides` are plugin parameters rather than `4` and `6`
 /// baked in, the same way [`super::rogue::SneakAttackPlugin`]'s dice are - a
 /// homebrew variant or a future upcast-aware caller can hand this a
 /// different pool without a code change. Upcasting Guiding Bolt itself (more
 /// dice from a higher-level slot) is not modelled: this always spends
-/// exactly one 1st-level slot.
-///
-/// Consuming a spell slot during a live fight has no existing machinery of
-/// its own yet - `SpellSlots` (ARCH-05) only ever tracks the *declared*
-/// maximum and is never read by `sim::duel`, which only knows how to spend
-/// from the named [`crate::rules::creature::Resource`] pool
-/// [`crate::rules::creature::Cost`] already points at. Rather than build a
-/// second, parallel spend-tracking mechanism for this one spell, this plugin
-/// mirrors the caster's already-declared 1st-level slot count into a
-/// same-named live resource (`spell_slot_1`) via the existing, idempotent
-/// [`CreatureBuilder::ensure_resource`] - so a second 1st-level spell from a
-/// sibling plugin naturally shares the same pool instead of getting its own.
-/// That is a deliberately small bridge, not the final shape of spell-slot
-/// spending; a real "cast at exactly this level" primitive belongs to a
-/// later task once more than one spell needs it.
+/// exactly one 1st-level slot, from the same
+/// [`crate::rules::creature::SpellSlots`] pool every other 1st-level spell
+/// draws on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GuidingBoltPlugin {
     pub dice_count: u32,
@@ -522,29 +559,23 @@ impl FeaturePlugin for GuidingBoltPlugin {
                     .to_string(),
             )
         })?;
-        let to_hit = profile.attack_bonus();
-
-        let slot_max = builder.creature.spell_slots.max(1);
-        let slot_resource = builder.ensure_resource("spell_slot_1", slot_max);
-
         let strike = Strike::new(
-            to_hit,
+            profile.attack_bonus(),
             vec![DamageRoll::new(
                 self.dice_count,
                 self.dice_sides,
                 0,
                 DamageKind::Radiant,
             )],
-        );
+        )
+        .with_kind(AttackKind::RANGED_SPELL);
 
         let action = Move::new("Guiding Bolt", Effect::Strikes { strike, count: 1 })
-            .with_cost(Cost {
-                resource: slot_resource,
-                amount: 1,
-            })
+            .with_spell_slot(1)
+            .with_kind(MoveKind::Spell)
             .with_rider(Rider::ConditionOnHit {
                 condition: Condition::Marked,
-                duration: Duration::VictimTurn,
+                duration: Duration::ApplierNextTurnEnd,
             });
 
         builder.add_action(action);
@@ -599,53 +630,60 @@ impl FeaturePlugin for HoldPersonPlugin {
             }),
         )
         .with_spell_slot(SLOT_LEVEL)
-        .with_concentration();
+        .with_concentration()
+        .with_kind(MoveKind::Spell);
 
         builder.add_action(hold_person);
         Ok(())
     }
 }
 
-/// How a spell's use is paid for: a named resource pool, and how much of it
-/// one cast spends.
-///
-/// Deliberately not tied to [`crate::rules::creature::SpellSlots`] - see this
-/// module's own doc for why - so `resource_name` is free to point at
-/// anything the builder has declared: a `spell_slots_1` pool standing in for
-/// a real slot, a `wand_charges` pool for an item, or nothing at all if the
-/// caster building this creature leaves the cost off entirely (an at-will
-/// version, for a homebrew ring or the like).
+/// How a spell's use is paid for, when a build might power it from more than
+/// one place: a spell slot of some level, or `amount` from a named resource
+/// pool - a wand's charges, a once-a-rest feature's single use. Leaving the
+/// cost off entirely is an at-will cast.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpellCost {
-    pub resource_name: String,
-    pub amount: u32,
+pub enum SpellCost {
+    /// One spell slot of this level, from the caster's own
+    /// [`crate::rules::creature::SpellSlots`].
+    Slot(u32),
+    /// `amount` from the resource pool named `resource_name`, resolved
+    /// against whatever the caster's config declared.
+    Resource { resource_name: String, amount: u32 },
 }
 
 impl SpellCost {
+    /// `amount` from the named resource pool - see [`SpellCost::Resource`].
     pub fn new(resource_name: impl Into<String>, amount: u32) -> Self {
-        Self {
+        Self::Resource {
             resource_name: resource_name.into(),
             amount,
         }
     }
 
-    /// Resolve against `builder`'s already-declared resources, turning the
-    /// name into the indexed [`Cost`] a `Move` actually carries.
-    fn resolve(&self, builder: &CreatureBuilder) -> FeatureResult<Cost> {
-        Ok(Cost {
-            resource: builder.resource_index(&self.resource_name)?,
-            amount: self.amount,
+    /// Put this cost on `mv`, resolving a pool name against `builder`'s
+    /// already-declared resources.
+    fn charge(&self, builder: &CreatureBuilder, mv: Move) -> FeatureResult<Move> {
+        Ok(match self {
+            SpellCost::Slot(level) => mv.with_spell_slot(*level),
+            SpellCost::Resource {
+                resource_name,
+                amount,
+            } => mv.with_cost(Cost {
+                resource: builder.resource_index(resource_name)?,
+                amount: *amount,
+            }),
         })
     }
 }
 
-/// Resolve an optional [`SpellCost`] into an optional indexed [`Cost`], the
-/// shape every plugin below needs before it can call `Move::with_cost`.
-fn resolve_cost(
-    builder: &CreatureBuilder,
-    cost: &Option<SpellCost>,
-) -> FeatureResult<Option<Cost>> {
-    cost.as_ref().map(|c| c.resolve(builder)).transpose()
+/// Put an optional [`SpellCost`] on `mv` - the last step every plugin below
+/// takes before registering its move.
+fn charge(builder: &CreatureBuilder, cost: &Option<SpellCost>, mv: Move) -> FeatureResult<Move> {
+    match cost {
+        Some(c) => c.charge(builder, mv),
+        None => Ok(mv),
+    }
 }
 
 /// A caster's save DC, or a configuration error naming which spell needed
@@ -705,14 +743,13 @@ impl FeaturePlugin for BlindnessDeafnessPlugin {
 
     fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
         let dc = save_dc(builder, "Blindness/Deafness")?;
-        let cost = resolve_cost(builder, &self.cost)?;
         let condition = if self.deafen {
             Condition::Deafened
         } else {
             Condition::Blinded
         };
 
-        let mut mv = Move::new(
+        let mv = Move::new(
             self.label(),
             Effect::Save(SaveEffect {
                 ability: Ability::Con,
@@ -729,10 +766,9 @@ impl FeaturePlugin for BlindnessDeafnessPlugin {
                 max_targets: Some(1),
                 requires_type: None,
             }),
-        );
-        if let Some(cost) = cost {
-            mv = mv.with_cost(cost);
-        }
+        )
+        .with_kind(MoveKind::Spell);
+        let mv = charge(builder, &self.cost, mv)?;
         builder.add_action(mv);
         Ok(())
     }
@@ -770,7 +806,8 @@ impl FeaturePlugin for BlessPlugin {
                 },
             )
             .with_concentration()
-            .with_spell_level(1),
+            .with_spell_slot(1)
+            .with_kind(MoveKind::Spell),
         );
         Ok(())
     }
@@ -864,9 +901,8 @@ impl FeaturePlugin for CommandPlugin {
 
     fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
         let dc = save_dc(builder, "Command")?;
-        let cost = resolve_cost(builder, &self.cost)?;
 
-        let mut mv = Move::new(
+        let mv = Move::new(
             self.label(),
             Effect::Save(SaveEffect {
                 ability: Ability::Wis,
@@ -877,10 +913,9 @@ impl FeaturePlugin for CommandPlugin {
                 max_targets: Some(1),
                 requires_type: None,
             }),
-        );
-        if let Some(cost) = cost {
-            mv = mv.with_cost(cost);
-        }
+        )
+        .with_kind(MoveKind::Spell);
+        let mv = charge(builder, &self.cost, mv)?;
         builder.add_action(mv);
         Ok(())
     }
@@ -912,13 +947,11 @@ impl FeaturePlugin for MagicMissilePlugin {
     }
 
     fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
-        let cost = resolve_cost(builder, &self.cost)?;
         let darts = vec![DamageRoll::new(1, 4, 1, DamageKind::Force); 3];
 
-        let mut mv = Move::new("Magic Missile", Effect::AutoHit { damage: darts });
-        if let Some(cost) = cost {
-            mv = mv.with_cost(cost);
-        }
+        let mv = Move::new("Magic Missile", Effect::AutoHit { damage: darts })
+            .with_kind(MoveKind::Spell);
+        let mv = charge(builder, &self.cost, mv)?;
         builder.add_action(mv);
         Ok(())
     }
@@ -956,7 +989,8 @@ impl FeaturePlugin for BanePlugin {
                 },
             )
             .with_concentration()
-            .with_spell_level(1),
+            .with_spell_slot(1)
+            .with_kind(MoveKind::Spell),
         );
         Ok(())
     }
@@ -2264,7 +2298,7 @@ mod tests {
         let m = &built.actions[0];
         assert_eq!(m.name, "Bless");
         assert!(m.concentration, "Bless requires concentration");
-        assert_eq!(m.spell_level, Some(1), "Bless spends a 1st-level slot");
+        assert_eq!(m.spell_slot_level, Some(1), "Bless spends a 1st-level slot");
         assert_eq!(
             m.effect,
             Effect::Buff {
@@ -2287,7 +2321,7 @@ mod tests {
         let m = &built.actions[0];
         assert_eq!(m.name, "Bane");
         assert!(m.concentration, "Bane requires concentration");
-        assert_eq!(m.spell_level, Some(1), "Bane spends a 1st-level slot");
+        assert_eq!(m.spell_slot_level, Some(1), "Bane spends a 1st-level slot");
         assert_eq!(
             m.effect,
             Effect::SaveOrModifier {
@@ -2319,7 +2353,7 @@ mod tests {
         let cast = &built.bonus_actions[0];
         assert_eq!(cast.name, "Spiritual Weapon");
         assert_eq!(
-            cast.spell_level,
+            cast.spell_slot_level,
             Some(2),
             "the initial cast spends a 2nd-level slot"
         );
@@ -2336,7 +2370,7 @@ mod tests {
         let strike_again = &built.bonus_actions[1];
         assert_eq!(strike_again.name, "Spiritual Weapon (Strike Again)");
         assert_eq!(
-            strike_again.spell_level, None,
+            strike_again.spell_slot_level, None,
             "no further slot is spent to keep swinging"
         );
         assert_eq!(strike_again.uses, Uses::Unlimited);
@@ -2510,24 +2544,24 @@ mod tests {
             other => panic!("expected a Strikes effect, got {other:?}"),
         }
 
-        // A 1st-level slot, spent from a resource pool mirroring the
-        // caster's own declared maximum.
-        assert_eq!(
-            action.cost,
-            Some(Cost {
-                resource: 0,
-                amount: 1
-            })
-        );
-        assert_eq!(built.resources[0].name, "spell_slot_1");
-        assert_eq!(built.resources[0].max, 2);
+        // A 1st-level slot from the caster's own slot pool - no resource
+        // pool of its own - and a ranged spell attack.
+        assert_eq!(action.spell_slot_level, Some(1));
+        assert_eq!(action.cost, None);
+        assert!(built.resources.is_empty());
+        assert_eq!(action.kind, MoveKind::Spell);
+        let Effect::Strikes { strike, .. } = &action.effect else {
+            unreachable!()
+        };
+        assert_eq!(strike.kind, AttackKind::RANGED_SPELL);
 
-        // The mark, applied unconditionally on a hit.
+        // The mark, applied unconditionally on a hit, lasting until the end
+        // of the caster's next turn.
         assert_eq!(
             action.riders,
             vec![Rider::ConditionOnHit {
                 condition: Condition::Marked,
-                duration: Duration::VictimTurn,
+                duration: Duration::ApplierNextTurnEnd,
             }]
         );
     }
@@ -2548,7 +2582,7 @@ mod tests {
             panic!("expected Strikes");
         };
         assert_eq!(strike.to_hit, 8, "4 (mod) + 3 (proficiency) + 1 (item)");
-        assert_eq!(built.resources[0].max, 1);
+        assert_eq!(built.spell_slots.max(1), 1);
     }
 
     /// `dice_count`/`dice_sides` are parameters, not the printed 4d6 baked
@@ -2586,24 +2620,24 @@ mod tests {
         assert!(builder.creature.actions.is_empty());
     }
 
-    /// A sibling 1st-level spell feature sharing the same slot level should
-    /// end up drawing from the very same resource pool rather than getting
-    /// its own - `ensure_resource` is idempotent by name, and this proves
-    /// this plugin actually leans on that rather than reinventing a pool.
+    /// Guiding Bolt draws on exactly the same 1st-level slots as every
+    /// other 1st-level spell - Bless here - rather than a pool of its own,
+    /// so a caster with three slots gets three 1st-level casts between them,
+    /// not three of each.
     #[test]
     fn a_second_first_level_spell_shares_the_same_slot_pool() {
-        let mut builder = guiding_bolt_caster(3, 2, 3);
-        builder.ensure_resource("spell_slot_1", 3);
-        let idx_before = builder.resource_index("spell_slot_1").unwrap();
-
-        let built = builder
+        let built = guiding_bolt_caster(3, 2, 3)
             .apply_feature(&GuidingBoltPlugin::new())
             .expect("guiding bolt applies")
+            .apply_feature(&BlessPlugin)
+            .expect("bless applies")
             .build()
             .expect("builds");
 
-        assert_eq!(built.resources.len(), 1, "no second pool was created");
-        assert_eq!(built.actions[0].cost.unwrap().resource, idx_before);
+        assert!(built.resources.is_empty(), "no pool of its own");
+        assert_eq!(built.actions[0].spell_slot_level, Some(1));
+        assert_eq!(built.actions[1].spell_slot_level, Some(1));
+        assert_eq!(built.spell_slots.max(1), 3);
     }
 
     /// The `Strike`'s own damage distribution: a miss deals nothing, a hit

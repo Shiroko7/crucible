@@ -3,25 +3,113 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::casting::BypassCastingRestrictionsPlugin;
+use super::items::LimitedUseDebuffItemPlugin;
 use super::prestige_spellcasting::{AbilityRequirement, PrestigeSpellcastingPlugin};
 use super::rogue::*;
 use super::spells::*;
 use super::standard::*;
-use super::traits::{FeatureError, FeaturePlugin, FeatureResult};
-use crate::rules::creature::{Ability, DamageKind, SPELL_LEVELS};
+use super::traits::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
+use crate::dsl::scenario::{self, DurationSpec, TraitEffect};
+use crate::rules::creature::{Ability, DamageKind, MoveKind, Rider, SPELL_LEVELS};
 
-/// Read a spell plugin's optional `resource` (a pool name) and `cost` (an
-/// amount, default 1) TOML params into a [`SpellCost`].
+/// Read a spell plugin's optional cost into a [`SpellCost`]: `slot = N`
+/// spends a spell slot of that level, while `resource = "<pool>"` (with an
+/// optional `cost` amount, default 1) spends from a pool the caster already
+/// declared under `[*.resources]` - a wand's charges, a feature's own uses.
+/// Leaving both off makes the cast free.
 ///
 /// Shared by every spell factory below so "how it's paid for" stays a
-/// declared parameter rather than a name a plugin invents itself: a caster's
-/// TOML names whichever pool it already declared under `[*.resources]` -
-/// a real slot pool or a wand's own charges - and leaving `resource` off
-/// entirely makes the cast free.
-fn parse_spell_cost(val: &toml::Value) -> Option<SpellCost> {
-    let resource = val.get("resource").and_then(|v| v.as_str())?;
+/// declared parameter rather than a name a plugin invents itself.
+fn parse_spell_cost(val: &toml::Value) -> FeatureResult<Option<SpellCost>> {
+    if let Some(level) = val.get("slot").and_then(|v| v.as_integer()) {
+        if !(1..=i64::from(SPELL_LEVELS)).contains(&level) {
+            return Err(FeatureError::InvalidConfiguration(format!(
+                "a spell slot is level 1 to 9, got `slot = {level}`"
+            )));
+        }
+        return Ok(Some(SpellCost::Slot(level as u32)));
+    }
+    let Some(resource) = val.get("resource").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
     let amount = val.get("cost").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
-    Some(SpellCost::new(resource, amount))
+    Ok(Some(SpellCost::new(resource, amount)))
+}
+
+/// A trait phrase that must describe a [`Rider`] - `bonus 3d6 piercing vs
+/// dragon` - rather than a flat stat bonus, for a plugin that attaches it to
+/// one of its own moves.
+fn parse_rider_phrase(phrase: &str) -> FeatureResult<Rider> {
+    match scenario::parse_trait_external(phrase).map_err(FeatureError::InvalidConfiguration)? {
+        TraitEffect::Rider(rider) => Ok(rider),
+        other => Err(FeatureError::InvalidConfiguration(format!(
+            "`{phrase}` is a flat bonus ({other:?}), not something a weapon carries onto a hit"
+        ))),
+    }
+}
+
+/// A move written in the scenario DSL, parsed only when it is applied - it
+/// may name a resource pool (`cost potions 1`), and pools are resolved
+/// against the creature being built - then promoted to a bonus action by
+/// [`FastHandsPlugin`].
+#[derive(Debug, Clone)]
+struct DeclaredFastHandsMove {
+    name: String,
+    effect: String,
+    kind: Option<MoveKind>,
+}
+
+/// A spell written in the scenario DSL, granted as a limited-use cast that
+/// bypasses casting restrictions - parsed when applied, like
+/// [`DeclaredFastHandsMove`].
+#[derive(Debug, Clone)]
+struct DeclaredBypassCast {
+    name: String,
+    effect: String,
+    uses: u32,
+}
+
+impl FeaturePlugin for DeclaredBypassCast {
+    fn id(&self) -> &'static str {
+        "bypasses_casting_restrictions"
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        let mut m = scenario::parse_move_external(
+            &format!("{} | {}", self.name, self.effect),
+            &builder.creature,
+        )
+        .map_err(FeatureError::InvalidConfiguration)?;
+        m.kind = MoveKind::Spell;
+        BypassCastingRestrictionsPlugin::new(m, self.uses).apply(builder)
+    }
+}
+
+impl FeaturePlugin for DeclaredFastHandsMove {
+    fn id(&self) -> &'static str {
+        "fast_hands"
+    }
+
+    fn name(&self) -> &str {
+        "Fast Hands"
+    }
+
+    fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
+        let mut m = scenario::parse_move_external(
+            &format!("{} | {}", self.name, self.effect),
+            &builder.creature,
+        )
+        .map_err(FeatureError::InvalidConfiguration)?;
+        if let Some(kind) = self.kind {
+            m.kind = kind;
+        }
+        FastHandsPlugin::new(m).apply(builder)
+    }
 }
 
 pub type PluginFactory =
@@ -105,9 +193,107 @@ impl FeatureRegistry {
         // Cure Wounds
         self.register("cure_wounds", |_val| Ok(Box::new(CureWoundsPlugin::new())));
 
-        // Reliable Talent (2024 Rogue 11). `fast_hands` has no entry here -
-        // it needs a full `Move` (see `FastHandsPlugin`'s doc comment),
-        // which these toml-parameter factories cannot build yet.
+        // Fast Hands (2024 Thief 3): an object or magic-item move, written in
+        // the scenario DSL, taken as a Bonus Action.
+        self.register("fast_hands", |val| {
+            let name = val.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                FeatureError::InvalidConfiguration(
+                    "fast_hands needs a `name` for the move it promotes".to_string(),
+                )
+            })?;
+            let effect = val.get("effect").and_then(|v| v.as_str()).ok_or_else(|| {
+                FeatureError::InvalidConfiguration(
+                    "fast_hands needs an `effect` (the move, in the scenario DSL)".to_string(),
+                )
+            })?;
+            let kind = match val.get("kind").and_then(|v| v.as_str()) {
+                None => None,
+                Some("object") => Some(MoveKind::ObjectUse),
+                Some("magic_item") | Some("item") => Some(MoveKind::MagicItem),
+                Some(other) => {
+                    return Err(FeatureError::InvalidConfiguration(format!(
+                        "fast_hands `kind` is `object` or `magic_item`, got `{other}`"
+                    )))
+                }
+            };
+            Ok(Box::new(DeclaredFastHandsMove {
+                name: name.to_string(),
+                effect: effect.to_string(),
+                kind,
+            }))
+        });
+
+        // A limited-use way to cast a spell without components, getting
+        // through a silence (AT-04's Tricky Spells, Subtle Spell): the spell
+        // itself written in the scenario DSL, on its own charge budget.
+        self.register("bypasses_casting_restrictions", |val| {
+            let name = val.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                FeatureError::InvalidConfiguration(
+                    "bypasses_casting_restrictions needs a `name`".to_string(),
+                )
+            })?;
+            let effect = val.get("effect").and_then(|v| v.as_str()).ok_or_else(|| {
+                FeatureError::InvalidConfiguration(
+                    "bypasses_casting_restrictions needs an `effect` (the spell, in the scenario DSL)"
+                        .to_string(),
+                )
+            })?;
+            let uses = val.get("uses").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+            Ok(Box::new(DeclaredBypassCast {
+                name: name.to_string(),
+                effect: effect.to_string(),
+                uses,
+            }))
+        });
+
+        // A limited-use item that forces a save or a debuff, used through
+        // Fast Hands (ITM-05). `dc` left off means "against your spell save
+        // DC"; `duration` is written the way the scenario DSL writes one.
+        self.register("limited_use_debuff_item", |val| {
+            let name = val.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                FeatureError::InvalidConfiguration(
+                    "limited_use_debuff_item needs a `name`".to_string(),
+                )
+            })?;
+            let uses = val.get("uses").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+            let ability_str = val.get("ability").and_then(|v| v.as_str()).ok_or_else(|| {
+                FeatureError::InvalidConfiguration(
+                    "limited_use_debuff_item needs the `ability` its save uses".to_string(),
+                )
+            })?;
+            let ability = Ability::parse(ability_str)
+                .ok_or_else(|| FeatureError::UnknownAbility(ability_str.to_string()))?;
+            let dc = val.get("dc").and_then(|v| v.as_integer()).map(|d| d as i32);
+            let phrase = val
+                .get("duration")
+                .and_then(|v| v.as_str())
+                .unwrap_or("until applier");
+            let words: Vec<&str> = phrase.split_whitespace().collect();
+            let (spec, used) = scenario::parse_duration(&words, 0, phrase)
+                .map_err(FeatureError::InvalidConfiguration)?;
+            if used != words.len() {
+                return Err(FeatureError::InvalidConfiguration(format!(
+                    "`{phrase}` is not a duration"
+                )));
+            }
+            let duration = match (spec, dc) {
+                (DurationSpec::Fixed(d), _) => d,
+                (DurationSpec::UntilSave, Some(dc)) => {
+                    crate::rules::creature::Duration::SaveEndTurn { ability, dc }
+                }
+                (DurationSpec::UntilSave, None) => {
+                    return Err(FeatureError::InvalidConfiguration(format!(
+                        "{name}: `until save` needs a fixed `dc` to repeat"
+                    )))
+                }
+            };
+            Ok(Box::new(match dc {
+                Some(dc) => LimitedUseDebuffItemPlugin::new(name, uses, ability, dc, duration),
+                None => LimitedUseDebuffItemPlugin::against_spell_dc(name, uses, ability, duration),
+            }))
+        });
+
+        // Reliable Talent (2024 Rogue 7).
         self.register("reliable_talent", |val| {
             let floor = val.get("floor").and_then(|v| v.as_integer()).unwrap_or(10) as i32;
             Ok(Box::new(ReliableTalentPlugin::with_floor(floor)))
@@ -119,7 +305,7 @@ impl FeatureRegistry {
         // Blindness/Deafness (SRD 5.2, 2nd level)
         self.register("blindness_deafness", |val| {
             let deafen = val.get("deafen").and_then(|v| v.as_bool()).unwrap_or(false);
-            let cost = parse_spell_cost(val);
+            let cost = parse_spell_cost(val)?;
             Ok(Box::new(BlindnessDeafnessPlugin::new(deafen, cost)))
         });
 
@@ -129,13 +315,13 @@ impl FeatureRegistry {
             let word = CommandWord::parse(word_str).ok_or_else(|| {
                 FeatureError::InvalidConfiguration(format!("unknown command word '{word_str}'"))
             })?;
-            let cost = parse_spell_cost(val);
+            let cost = parse_spell_cost(val)?;
             Ok(Box::new(CommandPlugin::new(word, cost)))
         });
 
         // Magic Missile (SRD 5.2, 1st level)
         self.register("magic_missile", |val| {
-            let cost = parse_spell_cost(val);
+            let cost = parse_spell_cost(val)?;
             Ok(Box::new(MagicMissilePlugin::new(cost)))
         });
 
@@ -176,7 +362,7 @@ impl FeatureRegistry {
             ))
         });
 
-        // Steady Aim (2024 Rogue 2)
+        // Steady Aim (2024 Rogue 3)
         self.register("steady_aim", |_val| Ok(Box::new(SteadyAimPlugin::new())));
 
         // Cunning Action (2024 Rogue 2)
@@ -245,12 +431,12 @@ impl FeatureRegistry {
             let ability = Ability::parse(spellcasting_ability_str)
                 .ok_or_else(|| FeatureError::UnknownAbility(spellcasting_ability_str.to_string()))?;
 
-            let attack_bonus = val
-                .get("spellcasting_attack_bonus")
+            let proficiency_bonus = val
+                .get("proficiency_bonus")
                 .and_then(|v| v.as_integer())
                 .ok_or_else(|| {
                     FeatureError::InvalidConfiguration(
-                        "prestige_spellcasting needs a `spellcasting_attack_bonus` (the granted spell attack bonus; the save DC is derived as 8 + this, the standard 5e formula)"
+                        "prestige_spellcasting needs a `proficiency_bonus` (the ability modifier comes from the creature's own score, and the save DC is derived from both)"
                             .to_string(),
                     )
                 })? as i32;
@@ -283,7 +469,7 @@ impl FeatureRegistry {
                 minimum_sneak_attack_dice,
                 slots,
                 ability,
-                attack_bonus,
+                proficiency_bonus,
             )))
         });
 
@@ -327,6 +513,27 @@ impl FeatureRegistry {
                 .get("finesse_or_ranged")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let ranged = val.get("ranged").and_then(|v| v.as_bool()).unwrap_or(false);
+            let weapon_bonus = val
+                .get("weapon_bonus")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(0) as i32;
+            let weapon_riders = match val.get("weapon_traits").and_then(|v| v.as_array()) {
+                None => Vec::new(),
+                Some(list) => list
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .ok_or_else(|| {
+                                FeatureError::InvalidConfiguration(
+                                    "true_strike `weapon_traits` is a list of trait phrases"
+                                        .to_string(),
+                                )
+                            })
+                            .and_then(parse_rider_phrase)
+                    })
+                    .collect::<FeatureResult<Vec<Rider>>>()?,
+            };
             let radiant_dice_count = val
                 .get("radiant_dice_count")
                 .and_then(|v| v.as_integer())
@@ -342,7 +549,7 @@ impl FeatureRegistry {
                 .unwrap_or(6) as u32;
             let radiant_damage_kind = damage_kind("radiant_damage_kind", Some("radiant"))?;
 
-            Ok(Box::new(TrueStrikePlugin::new(
+            let mut plugin = TrueStrikePlugin::new(
                 weapon_dice_count,
                 weapon_dice_sides,
                 weapon_damage_kind,
@@ -350,7 +557,15 @@ impl FeatureRegistry {
                 radiant_dice_count,
                 radiant_dice_sides,
                 radiant_damage_kind,
-            )))
+            )
+            .with_weapon_bonus(weapon_bonus);
+            if ranged {
+                plugin = plugin.with_ranged();
+            }
+            for rider in weapon_riders {
+                plugin = plugin.with_weapon_rider(rider);
+            }
+            Ok(Box::new(plugin))
         });
 
         // Spiritual Weapon (SRD 5.2, 2nd level, Bonus Action strike, no
@@ -440,10 +655,10 @@ mod tests {
     fn magic_missile_builds_from_toml_and_spends_a_named_pool() {
         let registry = FeatureRegistry::new();
         let mut builder = spellcaster();
-        builder.ensure_resource("spell_slots_1", 4);
+        builder.ensure_resource("wand_charges", 7);
 
         let params: toml::Value =
-            toml::from_str("plugin = \"magic_missile\"\nresource = \"spell_slots_1\"").unwrap();
+            toml::from_str("plugin = \"magic_missile\"\nresource = \"wand_charges\"").unwrap();
         let plugin = registry
             .build_plugin("magic_missile", &params)
             .expect("magic_missile builds from toml");
@@ -453,9 +668,34 @@ mod tests {
         let cost = builder.creature.actions[0].cost.expect("cost resolved");
         assert_eq!(
             builder.creature.resources[cost.resource].name,
-            "spell_slots_1"
+            "wand_charges"
         );
         assert_eq!(cost.amount, 1);
+        assert_eq!(builder.creature.actions[0].spell_slot_level, None);
+    }
+
+    /// `slot = N` spends from the caster's real slot pool - the same one
+    /// Bless and Healing Word draw on - rather than a named resource.
+    #[test]
+    fn a_spell_cost_can_be_a_real_spell_slot() {
+        let registry = FeatureRegistry::new();
+        let mut builder = spellcaster();
+        let params: toml::Value = toml::from_str("plugin = \"command\"\nslot = 1").unwrap();
+        registry
+            .build_plugin("command", &params)
+            .unwrap()
+            .apply(&mut builder)
+            .unwrap();
+        let m = &builder.creature.actions[0];
+        assert_eq!(m.spell_slot_level, Some(1));
+        assert_eq!(m.cost, None);
+        assert_eq!(m.kind, MoveKind::Spell);
+
+        let bad: toml::Value = toml::from_str("plugin = \"command\"\nslot = 10").unwrap();
+        assert!(matches!(
+            registry.build_plugin("command", &bad),
+            Err(FeatureError::InvalidConfiguration(_))
+        ));
     }
 
     #[test]
@@ -640,7 +880,7 @@ mod tests {
             ability_2_min = 13
             min_sneak_attack_dice = 2
             spellcasting_ability = "wis"
-            spellcasting_attack_bonus = 11
+            proficiency_bonus = 4
 
             [slots]
             1 = 4
@@ -661,6 +901,7 @@ mod tests {
         let mut builder = crate::dsl::plugin::CreatureBuilder::new("Qualifying Rogue", 15, 40);
         builder.set_ability_score(Ability::Dex, 13);
         builder.set_ability_score(Ability::Int, 13);
+        builder.set_ability_score(Ability::Wis, 20);
         builder.add_rider(crate::rules::creature::Rider::ConditionalExtraDamage {
             dice_count: 2,
             dice_sides: 6,
@@ -673,8 +914,9 @@ mod tests {
         assert_eq!(builder.creature.spell_slots.max(2), 3);
         let profile = builder.creature.spellcasting.expect("profile granted");
         assert_eq!(profile.ability, Ability::Wis);
-        assert_eq!(profile.attack_bonus(), 11);
-        assert_eq!(profile.save_dc(), 19);
+        assert_eq!(profile.ability_modifier, 5);
+        assert_eq!(profile.attack_bonus(), 9);
+        assert_eq!(profile.save_dc(), 17);
     }
 
     #[test]
@@ -704,7 +946,7 @@ mod tests {
                 ability_1_min = 13
                 min_sneak_attack_dice = 2
                 spellcasting_ability = "wis"
-                spellcasting_attack_bonus = 11
+                proficiency_bonus = 4
             "#,
         )
         .unwrap();
@@ -750,6 +992,163 @@ mod tests {
 
         let action = builder.creature.actions.last().expect("action added");
         assert_eq!(action.name, "True Strike");
+    }
+
+    /// The weapon a True Strike is made with brings its own magic bonus and
+    /// its own riders: a +3 bow of slaying hits and damages 3 better, and
+    /// carries its bonus dice onto the spell's attack.
+    #[test]
+    fn true_strike_carries_the_wielded_weapons_bonus_and_riders() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str(
+            r#"
+                plugin = "true_strike"
+                weapon_dice_count = 1
+                weapon_dice_sides = 8
+                weapon_damage_kind = "piercing"
+                ranged = true
+                weapon_bonus = 3
+                weapon_traits = ["bonus 3d6 piercing vs dragon"]
+                radiant_dice_count = 2
+            "#,
+        )
+        .unwrap();
+        let plugin = registry.build_plugin("true_strike", &params).unwrap();
+        let mut builder = crate::dsl::plugin::CreatureBuilder::new("Caster", 15, 30);
+        builder.set_spellcasting(crate::rules::creature::SpellCastingProfile::new(
+            Ability::Wis,
+            5,
+            4,
+        ));
+        plugin.apply(&mut builder).unwrap();
+        let action = &builder.creature.actions[0];
+        let Effect::Strikes { strike, .. } = &action.effect else {
+            panic!("expected strikes");
+        };
+        assert_eq!(strike.to_hit, 12, "5 + 4 + the weapon's 3");
+        assert_eq!(strike.damage[0].bonus, 8, "5 + the weapon's 3");
+        assert!(strike.kind.ranged && strike.kind.weapon && strike.kind.spell);
+        assert!(matches!(
+            action.riders[..],
+            [crate::rules::creature::Rider::BonusDamageVsCreatureType { dice_count: 3, .. }]
+        ));
+
+        let flat: toml::Value = toml::from_str(
+            r#"
+                weapon_dice_count = 1
+                weapon_dice_sides = 8
+                weapon_damage_kind = "piercing"
+                radiant_dice_count = 2
+                weapon_traits = ["ac 2"]
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            registry.build_plugin("true_strike", &flat),
+            Err(FeatureError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn fast_hands_promotes_a_declared_object_move_to_a_bonus_action() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str(
+            r#"
+                plugin = "fast_hands"
+                name = "Potion of Healing"
+                effect = "object | cost potions 1 | heal 2d4+2"
+            "#,
+        )
+        .unwrap();
+        let plugin = registry.build_plugin("fast_hands", &params).unwrap();
+        let mut builder = crate::dsl::plugin::CreatureBuilder::new("Thief", 15, 30);
+        builder.ensure_resource("potions", 3);
+        plugin.apply(&mut builder).unwrap();
+        assert!(builder.creature.actions.is_empty());
+        let potion = &builder.creature.bonus_actions[0];
+        assert_eq!(potion.name, "Potion of Healing");
+        assert_eq!(potion.kind, MoveKind::ObjectUse);
+        assert!(matches!(potion.effect, Effect::Heal(_)));
+        assert!(potion.cost.is_some());
+
+        // A plain attack is neither an object nor a magic item.
+        let attack: toml::Value = toml::from_str(
+            r#"
+                name = "Stab"
+                effect = "hit +5 | 1d4+3 piercing"
+            "#,
+        )
+        .unwrap();
+        let plugin = registry.build_plugin("fast_hands", &attack).unwrap();
+        assert!(matches!(
+            plugin.apply(&mut builder),
+            Err(FeatureError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn a_components_free_cast_builds_from_toml() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str(
+            r#"
+                plugin = "bypasses_casting_restrictions"
+                name = "Quiet Bolt"
+                effect = "ranged | hit +7 | 4d6 radiant"
+                uses = 1
+            "#,
+        )
+        .unwrap();
+        let plugin = registry
+            .build_plugin("bypasses_casting_restrictions", &params)
+            .unwrap();
+        let mut builder = spellcaster();
+        plugin.apply(&mut builder).unwrap();
+        let m = &builder.creature.actions[0];
+        assert!(m.bypasses_casting_restrictions);
+        assert_eq!(m.kind, MoveKind::Spell);
+        assert_eq!(m.uses, crate::rules::creature::Uses::Limited(1));
+    }
+
+    #[test]
+    fn limited_use_debuff_item_builds_from_toml() {
+        let registry = FeatureRegistry::new();
+        let params: toml::Value = toml::from_str(
+            r#"
+                plugin = "limited_use_debuff_item"
+                name = "Test Card"
+                ability = "wis"
+                duration = "for 1 minute"
+            "#,
+        )
+        .unwrap();
+        let plugin = registry
+            .build_plugin("limited_use_debuff_item", &params)
+            .unwrap();
+        let mut builder = spellcaster();
+        plugin.apply(&mut builder).unwrap();
+        let item = &builder.creature.bonus_actions[0];
+        assert_eq!(item.kind, MoveKind::MagicItem);
+        let Effect::Save(save) = &item.effect else {
+            panic!("expected a save");
+        };
+        assert_eq!(save.dc, 15, "the caster's own spell save DC");
+        assert_eq!(
+            save.on_failure,
+            vec![(Condition::Suppressed, Duration::Rounds(10))]
+        );
+
+        let repeat_without_dc: toml::Value = toml::from_str(
+            r#"
+                name = "Test Card"
+                ability = "wis"
+                duration = "until save"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            registry.build_plugin("limited_use_debuff_item", &repeat_without_dc),
+            Err(FeatureError::InvalidConfiguration(_))
+        ));
     }
 
     #[test]

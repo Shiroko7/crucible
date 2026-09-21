@@ -3,15 +3,10 @@
 //! Some builds have a limited-use feature letting them cast a spell while
 //! under a restriction that would normally prevent spellcasting - being
 //! silenced, or unable to speak or gesture, are the usual real-world
-//! examples. This branch has no restriction-checking mechanism yet (no
-//! condition here blocks casting at all - that is a different, independent
-//! piece of work), so there is nothing for an exemption to visibly change
-//! today. What this module implements is the standalone part that belongs
-//! here regardless of whether that mechanism exists yet: a limited-use
-//! charge that, when spent, marks one specific move-taking as exempt via
-//! [`Move::bypasses_casting_restrictions`] - the flag itself and the
-//! charge-spending mechanic, so that whichever restriction-checking
-//! mechanism arrives later only has to learn to read one boolean.
+//! examples. This module implements a limited-use charge that, when spent,
+//! marks one specific move-taking as exempt via
+//! [`Move::bypasses_casting_restrictions`]; `sim::duel`'s move gating reads
+//! that flag, letting the move through [`crate::rules::creature::Condition::Silenced`].
 //!
 //! The charge budget reuses [`Uses::Limited`], the same "N per day" pattern
 //! [`super::standard::LegendaryResistancePlugin`] and every other

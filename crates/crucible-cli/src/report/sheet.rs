@@ -1,6 +1,6 @@
 //! Formats and prints the parsed creature sheet.
 
-use crucible_core::creature::{Creature, Effect, Move, Rider, Uses};
+use crucible_core::creature::{AttackTrigger, Creature, Effect, Move, MoveKind, Rider, Uses};
 
 /// Strip copy numbers like "Hero 3" back to "Hero", so resizing does not stack numbers.
 pub fn strip_number(name: &str) -> &str {
@@ -51,7 +51,7 @@ pub fn print_sheet(roster: &[&Creature]) {
                     "    {label:<10} {:<24} {:<46} {:>5.1} avg vs {}",
                     m.name,
                     describe(c, m),
-                    m.effect.mean_damage(against),
+                    crucible_core::duel::expected_damage(c, m, against),
                     strip_number(&against.name)
                 );
             }
@@ -77,6 +77,18 @@ pub fn print_sheet(roster: &[&Creature]) {
 
 pub fn describe(owner: &Creature, m: &Move) -> String {
     let mut bits = vec![body(&m.effect)];
+    match m.kind {
+        MoveKind::Standard => {}
+        MoveKind::Spell => bits.push("spell".to_string()),
+        MoveKind::MagicItem => bits.push("magic item".to_string()),
+        MoveKind::ObjectUse => bits.push("object".to_string()),
+    }
+    if let Some(level) = m.spell_slot_level {
+        bits.push(format!("level {level} slot"));
+    }
+    if m.concentration {
+        bits.push("concentration".to_string());
+    }
     match m.uses {
         Uses::Unlimited => {}
         Uses::Limited(n) => bits.push(format!("{n} uses")),
@@ -93,6 +105,9 @@ pub fn describe(owner: &Creature, m: &Move) -> String {
         ));
     }
     for rider in &m.riders {
+        if let Rider::BonusDamageVsCreatureType { .. } | Rider::ConditionOnHit { .. } = rider {
+            bits.push(describe_trait(rider));
+        }
         if let Rider::SaveOrCondition {
             ability,
             dc,
@@ -123,7 +138,20 @@ pub fn describe(owner: &Creature, m: &Move) -> String {
 
 pub fn body(effect: &Effect) -> String {
     match effect {
-        Effect::Strikes { strike, count } => format!("{count}x at {:+}", strike.to_hit),
+        Effect::Strikes { strike, count } => format!(
+            "{count}x {}{} at {:+}",
+            if strike.kind.ranged {
+                "ranged"
+            } else {
+                "melee"
+            },
+            match (strike.kind.weapon, strike.kind.spell) {
+                (true, true) => " weapon+spell",
+                (false, true) => " spell",
+                _ => "",
+            },
+            strike.to_hit
+        ),
         Effect::Save(save) => format!(
             "{} save dc {}{}{}",
             save.ability.name(),
@@ -163,17 +191,14 @@ pub fn describe_trait(rider: &Rider) -> String {
             format!("evasion: a made {} save takes nothing", ability.name())
         }
         Rider::AlwaysSucceed { uses } => format!("legendary resistance {uses}/fight"),
-        Rider::ReduceDamage {
-            kinds,
-            roll,
-            per_round,
-        } => format!(
-            "reduce {} damage by {}d{}{:+} ({per_round}/round)",
+        Rider::ReduceDamage { kinds, roll } => format!(
+            "reaction: reduce {} damage by {}d{}{:+}",
             kinds.iter().map(|k| k.name()).collect::<Vec<_>>().join("/"),
             roll.count,
             roll.sides,
             roll.bonus
         ),
+        Rider::HalveAttackDamage => "reaction: halve one attack's damage".to_string(),
         Rider::SaveOrCondition {
             ability,
             dc,
@@ -192,11 +217,13 @@ pub fn describe_trait(rider: &Rider) -> String {
             "+{dice_count}d{dice_sides} on advantage or an adjacent ally, not disadvantage{}",
             if *once_per_turn { " (once/turn)" } else { "" }
         ),
-        Rider::ReactionOnTargeted {
-            ac_bonus,
-            per_round,
-            ..
-        } => format!("reaction: +{ac_bonus} ac vs one targeting attack ({per_round}/round)"),
+        Rider::ReactionOnTargeted { ac_bonus, trigger } => format!(
+            "reaction: +{ac_bonus} ac vs one {}",
+            match trigger {
+                AttackTrigger::AnyAttack => "attack",
+                AttackTrigger::RangedWeaponAttack => "ranged weapon attack",
+            }
+        ),
         Rider::CunningStrike { dc } => {
             format!("cunning strike: spend sneak attack dice dc {dc}")
         }
@@ -248,10 +275,12 @@ pub fn describe_trait(rider: &Rider) -> String {
             ability,
             dc,
             debuffed_ability,
+            condition,
             ..
         } => format!(
-            "injury poison: next hit forces {} dc {dc}, fail gives disadvantage on {} saves",
+            "injury poison (1 dose): next weapon hit forces {} dc {dc}, fail gives {}disadvantage on {} saves",
             ability.name(),
+            condition.map_or(String::new(), |c| format!("{} and ", c.name())),
             debuffed_ability.name()
         ),
         Rider::ConditionOnHit { condition, .. } => {

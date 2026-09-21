@@ -207,19 +207,20 @@ pub enum Condition {
     /// take away legendary actions, since Command's text only ever reaches
     /// the target's own next turn.
     Compelled,
-    /// Steady Aim (2024 Rogue 2): advantage on the creature's own attack
-    /// rolls, and its speed drops to 0, both for the rest of the turn.
+    /// Steady Aim (2024 Rogue 3): advantage on the creature's own next attack
+    /// roll this turn, and its speed drops to 0 for the rest of the turn.
     ///
     /// The advantage half is [`Condition::advantage_on_attacks`], the mirror
-    /// of [`Condition::disadvantage_on_attacks`] that nothing needed until
-    /// now. The speed half is [`Condition::zeroes_speed`] - there is no
-    /// movement model here to apply it against (see `DESIGN.md`'s
+    /// of [`Condition::disadvantage_on_attacks`], and like [`Condition::Marked`]
+    /// it is used up by the attack roll it helps - see `sim::duel`'s attack
+    /// resolution. The speed half is [`Condition::zeroes_speed`] - there is
+    /// no movement model here to apply it against (see `DESIGN.md`'s
     /// "Positioning is the gap that matters"), so it is exposed generically
     /// rather than acted on, ready for whenever one exists.
     SteadyAim,
     /// Cannot cast a spell or activate a magic item
     /// ([`Condition::blocks_magic`]), has disadvantage on every saving throw
-    /// it makes ([`Condition::disadvantage_on_saves`]), and any damage it
+    /// it makes ([`Condition::disadvantage_on_save`]), and any damage it
     /// deals - of any type, to anyone - is halved
     /// ([`Condition::halves_own_damage`]).
     ///
@@ -236,13 +237,29 @@ pub enum Condition {
     /// the next attack roll made against it - by anyone, not only whoever
     /// applied it - has advantage.
     ///
-    /// Guiding Bolt's mark. Unlike every other condition here, it is not
-    /// cleared only at a turn boundary: `sim::duel`'s attack resolution
-    /// consumes it the moment that next roll happens, so it clears whichever
-    /// comes first - a roll against its holder, or the start of the holder's
-    /// own next turn (its usual [`Duration::VictimTurn`] expiry, for the
-    /// "never got attacked" case).
+    /// Guiding Bolt's mark. Unlike most conditions here, it is not cleared
+    /// only at a turn boundary: `sim::duel`'s attack resolution consumes it
+    /// the moment that next roll happens, so it clears whichever comes first -
+    /// a roll against its holder, or the end of the applier's next turn (its
+    /// [`Duration::ApplierNextTurnEnd`] expiry, for the "never got attacked"
+    /// case).
     Marked,
+    /// Disadvantage on this creature's own saving throws of one ability, and
+    /// nothing else - what an injury poison leaves behind on a failed save
+    /// (see [`crate::rules::creature::Rider::InjuryPoison`]). Not a named SRD
+    /// condition, the same way [`Condition::Compelled`] is not: it is the
+    /// engine's handle on "saves of this one kind are burdened" so that
+    /// lifetime, stacking and clearing reuse the condition machinery rather
+    /// than a parallel list.
+    SaveDisadvantage(Ability),
+    /// Cannot cast a spell that has to be spoken - the Silence spell's
+    /// sphere, a gag. Spell components are not modelled here, so every spell
+    /// counts as needing a voice: this blocks every
+    /// [`crate::rules::creature::MoveKind::Spell`] move except one taken with
+    /// [`crate::rules::creature::Move::bypasses_casting_restrictions`]
+    /// (casting without components - Tricky Spells, Subtle Spell). See
+    /// [`Condition::blocks_casting`].
+    Silenced,
 }
 
 impl Condition {
@@ -259,6 +276,13 @@ impl Condition {
             "steady_aim" | "steady aim" => Self::SteadyAim,
             "suppressed" => Self::Suppressed,
             "marked" => Self::Marked,
+            "silenced" => Self::Silenced,
+            "disadvantage_str_saves" => Self::SaveDisadvantage(Ability::Str),
+            "disadvantage_dex_saves" => Self::SaveDisadvantage(Ability::Dex),
+            "disadvantage_con_saves" => Self::SaveDisadvantage(Ability::Con),
+            "disadvantage_int_saves" => Self::SaveDisadvantage(Ability::Int),
+            "disadvantage_wis_saves" => Self::SaveDisadvantage(Ability::Wis),
+            "disadvantage_cha_saves" => Self::SaveDisadvantage(Ability::Cha),
             _ => return None,
         })
     }
@@ -276,6 +300,15 @@ impl Condition {
             Self::SteadyAim => "steady_aim",
             Self::Suppressed => "suppressed",
             Self::Marked => "marked",
+            Self::Silenced => "silenced",
+            Self::SaveDisadvantage(ability) => match ability {
+                Ability::Str => "disadvantage_str_saves",
+                Ability::Dex => "disadvantage_dex_saves",
+                Ability::Con => "disadvantage_con_saves",
+                Ability::Int => "disadvantage_int_saves",
+                Ability::Wis => "disadvantage_wis_saves",
+                Ability::Cha => "disadvantage_cha_saves",
+            },
         }
     }
 
@@ -351,13 +384,26 @@ impl Condition {
         matches!(self, Self::Suppressed)
     }
 
-    /// Does this creature roll every saving throw it makes at disadvantage?
-    /// Composed with any other source of advantage or disadvantage on a save
-    /// via the usual 5e cancellation rule rather than overriding it - see
+    /// Blocks casting a spell the ordinary way, but not a cast made without
+    /// components ([`crate::rules::creature::Move::bypasses_casting_restrictions`]).
+    /// Unlike [`Condition::blocks_magic`], which stops casting outright.
+    pub fn blocks_casting(self) -> bool {
+        matches!(self, Self::Silenced)
+    }
+
+    /// Does this creature roll an `ability` saving throw at disadvantage?
+    /// [`Condition::Suppressed`] burdens every save,
+    /// [`Condition::SaveDisadvantage`] only its own ability's. Composed with
+    /// any other source of advantage or disadvantage on a save via the usual
+    /// 5e cancellation rule rather than overriding it - see
     /// `sim::duel::save_mode`, the same stacking `attack_mode` already
     /// applies to attack rolls.
-    pub fn disadvantage_on_saves(self) -> bool {
-        matches!(self, Self::Suppressed)
+    pub fn disadvantage_on_save(self, ability: Ability) -> bool {
+        match self {
+            Self::Suppressed => true,
+            Self::SaveDisadvantage(burdened) => burdened == ability,
+            _ => false,
+        }
     }
 
     /// Halves this creature's own outgoing damage, of any type, against
@@ -371,19 +417,30 @@ impl Condition {
 
 /// How long an applied condition lasts.
 ///
-/// Three variants because the real wordings differ and the difference
+/// Several variants because the real wordings differ and the difference
 /// matters: Stunning Strike lasts "until the start of *your* next turn", so the
 /// stunner's turn ends it; something a victim shakes off - standing up from
-/// Prone - ends at the start of the victim's own turn; and a spell that reads
-/// "at the end of each of its turns, the target can make a save" - Hold
-/// Person, most poisons - does not expire on a schedule at all, but on a
-/// repeated die roll that can succeed the very turn it was applied.
+/// Prone - ends at the start of the victim's own turn; Guiding Bolt's mark
+/// lasts "until the end of your next turn"; a spell that reads "at the end of
+/// each of its turns, the target can make a save" - Hold Person, most poisons -
+/// does not expire on a schedule at all, but on a repeated die roll that can
+/// succeed the very turn it was applied; and "for 1 minute" with no save at all
+/// is a plain count of rounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Duration {
     /// Until the start of the next turn of whoever applied it.
     ApplierTurn,
     /// Until the start of the victim's next turn.
     VictimTurn,
+    /// Until the *end* of the applier's next turn - Guiding Bolt's "before
+    /// the end of your next turn". Applied during the applier's own turn, it
+    /// survives that turn's end and clears at the end of the one after;
+    /// applied at any other moment, it clears at the end of the applier's
+    /// very next turn.
+    ApplierNextTurnEnd,
+    /// A fixed number of rounds, counted down at the start of each of the
+    /// applier's turns - "for 1 minute" with no repeated save is `Rounds(10)`.
+    Rounds(u32),
     /// Repeats `ability` against `dc` at the end of the victim's own turn,
     /// clearing the condition on a success. Kept as data on the duration
     /// rather than a new engine branch, the same way `SaveOrCondition` keeps

@@ -2,6 +2,9 @@
 #
 # Formatted data configuration defining the monster rather than hardcoding it in engine code.
 # The ingestion pipeline matches known actions, saves, recharge mechanics, and legendary actions.
+# Fireball, Scorching Ray and both spell-backed legendary actions are cast through the
+# dragon's Spellcasting, so they carry `spell`: anything that stops a creature casting
+# stops them too.
 
 [monster]
 name = "Adult Red Dragon"
@@ -35,19 +38,19 @@ effect = "strikes 3 | hit +14 | 1d10+8 slashing, 2d4 fire"
 
 [[monster.actions]]
 name = "Fireball"
-effect = "uses 1 | save dex dc 20 | 8d6 fire | half on success"
+effect = "spell | uses 1 | save dex dc 20 | 8d6 fire | half on success"
 
 [[monster.actions]]
 name = "Scorching Ray"
-effect = "strikes 3 | hit +12 | 2d6 fire"
+effect = "spell | ranged | strikes 3 | hit +12 | 2d6 fire"
 
 [[monster.legendary]]
 name = "Commanding Presence"
-effect = "recharge 1 | save wis dc 20 | 0 force | on fail prone until victim"
+effect = "spell | recharge 1 | save wis dc 20 | 0 force | on fail prone until victim"
 
 [[monster.legendary]]
 name = "Fiery Rays"
-effect = "recharge 1 | strikes 3 | hit +12 | 2d6 fire"
+effect = "spell | ranged | recharge 1 | strikes 3 | hit +12 | 2d6 fire"
 
 [[monster.legendary]]
 name = "Pounce (1 Rend)"

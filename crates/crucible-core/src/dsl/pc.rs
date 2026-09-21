@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::dsl::plugin::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
 use crate::rules::combat::Reduction;
-use crate::rules::creature::{Ability, Creature, DamageKind};
+use crate::rules::creature::{Ability, Condition, Creature, DamageKind};
 
 /// Structured representation of a Player Character (PC).
 #[derive(Debug, Clone, Deserialize)]
@@ -38,6 +38,10 @@ pub struct PlayerCharacter {
     pub immune: Vec<String>,
     #[serde(default)]
     pub vulnerable: Vec<String>,
+    /// Conditions this creature cannot be given at all - see
+    /// [`crate::rules::creature::Creature::condition_immunities`].
+    #[serde(default)]
+    pub condition_immune: Vec<String>,
     #[serde(default)]
     pub equipment: Vec<String>,
     #[serde(default)]
@@ -55,6 +59,7 @@ impl PlayerCharacter {
     pub fn to_creature(&self, registry: &FeatureRegistry) -> FeatureResult<Creature> {
         let mut builder = CreatureBuilder::new(&self.name, self.ac, self.hp);
         builder.creature.initiative = self.initiative;
+        builder.creature.player_character = true;
 
         // Apply raw ability scores, ahead of `features` below - a
         // prerequisite-gated feature (a prestige spellcasting grant, say)
@@ -95,6 +100,11 @@ impl PlayerCharacter {
             let kind = DamageKind::parse(kind_name)
                 .ok_or_else(|| FeatureError::UnknownDamageKind(kind_name.clone()))?;
             builder.add_reduction(kind, Reduction::Vulnerable);
+        }
+        for condition_name in &self.condition_immune {
+            let condition = Condition::parse(condition_name)
+                .ok_or_else(|| FeatureError::UnknownCondition(condition_name.clone()))?;
+            builder.creature.condition_immunities.push(condition);
         }
 
         // Apply trait strings: each is a Rider, or a flat passive stat bonus

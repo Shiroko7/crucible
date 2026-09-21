@@ -84,11 +84,9 @@ impl FeaturePlugin for SneakAttackPlugin {
 /// turn loop required. Whatever resource or `Uses` budget the move is under
 /// still gates it exactly once, whichever slot spends it.
 ///
-/// Takes ownership of the `Move` itself rather than a name to look up,
-/// because the string DSL has no clause yet for tagging a parsed move
-/// `ObjectUse` or `MagicItem` (see the note on `MoveKind::Standard` in
-/// `dsl::scenario::parse_move`) - a move this plugin can apply to only
-/// exists built directly in Rust for now.
+/// Takes ownership of the `Move` itself rather than a name to look up; the
+/// registry's `fast_hands` entry builds one from the scenario DSL, where the
+/// `object` and `item` clauses tag it `ObjectUse` or `MagicItem`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FastHandsPlugin {
     pub item_move: Move,
@@ -126,7 +124,7 @@ impl FeaturePlugin for FastHandsPlugin {
     }
 }
 
-/// Reliable Talent (2024 Rogue 11): treat any d20 roll of less than 10 as a
+/// Reliable Talent (2024 Rogue 7): treat any d20 roll of less than 10 as a
 /// 10, for an ability check using a skill or tool the rogue is proficient
 /// in - a floor under the roll, not a reroll, so it can only ever help.
 ///
@@ -180,9 +178,10 @@ impl FeaturePlugin for ReliableTalentPlugin {
 ///
 /// This plugin is deliberately the whole framework and nothing else: it only
 /// unlocks the DC and the ability to spend from Sneak Attack's pool (see
-/// [`Rider::CunningStrike`] and [`crate::rules::combat::DamageRider::spend`]).
-/// Which effects a spend actually buys - poison, a shove, breaking a grapple -
-/// is future work, one plugin per effect, each reading this same DC.
+/// [`Rider::CunningStrike`] and [`crate::rules::combat::DamageRider::spend`]),
+/// which with a Poisoner's Kit includes Poison. Trip and Withdraw are their
+/// own plugins, each reading this same DC. Which effect a given hit buys is
+/// chosen in the fight itself - see `sim::duel`'s Cunning Strike choice.
 ///
 /// `dex_modifier` and `proficiency_bonus` are plugin parameters rather than a
 /// baked-in `dc`, for the same reason [`crate::dsl::config::SpellcastingConfig`]
@@ -255,7 +254,7 @@ impl FeaturePlugin for CunningStrikePlugin {
     }
 }
 
-/// Steady Aim (2024 Rogue 2): Bonus Action. Grants advantage on your own next
+/// Steady Aim (2024 Rogue 3): Bonus Action. Grants advantage on your own next
 /// attack roll before the end of the turn, and your speed becomes 0 until the
 /// end of the turn.
 ///
@@ -273,14 +272,9 @@ impl FeaturePlugin for CunningStrikePlugin {
 /// that matters"), so that flag is tracked and exposed generically rather
 /// than acted on.
 ///
-/// One real gap this leaves: [`crate::sim::duel`] always resolves a turn's
-/// action before its bonus action (`Fight::turn`'s fixed `[Action, Bonus]`
-/// order), while the whole point of Steady Aim is to take it *before* the
-/// attack it is meant to buff. Until the duel engine lets a turn's action and
-/// bonus action be sequenced either way, this condition cannot buff the same
-/// turn's action in a simulated fight - it is still exactly right for a hand
-/// resolved outside the duel loop, and for whatever attack comes next once
-/// that ordering is possible.
+/// The move is marked [`Move::before_action`], so `sim::duel` resolves it
+/// before the same turn's action - the attack it exists to set up - and the
+/// attack roll uses the advantage up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SteadyAimPlugin;
 
@@ -300,12 +294,15 @@ impl FeaturePlugin for SteadyAimPlugin {
     }
 
     fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
-        builder.add_bonus_action(Move::new(
-            "Steady Aim",
-            Effect::Stance {
-                condition: Condition::SteadyAim,
-            },
-        ));
+        builder.add_bonus_action(
+            Move::new(
+                "Steady Aim",
+                Effect::Stance {
+                    condition: Condition::SteadyAim,
+                },
+            )
+            .with_before_action(),
+        );
         Ok(())
     }
 }
@@ -895,6 +892,10 @@ mod tests {
         );
         // Free to take: it costs the bonus action slot, not a resource.
         assert!(steady_aim.is_free());
+        assert!(
+            steady_aim.before_action,
+            "Steady Aim is taken before the attack it sets up"
+        );
         // Zero damage in its own right - the advantage it grants only shows
         // up on whatever attack rolls against it, which `sim::duel`'s
         // `attack_mode` and `Condition::advantage_on_attacks` cover.
