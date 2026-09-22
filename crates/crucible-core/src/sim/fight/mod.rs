@@ -86,6 +86,7 @@ mod reactions;
 mod resolve;
 mod saves;
 mod search;
+mod summon;
 mod swallow;
 #[cfg(test)]
 mod test_support;
@@ -94,7 +95,7 @@ mod turn;
 mod value;
 mod zones;
 
-use crate::creature::{Creature, Zone};
+use crate::creature::{AttackTrigger, Creature, Zone};
 use crate::prob::Rng;
 use crate::rules::{Ability, AttackModifier, Condition, DamageRoll, SaveModifier, SpellSlots};
 use crate::sim::Policy;
@@ -199,6 +200,25 @@ struct Fighter<'a> {
     /// `fighter::fights_in_melee` - which is what
     /// [`Fight::ally_adjacent`] reads.
     melee: bool,
+    /// Called up mid-fight by this roster index - see
+    /// [`crate::creature::Effect::Summon`]. A summon fights on its
+    /// summoner's side and can be attacked and destroyed, but it is not one
+    /// of the combatants the fight is *about*: it takes no turn of its own,
+    /// its death is not a death on its side, neither its hit points nor its
+    /// maximum count towards how healthy that side finished, and a side with
+    /// nothing left but summons has lost. It goes when its summoner does.
+    summoned_by: Option<(usize, usize)>,
+    /// The once-a-turn extra damage rider's budget
+    /// ([`crate::creature::Rider::OncePerTurnDamage`]), spent on the first
+    /// hit it rides and back at the start of this creature's *own* turn -
+    /// "once on each of your turns", unlike Sneak Attack's "once per turn",
+    /// which `sneak_attack_spent` refreshes on everybody's.
+    once_per_turn_damage_spent: bool,
+    /// A reactive AC bonus still standing from a reaction already spent -
+    /// [`crate::creature::Rider::ReactionOnTargeted`] with `lasting` - and
+    /// what kind of attack it answers. Gone at the start of this creature's
+    /// next turn, with the reaction itself.
+    reactive_ac: Option<(AttackTrigger, i32)>,
     /// Killed outright by massive damage, so healing cannot bring it back.
     /// See [`Creature::player_character`].
     dead: bool,
@@ -483,10 +503,13 @@ impl<'a> Fight<'a> {
         }
     }
 
+    /// How many combatants `side` has left standing. A summon does not
+    /// count: a side whose last creature has dropped has lost, however many
+    /// doubles are still swirling about.
     fn living(&self, side: Side) -> u32 {
         self.fighters
             .iter()
-            .filter(|f| f.side == side && f.alive())
+            .filter(|f| f.side == side && f.alive() && !f.is_summon())
             .count() as u32
     }
 
@@ -513,6 +536,13 @@ impl<'a> Fight<'a> {
         let mut spent = [0u32; 2];
         for f in &self.fighters {
             let s = f.side.index();
+            // A destroyed summon is not a death, and its hit points are not
+            // part of how healthy its side finished - it is spent kit, and
+            // what it cost is already counted where it was paid for.
+            if f.is_summon() {
+                damage[s] += f.dealt;
+                continue;
+            }
             if f.alive() {
                 survivors[s] += 1;
             } else {
@@ -542,6 +572,10 @@ struct ExtraPlan {
     rolls: Vec<DamageRoll>,
     /// Sneak Attack qualified, so a hit spends its once-per-turn budget.
     sneak_attack: bool,
+    /// A once-a-turn damage rider joined this blow, so a hit spends its
+    /// budget for the turn - see
+    /// [`crate::creature::Rider::OncePerTurnDamage`].
+    once_per_turn_damage: bool,
     /// The Cunning Strike effect a Sneak Attack die was spent on.
     cunning: Option<Cunning>,
 }

@@ -65,13 +65,23 @@ impl DamageKind {
     }
 }
 
-/// One damage component: `2d6 + 3` of a single type.
+/// One damage component: `2d6 + 3` of a single type - or of whichever of two
+/// types its wielder prefers, for a weapon that offers the choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DamageRoll {
     pub count: u32,
     pub sides: u32,
     pub bonus: i32,
     pub kind: DamageKind,
+    /// A second type this same damage may be dealt as instead, chosen per
+    /// attack: a weapon whose wielder can deal cold "instead of the weapon's
+    /// normal damage type", a flame blade that can burn or cut. `None` for
+    /// every ordinary damage component.
+    ///
+    /// The choice is made against the target rather than declared in advance -
+    /// see [`DamageRoll::reduction_against`] - because that is how it is made
+    /// at a table: nobody chooses the type their target is immune to.
+    pub alternative: Option<DamageKind>,
 }
 
 impl DamageRoll {
@@ -82,7 +92,32 @@ impl DamageRoll {
             sides,
             bonus,
             kind,
+            alternative: None,
         }
+    }
+
+    /// This component, dealt as either `kind` or `alternative`, whichever
+    /// serves its wielder better against the creature in front of it.
+    pub fn or(mut self, alternative: DamageKind) -> Self {
+        self.alternative = Some(alternative);
+        self
+    }
+
+    /// Which of this component's types actually lands, given how the target
+    /// reduces each: the one it reduces least. Ties keep the printed type,
+    /// which is what a stat sheet reads.
+    pub fn kind_against(&self, reduce: &dyn Fn(DamageKind) -> Reduction) -> DamageKind {
+        match self.alternative {
+            Some(alt) if rank(reduce(alt)) > rank(reduce(self.kind)) => alt,
+            _ => self.kind,
+        }
+    }
+
+    /// How the target reduces this component once its type is chosen - what
+    /// every damage path feeds into [`DamageRoll::pmf`] and
+    /// [`DamageRoll::sample`] in place of `reduce(roll.kind)`.
+    pub fn reduction_against(&self, reduce: &dyn Fn(DamageKind) -> Reduction) -> Reduction {
+        reduce(self.kind_against(reduce))
     }
 
     /// The exact distribution of this component alone.
@@ -126,6 +161,18 @@ pub enum Reduction {
     Immune,
 }
 
+/// How good a reduction is for the attacker facing it: immunity is worst,
+/// vulnerability best. The order a weapon's [`DamageRoll::alternative`] type
+/// is chosen by.
+fn rank(reduction: Reduction) -> u8 {
+    match reduction {
+        Reduction::Immune => 0,
+        Reduction::Resistant => 1,
+        Reduction::Normal => 2,
+        Reduction::Vulnerable => 3,
+    }
+}
+
 impl Reduction {
     #[inline]
     pub fn apply(self, damage: i32) -> i32 {
@@ -156,6 +203,7 @@ impl Reduction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prob::Rng;
 
     #[test]
     fn resistance_halves_and_rounds_down() {
@@ -164,6 +212,80 @@ mod tests {
         assert_eq!(Reduction::Resistant.apply(1), 0);
         assert_eq!(Reduction::Vulnerable.apply(7), 14);
         assert_eq!(Reduction::Immune.apply(7), 0);
+    }
+
+    /// A weapon whose wielder chooses the damage type picks the type the
+    /// creature in front of it reduces least - and the printed one when
+    /// there is nothing to choose between them.
+    #[test]
+    fn damage_with_a_choice_of_type_lands_as_whichever_the_target_reduces_least() {
+        let roll = DamageRoll::new(1, 6, 7, DamageKind::Slashing).or(DamageKind::Cold);
+        let against = |reduce: &dyn Fn(DamageKind) -> Reduction| {
+            (roll.kind_against(reduce), roll.reduction_against(reduce))
+        };
+
+        // Nothing to choose: the printed type stands.
+        let plain = |_: DamageKind| Reduction::Normal;
+        assert_eq!(against(&plain), (DamageKind::Slashing, Reduction::Normal));
+
+        // A shell that shrugs off blades: cold goes round it.
+        let armoured = |kind: DamageKind| match kind {
+            DamageKind::Slashing => Reduction::Resistant,
+            _ => Reduction::Normal,
+        };
+        assert_eq!(against(&armoured), (DamageKind::Cold, Reduction::Normal));
+
+        // Something out of the deep, immune to cold: the blade it is.
+        let frozen = |kind: DamageKind| match kind {
+            DamageKind::Cold => Reduction::Immune,
+            _ => Reduction::Normal,
+        };
+        assert_eq!(against(&frozen), (DamageKind::Slashing, Reduction::Normal));
+
+        // Both bad, one worse.
+        let tough = |kind: DamageKind| match kind {
+            DamageKind::Cold => Reduction::Immune,
+            _ => Reduction::Resistant,
+        };
+        assert_eq!(
+            against(&tough),
+            (DamageKind::Slashing, Reduction::Resistant)
+        );
+
+        // A component with no alternative never changes type.
+        let plain_roll = DamageRoll::new(1, 6, 7, DamageKind::Slashing);
+        assert_eq!(plain_roll.kind_against(&armoured), DamageKind::Slashing);
+        assert_eq!(
+            plain_roll.reduction_against(&armoured),
+            Reduction::Resistant
+        );
+    }
+
+    /// The exact and sampled paths choose the same way, which is the property
+    /// that keeps a choice of damage type from quietly drifting between them.
+    #[test]
+    fn a_chosen_damage_type_samples_like_its_exact_distribution() {
+        let roll = DamageRoll::new(2, 6, 3, DamageKind::Slashing).or(DamageKind::Cold);
+        let armoured = |kind: DamageKind| match kind {
+            DamageKind::Slashing => Reduction::Resistant,
+            _ => Reduction::Normal,
+        };
+        let reduction = roll.reduction_against(&armoured);
+        let exact = roll.pmf(false, reduction);
+        let mut rng = Rng::new(99);
+        let n = 20_000;
+        let mut total = 0i64;
+        for _ in 0..n {
+            let d = roll.sample(&mut rng, false, reduction);
+            assert!(d >= exact.min() && d <= exact.max());
+            total += i64::from(d);
+        }
+        let sampled_mean = total as f64 / f64::from(n);
+        assert!(
+            (sampled_mean - exact.mean()).abs() < 0.1,
+            "sampled {sampled_mean:.3}, exact {:.3}",
+            exact.mean()
+        );
     }
 
     #[test]

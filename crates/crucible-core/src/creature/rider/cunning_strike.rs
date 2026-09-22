@@ -102,7 +102,12 @@ mod tests {
         );
         assert_eq!(sneak_attack().cunning_strike_dc(), None);
         assert_eq!(
-            Rider::AlwaysSucceed { uses: 3 }.cunning_strike_dc(),
+            Rider::AlwaysSucceed {
+                uses: 3,
+                ability: None,
+                reaction: false,
+            }
+            .cunning_strike_dc(),
             None,
             "an unrelated rider is not mistaken for the Cunning Strike marker"
         );

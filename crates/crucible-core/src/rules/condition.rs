@@ -169,6 +169,58 @@ pub enum Condition {
     /// `sim::fight` when a breach happens, for a threshold that
     /// [`crate::creature::Rider::DamageThreshold::cracks`] says cracks.
     Cracked,
+    /// Hunted: whoever marked it deals extra damage to it, and nobody else
+    /// does. Hunter's Mark's mechanism, and Hex's.
+    ///
+    /// Carries nothing on its own - no advantage, no penalty - because the
+    /// whole effect is on the hunter's side
+    /// ([`crate::creature::Rider::BonusDamageVsQuarry`]). Which hunter is
+    /// read off who is maintaining it: the mark lasts as long as its caster
+    /// concentrates, so `sim::fight` asks whether *this* attacker's
+    /// concentration is holding this very condition on this very target,
+    /// rather than the condition carrying an owner it would then have to keep
+    /// in step with the concentration tracker.
+    Quarry,
+    /// Hit by a weapon with the Vex mastery: the creature that landed it has
+    /// Advantage on its *own* next attack roll against this target, before
+    /// the end of its next turn.
+    ///
+    /// [`Condition::Marked`]'s selfish twin - that one helps whoever attacks
+    /// next, from any side, which is Guiding Bolt's actual text; this one
+    /// helps only the attacker that applied it. Which attacker that is comes
+    /// from the condition's own lifetime: applied with
+    /// [`Duration::ApplierNextTurnEnd`], its expiry names the applier (see
+    /// `sim::fight::Expiry::TurnEnd`), which is exactly Vex's "before the end
+    /// of your next turn". Like `Marked`, it is used up by the attack roll it
+    /// helps.
+    Vexed,
+    /// Outlined by light: attack rolls against it have Advantage, and it
+    /// cannot benefit from being invisible - which nothing here models.
+    ///
+    /// Faerie Fire's mechanism. Unlike [`Condition::Marked`] it is not used
+    /// up by one roll: it lasts for its whole duration, so it is worth a
+    /// concentration slot rather than a cantrip.
+    Outlined,
+    /// Restrained: its speed is 0, attack rolls against it have Advantage,
+    /// its own attack rolls have Disadvantage, and it has Disadvantage on
+    /// Dexterity saving throws.
+    ///
+    /// Entangle's and Web's mechanism. The speed half has meaning only around
+    /// a creature with a mouth, where it is read as being unable to move
+    /// between zones - see [`Condition::zeroes_speed`].
+    Restrained,
+    /// A lasting boon its holder put on itself - the `n`th entry of its own
+    /// [`crate::creature::Creature::boons`]: extra damage on its hits,
+    /// resistances, or both, for as long as this condition lasts.
+    ///
+    /// The payload is an index rather than the boon itself so that a
+    /// condition stays `Copy` and small, and so that the boon's numbers stay
+    /// where every other piece of a creature's kit lives - on the creature,
+    /// declared once. Everything else about it - how long it lasts, that
+    /// concentration ends it, that it is cleared and counted down like
+    /// anything else - is the condition machinery this reuses rather than
+    /// duplicates.
+    Boon(u8),
 }
 
 impl Condition {
@@ -197,6 +249,10 @@ impl Condition {
             "exposed" => Self::Exposed,
             "sealed" => Self::Sealed,
             "cracked" => Self::Cracked,
+            "quarry" | "hunted" => Self::Quarry,
+            "vexed" | "vex" => Self::Vexed,
+            "outlined" => Self::Outlined,
+            "restrained" => Self::Restrained,
             "disadvantage_str_saves" => Self::SaveDisadvantage(Ability::Str),
             "disadvantage_dex_saves" => Self::SaveDisadvantage(Ability::Dex),
             "disadvantage_con_saves" => Self::SaveDisadvantage(Ability::Con),
@@ -232,6 +288,13 @@ impl Condition {
             Self::Exposed => "exposed",
             Self::Sealed => "sealed",
             Self::Cracked => "cracked",
+            Self::Quarry => "quarry",
+            Self::Vexed => "vexed",
+            Self::Outlined => "outlined",
+            Self::Restrained => "restrained",
+            // Never parsed back: which boon it is belongs to the creature
+            // that put it on itself, not to a word in a stat block.
+            Self::Boon(_) => "boon",
             Self::SaveDisadvantage(ability) => match ability {
                 Ability::Str => "disadvantage_str_saves",
                 Ability::Dex => "disadvantage_dex_saves",
@@ -264,6 +327,8 @@ impl Condition {
                 | Self::Marked
                 | Self::Petrified
                 | Self::Swallowed
+                | Self::Outlined
+                | Self::Restrained
         )
     }
 
@@ -275,7 +340,12 @@ impl Condition {
     pub fn disadvantage_on_attacks(self) -> bool {
         matches!(
             self,
-            Self::Prone | Self::Poisoned | Self::Blinded | Self::Frightened | Self::Swallowed
+            Self::Prone
+                | Self::Poisoned
+                | Self::Blinded
+                | Self::Frightened
+                | Self::Swallowed
+                | Self::Restrained
         )
     }
 
@@ -286,12 +356,12 @@ impl Condition {
         matches!(self, Self::SteadyAim)
     }
 
-    /// Does this condition drop the creature's speed to 0? Steady Aim.
-    /// Nothing reads this yet - there is no movement model in this engine -
-    /// so this exists purely to expose the flag for whenever one shows up,
-    /// rather than leaving Steady Aim's speed clause unmodelled entirely.
+    /// Does this condition drop the creature's speed to 0? Steady Aim, and
+    /// Restrained. Around a creature with a mouth this is read as being
+    /// unable to change zone (see `sim::fight`'s movement allowance);
+    /// anywhere else there is no movement model for it to apply to.
     pub fn zeroes_speed(self) -> bool {
-        matches!(self, Self::SteadyAim)
+        matches!(self, Self::SteadyAim | Self::Restrained)
     }
 
     /// Ends the moment its holder makes an attack or takes a legendary
@@ -349,7 +419,7 @@ impl Condition {
         match self {
             Self::Suppressed => true,
             Self::SaveDisadvantage(burdened) => burdened == ability,
-            Self::Swallowed => ability == Ability::Dex,
+            Self::Swallowed | Self::Restrained => ability == Ability::Dex,
             _ => false,
         }
     }
@@ -533,12 +603,72 @@ mod tests {
             Condition::Cracked,
             Condition::Pushed,
             Condition::Slowed,
+            Condition::Quarry,
+            Condition::Vexed,
+            Condition::Outlined,
+            Condition::Restrained,
         ] {
             assert_eq!(Condition::parse(c.name()), Some(c));
         }
         assert_eq!(Condition::parse("paralysed"), Some(Condition::Paralyzed));
         assert_eq!(Condition::parse("steady aim"), Some(Condition::SteadyAim));
         assert_eq!(Condition::parse("nonsense"), None);
+    }
+
+    /// A mark is all on the hunter's side: it does nothing to the creature
+    /// carrying it, which is why the extra damage has to ask who is holding
+    /// it rather than reading the condition alone.
+    #[test]
+    fn a_quarry_mark_changes_nothing_about_the_creature_carrying_it() {
+        let quarry = Condition::Quarry;
+        assert!(!quarry.incapacitated());
+        assert!(!quarry.advantage_to_attackers());
+        assert!(!quarry.disadvantage_to_attackers());
+        assert!(!quarry.disadvantage_on_attacks());
+        assert!(!quarry.auto_crits());
+        assert!(!quarry.disadvantage_on_save(Ability::Wis));
+        // Nor does a boon, which is entirely its holder's business.
+        let boon = Condition::Boon(3);
+        assert!(!boon.incapacitated());
+        assert!(!boon.advantage_to_attackers());
+        assert!(!boon.blocks_magic());
+        assert_eq!(boon.name(), "boon");
+        assert_eq!(
+            Condition::parse("boon"),
+            None,
+            "a boon is never written out"
+        );
+    }
+
+    /// Outlined helps every attacker and hinders nobody; Restrained is the
+    /// full bundle - advantage to attackers, disadvantage on its own rolls
+    /// and its Dexterity saves, and no moving.
+    #[test]
+    fn outlined_and_restrained_carry_exactly_their_own_bundles() {
+        let outlined = Condition::Outlined;
+        assert!(outlined.advantage_to_attackers());
+        assert!(!outlined.disadvantage_on_attacks());
+        assert!(!outlined.disadvantage_on_save(Ability::Dex));
+        assert!(!outlined.zeroes_speed());
+
+        let restrained = Condition::Restrained;
+        assert!(restrained.advantage_to_attackers());
+        assert!(restrained.disadvantage_on_attacks());
+        assert!(restrained.disadvantage_on_save(Ability::Dex));
+        assert!(!restrained.disadvantage_on_save(Ability::Wis));
+        assert!(restrained.zeroes_speed());
+        assert!(!restrained.incapacitated(), "it can still act");
+    }
+
+    /// Vex is not read off the condition at all - it names no owner, and the
+    /// engine finds the attacker it helps in the lifetime it was applied
+    /// with. Here, only that it carries none of the usual effects.
+    #[test]
+    fn vexed_hands_nothing_to_the_creature_at_large() {
+        let vexed = Condition::Vexed;
+        assert!(!vexed.advantage_to_attackers());
+        assert!(!vexed.disadvantage_on_attacks());
+        assert!(!vexed.incapacitated());
     }
 
     /// Suppressed is deliberately not incapacitating and does not touch

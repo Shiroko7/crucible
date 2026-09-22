@@ -83,9 +83,12 @@ impl<'a> Fight<'a> {
         best.0
     }
 
+    /// What each side's health margin is measured against: its combatants'
+    /// hit point maximums. A summon is left out, the same way its hit points
+    /// are left out of what is still standing - see [`Fight::unresolved`].
     fn side_max_hp(&self) -> [i32; 2] {
         let mut out = [0i32; 2];
-        for f in &self.fighters {
+        for f in self.fighters.iter().filter(|f| !f.is_summon()) {
             out[f.side.index()] += f.creature.hp;
         }
         out

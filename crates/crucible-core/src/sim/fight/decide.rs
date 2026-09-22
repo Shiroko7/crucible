@@ -4,6 +4,7 @@
 use crate::creature::{Move, Uses};
 use crate::prob::Rng;
 use crate::rules::Condition;
+use crate::sim::fight::value::Boost;
 use crate::sim::fight::{Fight, Fighter, MoveState, Slot};
 use crate::sim::{Plan, Policy};
 
@@ -115,7 +116,7 @@ impl<'a> Fight<'a> {
         let action = f
             .policy
             .choose(Slot::Action.moves(f.creature), &f.actions, f, |m| {
-                self.move_value(me, target, m, false)
+                self.move_value(me, target, m, Boost::default())
             });
         let lead = action.map(|i| &f.creature.actions[i]);
         let bonus = f
@@ -140,14 +141,14 @@ impl<'a> Fight<'a> {
                     slot.states(f)[i].available()
                         && f.can_pay(m.cost)
                         && f.can_cast(m.spell_slot_level)
-                        && f.move_allowed(m)
+                        && self.can_take(me, m)
                 })
             });
             if pick.is_none() || still_legal {
                 pick
             } else {
                 Policy::Greedy.choose(slot.moves(f.creature), slot.states(f), f, |m| {
-                    self.move_value(me, target, m, false)
+                    self.move_value(me, target, m, Boost::default())
                 })
             }
         };
@@ -176,7 +177,7 @@ impl<'a> Fight<'a> {
             if state.available()
                 && f.can_pay(m.cost)
                 && f.can_cast(m.spell_slot_level)
-                && f.move_allowed(m)
+                && self.can_take(me, m)
             {
                 out.push(Some(i));
             }

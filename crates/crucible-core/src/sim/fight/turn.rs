@@ -7,6 +7,7 @@ use crate::prob::Rng;
 use crate::rules::{Ability, Condition};
 use crate::sim::fight::fighter::refresh;
 use crate::sim::fight::saves::saving_throw;
+use crate::sim::fight::value::Boost;
 use crate::sim::fight::{Expiry, Fight, Slot};
 use crate::sim::Plan;
 
@@ -242,13 +243,16 @@ impl<'a> Fight<'a> {
             if !slot.states(&self.fighters[me])[pick].available()
                 || !self.fighters[me].can_pay(chosen.cost)
                 || !self.fighters[me].can_cast(chosen.spell_slot_level)
-                || !self.fighters[me].move_allowed(chosen)
+                || !self.can_take(me, chosen)
             {
                 continue;
             }
             self.fighters[me].pay(chosen.cost);
             self.fighters[me].cast_spell_slot(chosen.spell_slot_level);
             self.fighters[me].spend_move(slot, pick, chosen.uses);
+            if let Some(spend) = chosen.spends {
+                self.spend(me, spend);
+            }
             self.apply(chosen, rng, me, target, record, &mut line);
         }
 
@@ -352,7 +356,7 @@ impl<'a> Fight<'a> {
                 if m.legendary_cost > f.legendary_left {
                     f64::NEG_INFINITY
                 } else {
-                    self.move_value(me, target, m, false)
+                    self.move_value(me, target, m, Boost::default())
                 }
             })
         };
@@ -363,6 +367,9 @@ impl<'a> Fight<'a> {
         self.fighters[me].pay(chosen.cost);
         self.fighters[me].cast_spell_slot(chosen.spell_slot_level);
         self.fighters[me].spend_move(Slot::Legendary, pick, chosen.uses);
+        if let Some(spend) = chosen.spends {
+            self.spend(me, spend);
+        }
         // Any legendary action opens a sealed mouth, attack or not.
         self.lapse_on_attack(me);
         self.apply(chosen, rng, me, target, record, &mut line);
@@ -425,7 +432,11 @@ mod tests {
 
         let with_resistance = {
             let mut d = dragon.clone();
-            d.riders.push(Rider::AlwaysSucceed { uses: 3 });
+            d.riders.push(Rider::AlwaysSucceed {
+                uses: 3,
+                ability: None,
+                reaction: false,
+            });
             d
         };
 

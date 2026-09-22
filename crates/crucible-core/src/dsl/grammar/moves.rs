@@ -86,6 +86,8 @@ pub(crate) fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> 
         bypasses_casting_restrictions: false,
         legendary_cost: built.legendary_cost.unwrap_or(1),
         reach,
+        requires: None,
+        spends: None,
     })
 }
 
@@ -172,6 +174,7 @@ fn parse_body<'a>(
     let mut attack = AttackKind::MELEE_WEAPON;
     let mut spell = false;
     let mut weapon_named = false;
+    let mut weapon_label: Option<&str> = None;
     let mut to_swallowed = false;
     let mut out = Body::default();
 
@@ -216,7 +219,12 @@ fn parse_body<'a>(
             "ranged" => attack.ranged = true,
             "melee" => attack.ranged = false,
             "finesse" => attack.finesse = true,
-            "weapon" => weapon_named = true,
+            // `weapon`, or `weapon <name>` to say which one this swing is
+            // made with - what an enchantment laid on a single blade rides.
+            "weapon" => {
+                weapon_named = true;
+                weapon_label = words.get(1).copied();
+            }
             "spell" => {
                 spell = true;
                 out.kind = Some(MoveKind::Spell);
@@ -292,6 +300,7 @@ fn parse_body<'a>(
                 mode,
                 damage,
                 kind: attack,
+                weapon: weapon_label.map(str::to_string),
             },
             count: strikes,
         })
@@ -314,8 +323,10 @@ fn parse_on_fail(words: &[&str], clause: &str) -> Result<(Condition, DurationSpe
 }
 
 /// `on hit save con dc 16 stunned [and <condition>]... [once] [cost focus 1]
-/// [duration]`, or `on hit swallow <size>` - swallow a target of that size or
-/// smaller.
+/// [duration]`; `on hit swallow <size>` - swallow a target of that size or
+/// smaller; or `on hit <condition> [duration]` - a condition that lands with
+/// the hit and offers no save at all, which is what a weapon mastery like Vex
+/// does.
 fn parse_on_hit(words: &[&str], clause: &str, owner: &Creature) -> Result<Rider, String> {
     if !arg(words, 1, clause)?.eq_ignore_ascii_case("hit") {
         return Err(format!("expected `on hit ...`, got `{clause}`"));
@@ -330,8 +341,21 @@ fn parse_on_hit(words: &[&str], clause: &str, owner: &Creature) -> Result<Rider,
                 .ok_or_else(|| format!("unknown size `{size}` in `{clause}`"))?,
         });
     }
+    // A bare condition: no save, no cost, no budget - `on hit vexed until
+    // end`. Read before the `save` form so a condition named `save` could
+    // never be mistaken for one, and after `swallow`, which is its own shape.
     if !arg(words, 2, clause)?.eq_ignore_ascii_case("save") {
-        return Err(format!("expected `on hit save ...`, got `{clause}`"));
+        let name = arg(words, 2, clause)?;
+        let condition =
+            Condition::parse(name).ok_or_else(|| format!("unknown condition `{name}`"))?;
+        let (spec, used) = parse_duration(words, 3, clause)?;
+        if 3 + used != words.len() {
+            return Err(format!("unexpected words at the end of `{clause}`"));
+        }
+        return Ok(Rider::ConditionOnHit {
+            condition,
+            duration: spec.resolve(None, clause)?,
+        });
     }
     let ability = Ability::parse(arg(words, 3, clause)?)
         .ok_or_else(|| format!("unknown ability in `{clause}`"))?;
@@ -397,7 +421,60 @@ fn parse_cost(words: &[&str], at: usize, clause: &str, owner: &Creature) -> Resu
 mod tests {
     use super::*;
     use crate::dsl::scenario::parse;
-    use crate::rules::DamageKind;
+    use crate::rules::{DamageKind, DamageRoll};
+
+    /// A weapon a build swings alongside others: named, so an enchantment
+    /// can be laid on that one blade, carrying a mastery that marks on a hit
+    /// with no save, and dealing whichever of two damage types suits.
+    #[test]
+    fn a_named_weapon_can_mark_on_a_hit_and_choose_its_damage_type() {
+        let text = "creature: x\nhp: 1\n\
+             action: Blades | strikes 2 | weapon shortsword | finesse | hit +10 \
+             | 1d6+6 slashing | on hit vexed until end \
+             && weapon frostreaver | finesse | hit +11 | 1d6+7 slashing or cold\n";
+        let c = &parse(text).unwrap()[0];
+        let Effect::Sequence(parts) = &c.actions[0].effect else {
+            panic!("`&&` joins two parts");
+        };
+
+        let Effect::Part { effect, riders, .. } = &parts[0] else {
+            panic!("the first part carries the mastery");
+        };
+        assert_eq!(
+            riders[..],
+            [Rider::ConditionOnHit {
+                condition: Condition::Vexed,
+                duration: Duration::ApplierNextTurnEnd,
+            }]
+        );
+        let Effect::Strikes { strike, count } = effect.as_ref() else {
+            panic!("two swings");
+        };
+        assert_eq!(*count, 2);
+        assert_eq!(strike.weapon.as_deref(), Some("shortsword"));
+        assert!(strike.kind.finesse && strike.kind.weapon && !strike.kind.spell);
+
+        let Effect::Strikes { strike, .. } = &parts[1] else {
+            panic!("the second part is a plain swing");
+        };
+        assert!(
+            strike.made_with("Frostreaver"),
+            "matched case-insensitively"
+        );
+        assert_eq!(
+            strike.damage,
+            vec![DamageRoll::new(1, 6, 7, DamageKind::Slashing).or(DamageKind::Cold)]
+        );
+
+        for bad in [
+            "creature: x\nhp: 1\naction: A | hit +5 | 1d6 slashing or\n",
+            "creature: x\nhp: 1\naction: A | hit +5 | 1d6 slashing or smugness\n",
+            "creature: x\nhp: 1\naction: A | hit +5 | 1d6 slashing and cold\n",
+            "creature: x\nhp: 1\naction: A | hit +5 | 1d6 slashing | on hit smugness\n",
+        ] {
+            assert!(parse(bad).is_err(), "should be rejected: {bad}");
+        }
+    }
 
     /// The case the multi-component damage model exists for.
     #[test]

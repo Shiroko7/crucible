@@ -7,6 +7,7 @@
 
 use crate::creature::{AttackKind, Effect, Move, Reach, Tactic, Zone};
 use crate::rules::Condition;
+use crate::sim::fight::value::Boost;
 use crate::sim::fight::{Fight, Slot};
 use crate::sim::Policy;
 
@@ -92,10 +93,15 @@ impl<'a> Fight<'a> {
             } => self.effect_lands(me, target, effect, own.within(reach)),
             // A squeeze of an empty gullet lands on nobody.
             Effect::HarmSwallowed { .. } => !self.held_by(me).is_empty(),
+            // A mark has to reach whoever it marks; a boon and a summon are
+            // the user's own business, wherever anyone is standing.
+            Effect::Afflict { .. } => self.in_reach(me, target, reach, None),
             Effect::Stance { .. }
             | Effect::Heal(_)
             | Effect::Buff { .. }
-            | Effect::SaveOrModifier { .. } => true,
+            | Effect::SaveOrModifier { .. }
+            | Effect::Boon { .. }
+            | Effect::Summon { .. } => true,
         }
     }
 
@@ -203,10 +209,10 @@ impl<'a> Fight<'a> {
                 state.available()
                     && f.can_pay(m.cost)
                     && f.can_cast(m.spell_slot_level)
-                    && f.move_allowed(m)
+                    && self.can_take(me, m)
                     && (m.is_free() || f.will_spend())
             })
-            .map(|(m, _)| self.move_value(me, target, m, false))
+            .map(|(m, _)| self.move_value(me, target, m, Boost::default()))
             .fold(f64::NEG_INFINITY, f64::max)
     }
 

@@ -14,9 +14,12 @@ pub mod items;
 pub mod monsters;
 pub mod spellcasting;
 pub mod spells;
+pub mod summons;
 
+mod boon;
 mod plugin;
 mod registry;
 
+pub use boon::LastingBoonPlugin;
 pub use plugin::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
 pub use registry::{FeatureRegistry, PluginFactory};

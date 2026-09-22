@@ -35,9 +35,16 @@
 //! trait: downgrade immunity poison damage, poisoned condition
 //! trait: empower weapon 2d6 poison on poisoned
 //! trait: injury poison con dc 13 poisoned disadvantage str for 1 hour
+//! trait: once per turn 1d6 piercing
+//! trait: quarry 1d6 force
+//! trait: always succeed dex 3 reaction
+//! trait: reaction ac 4 vs melee until next turn
 //! condition immune: poisoned
 //! action: Greatclub | strikes 1 | hit +6 | 2d8+4 bludgeoning
 //! action: Longbow | ranged | hit +8 | 1d8+4 piercing | bonus 3d6 piercing vs dragon
+//! action: Shortsword | weapon shortsword | finesse | hit +10 | 1d6+6 slashing
+//!                    | on hit vexed until end
+//! action: Icebrand | weapon icebrand | hit +11 | 1d6+7 slashing or cold
 //! action: Guiding Bolt | spell | slot 1 | ranged | hit +7 | 4d6 radiant
 //! action: Hold | spell | slot 2 | concentration | save wis dc 15 | on fail paralyzed until save
 //! bonus: Potion of Healing | object | cost potions 1 | heal 2d4+2
@@ -74,11 +81,19 @@
 //! A strike is a melee weapon attack unless its move says otherwise: `ranged`,
 //! `finesse`, `spell` (a spell attack; also marks the move as casting a spell),
 //! and `weapon` (a weapon attack made as part of a spell, alongside `spell`).
+//! `weapon <name>` also names the blade the swing is made with, which is what
+//! an enchantment laid on one weapon rides (see [`crate::creature::Boon`]).
 //! `item` and `object` mark a move as activating a magic item or using an
-//! object. A condition's lifetime, after `on fail` or an `on hit save`, is
+//! object. Damage written `1d6+7 slashing or cold` is dealt as whichever of
+//! the two its target reduces least, chosen per attack.
+//!
+//! A condition's lifetime, after `on fail` or an `on hit save`, is
 //! `until victim`, `until applier` (the default), `until end` (the end of the
 //! applier's next turn), `until save` (repeat the save at the end of each of
-//! the victim's turns), or `for N rounds|minutes|hours`.
+//! the victim's turns), or `for N rounds|minutes|hours`. `on hit <condition>
+//! [lifetime]`, with no `save`, lands one with nothing to resist it - what a
+//! weapon mastery like Vex does (`on hit vexed until end`: advantage on that
+//! attacker's own next roll against the target).
 //!
 //! A shell and a gullet: `damage threshold N` ignores any single instance of
 //! damage below N, and a weak spot skips it - reached from inside, or by an
@@ -101,6 +116,13 @@
 //! place a turn; `pulled` and `pushed` move them a place in or out, and
 //! `slowed` halves their moves. An on-hit save can land several conditions:
 //! `prone and pushed`.
+//!
+//! Some mechanisms are only reachable through a feature plugin, because they
+//! need more than a phrase: a mark maintained by concentration that a rider
+//! pays out against (`hunters_mark`), a lasting boon a creature puts on
+//! itself (`lasting_boon` - extra damage on its hits, resistances, or both,
+//! for a number of rounds), and a double it calls up and then commands
+//! (`commanded_double`). See [`crate::features`].
 
 use crate::creature::{Creature, Resource, Tactic};
 use crate::dsl::grammar::{count, number, parse_move, parse_reaction, parse_trait};

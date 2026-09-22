@@ -125,7 +125,11 @@ mod tests {
         // An unrelated rider never answers yes to either question - the same
         // "not mistaken for a different marker" check `cunning_strike_dc`'s
         // own test makes.
-        let unrelated = Rider::AlwaysSucceed { uses: 3 };
+        let unrelated = Rider::AlwaysSucceed {
+            uses: 3,
+            ability: None,
+            reaction: false,
+        };
         assert!(!unrelated.downgrades_damage_immunity(DamageKind::Poison));
         assert!(!unrelated.downgrades_condition_immunity(Condition::Poisoned));
     }

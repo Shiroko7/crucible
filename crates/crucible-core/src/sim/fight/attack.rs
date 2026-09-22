@@ -5,7 +5,9 @@
 
 use crate::creature::{Rider, Strike};
 use crate::rules::{Condition, DamageKind, DamageRoll, RollMode, Size};
-use crate::sim::fight::{Cunning, ExtraPlan, Fight, Fighter};
+use crate::sim::fight::{
+    ActiveConcentration, ConcentrationEffect, Cunning, Expiry, ExtraPlan, Fight, Fighter,
+};
 
 impl<'a> Fight<'a> {
     /// As [`attack_mode`], but also uses up the one-shot sources of
@@ -30,10 +32,36 @@ impl<'a> Fight<'a> {
         self.fighters[target]
             .conditions
             .retain(|&(c, _)| c != Condition::Marked);
+        // Vex helps only whoever landed it, so only that attacker's own mark
+        // is used up - another creature's stays waiting for its turn.
+        let seat = self.fighters[attacker].seat;
+        self.fighters[target]
+            .conditions
+            .retain(|&(c, expiry)| !vexed_by(c, expiry, seat));
         self.fighters[attacker]
             .conditions
             .retain(|&(c, _)| !c.advantage_on_attacks());
         mode
+    }
+
+    /// Is `me` the hunter holding `target` as its quarry - its own
+    /// concentration maintaining the [`Condition::Quarry`] the target is
+    /// still carrying?
+    ///
+    /// Both halves are asked because either can end on its own: the
+    /// concentration can break while the condition is cleared some other way,
+    /// and nothing should pay out on half a mark.
+    pub(super) fn marks_quarry(&self, me: usize, target: usize) -> bool {
+        let holding = matches!(
+            &self.fighters[me].concentration,
+            Some(ActiveConcentration {
+                effect: ConcentrationEffect::Condition {
+                    targets,
+                    condition: Condition::Quarry,
+                },
+            }) if targets.contains(&target)
+        );
+        holding && self.fighters[target].has(|c| c == Condition::Quarry)
     }
 
     /// The extra damage one attack roll from `me` against `target` carries,
@@ -80,6 +108,55 @@ impl<'a> Fight<'a> {
                     r.bonus,
                     *damage_kind,
                 ));
+            }
+        }
+
+        // A lasting boon this creature is holding - a form that makes its
+        // blows land harder, a spell laid on the blade this swing is made
+        // with.
+        plan.rolls.extend(self.boon_damage(me, strike));
+
+        // The quarry it marked and is still concentrating on.
+        if self.marks_quarry(me, target) {
+            for rider in creature.riders.iter().chain(move_riders) {
+                if let Rider::BonusDamageVsQuarry {
+                    dice_count,
+                    dice_sides,
+                    bonus,
+                    damage_kind,
+                } = rider
+                {
+                    plan.rolls.push(DamageRoll::new(
+                        *dice_count,
+                        *dice_sides,
+                        *bonus,
+                        *damage_kind,
+                    ));
+                }
+            }
+        }
+
+        // The first hit of this creature's own turn, for a rider that joins
+        // one blow a turn. Only its own: "once on each of your turns" says
+        // nothing about anybody else's.
+        if self.acting == Some(me) && !attacker.once_per_turn_damage_spent {
+            for rider in creature.riders.iter().chain(move_riders) {
+                if let Rider::OncePerTurnDamage {
+                    dice_count,
+                    dice_sides,
+                    bonus,
+                    damage_kind,
+                } = rider
+                {
+                    plan.rolls.push(DamageRoll::new(
+                        *dice_count,
+                        *dice_sides,
+                        *bonus,
+                        *damage_kind,
+                    ));
+                    plan.once_per_turn_damage = true;
+                    break;
+                }
             }
         }
 
@@ -197,6 +274,19 @@ impl<'a> Fight<'a> {
     }
 }
 
+/// Is this condition a Vex mark left by the attacker in `seat`?
+///
+/// Vex is applied with [`crate::rules::Duration::ApplierNextTurnEnd`], whose
+/// expiry names the applier - which is exactly the "your next attack roll,
+/// before the end of your next turn" the mastery is worded as, so the mark
+/// needs no owner of its own beyond the lifetime it already carries.
+pub(super) fn vexed_by(condition: Condition, expiry: Expiry, seat: usize) -> bool {
+    matches!(
+        (condition, expiry),
+        (Condition::Vexed, Expiry::TurnEnd { who, .. }) if who == seat
+    )
+}
+
 /// The 5e stacking rule: any advantage and any disadvantage cancel to a flat
 /// roll, however many of each there are. `steady` adds one more source of
 /// advantage - a policy asking what Steady Aim would be worth.
@@ -208,8 +298,10 @@ pub(super) fn attack_mode(
 ) -> RollMode {
     let mut advantage = base == RollMode::Advantage || steady;
     let mut disadvantage = base == RollMode::Disadvantage;
-    for &(c, _) in &target.conditions {
+    for &(c, expiry) in &target.conditions {
         advantage |= c.advantage_to_attackers();
+        // Vex: advantage for the one attacker that landed it, nobody else.
+        advantage |= vexed_by(c, expiry, attacker.seat);
         disadvantage |= c.disadvantage_to_attackers();
     }
     for &(c, _) in &attacker.conditions {
@@ -227,12 +319,22 @@ pub(super) fn attack_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The strike inside a move, for a test that wants to hand it around.
+    fn strike_of(m: &crate::creature::Move) -> &Strike {
+        first_strike(&m.effect).expect("an attacking move")
+    }
+
+    use crate::creature::Strike;
     use crate::creature::{Creature, Effect};
     use crate::prob::Rng;
+    use crate::rules::DamageRoll;
     use crate::rules::Reduction;
+    use crate::sim::fight::fighter::refresh;
     use crate::sim::fight::test_support::{
         bow, fight_of, no_log, puncher, sneak_attacker, strike_once,
     };
+    use crate::sim::fight::value::first_strike;
     use crate::sim::fight::Expiry;
     use crate::sim::{Budget, Policy, Side};
 
@@ -271,6 +373,146 @@ mod tests {
             RollMode::Normal,
             "advantage and disadvantage from unrelated sources should cancel"
         );
+    }
+
+    /// Vex is Guiding Bolt's mark turned selfish: advantage for the one
+    /// attacker that landed it, nobody else, and used up by that attacker's
+    /// own next roll.
+    #[test]
+    fn a_vex_mark_helps_only_the_attacker_that_landed_it_and_is_used_up_by_one_roll() {
+        let vexer = Creature::new("vexer", 10, 20);
+        let target = Creature::new("target", 10, 20);
+        let bystander = Creature::new("bystander", 10, 20);
+        let roster = [(&vexer, Side::A), (&target, Side::B), (&bystander, Side::A)];
+        let (mut fight, mut rng) = fight_of(&roster, 12);
+
+        // Landed the way a weapon mastery lands it: on a hit, no save, until
+        // the end of the applier's next turn.
+        fight.acting = Some(0);
+        fight.land_condition(
+            0,
+            1,
+            Condition::Vexed,
+            crate::rules::Duration::ApplierNextTurnEnd,
+            &mut Vec::new(),
+        );
+
+        let mode_for = |fight: &Fight<'_>, attacker: usize| {
+            attack_mode(
+                RollMode::Normal,
+                &fight.fighters[attacker],
+                &fight.fighters[1],
+                false,
+            )
+        };
+        assert_eq!(mode_for(&fight, 0), RollMode::Advantage, "the vexer's roll");
+        assert_eq!(
+            mode_for(&fight, 2),
+            RollMode::Normal,
+            "an ally of the vexer gets nothing from a mark it did not land"
+        );
+
+        // A roll by the bystander leaves the mark alone; the vexer's own
+        // spends it.
+        fight.attack_mode_consuming(RollMode::Normal, 2, 1);
+        assert_eq!(mode_for(&fight, 0), RollMode::Advantage);
+        assert_eq!(
+            fight.attack_mode_consuming(RollMode::Normal, 0, 1),
+            RollMode::Advantage
+        );
+        assert_eq!(
+            mode_for(&fight, 0),
+            RollMode::Normal,
+            "one roll is what the mastery says"
+        );
+        let _ = &mut rng;
+    }
+
+    /// A once-a-turn rider joins the first hit of its own turn and no other -
+    /// not a second swing, and not a swing on somebody else's turn.
+    #[test]
+    fn a_once_a_turn_rider_joins_one_blow_on_its_own_turn() {
+        let mut swarmed = puncher("swarmed", 15, 60, 20, 0);
+        swarmed.riders.push(Rider::OncePerTurnDamage {
+            dice_count: 1,
+            dice_sides: 6,
+            bonus: 0,
+            damage_kind: DamageKind::Piercing,
+        });
+        let target = Creature::new("target", 1, 200);
+        let roster = [(&swarmed, Side::A), (&target, Side::B)];
+        let (mut fight, _rng) = fight_of(&roster, 31);
+        let strike = strike_of(&swarmed.actions[0]).clone();
+
+        let plan = |fight: &Fight<'_>| {
+            fight
+                .extra_damage_plan(0, 1, &strike, &[], RollMode::Normal, true)
+                .once_per_turn_damage
+        };
+
+        // Nobody's turn: the swarm is not out.
+        fight.acting = None;
+        assert!(!plan(&fight));
+
+        // Its own turn, first blow.
+        fight.acting = Some(0);
+        assert!(plan(&fight));
+
+        // Spent, until its next turn comes round.
+        fight.fighters[0].once_per_turn_damage_spent = true;
+        assert!(!plan(&fight));
+        let mut rng = Rng::new(4);
+        refresh(&mut fight.fighters[0], &mut rng);
+        assert!(plan(&fight));
+    }
+
+    /// The extra damage against a quarry needs both halves - the mark on the
+    /// target and the hunter's own concentration holding it - and pays out
+    /// for that hunter alone.
+    #[test]
+    fn quarry_damage_needs_the_mark_and_the_concentration_holding_it() {
+        let hunter = Creature::new("hunter", 15, 40).with_rider(Rider::BonusDamageVsQuarry {
+            dice_count: 1,
+            dice_sides: 6,
+            bonus: 0,
+            damage_kind: DamageKind::Force,
+        });
+        let other = Creature::new("other", 15, 40);
+        let prey = Creature::new("prey", 10, 80);
+        let roster = [(&hunter, Side::A), (&prey, Side::B), (&other, Side::A)];
+        let (mut fight, _rng) = fight_of(&roster, 13);
+
+        assert!(!fight.marks_quarry(0, 1), "nothing marked yet");
+
+        fight.fighters[1]
+            .conditions
+            .push((Condition::Quarry, Expiry::Rounds { who: 0, left: 600 }));
+        assert!(
+            !fight.marks_quarry(0, 1),
+            "a mark nobody is concentrating on is not this hunter's quarry"
+        );
+
+        fight.fighters[0].concentration = Some(crate::sim::fight::ActiveConcentration {
+            effect: ConcentrationEffect::Condition {
+                targets: vec![1],
+                condition: Condition::Quarry,
+            },
+        });
+        assert!(fight.marks_quarry(0, 1));
+        assert!(
+            !fight.marks_quarry(2, 1),
+            "somebody else's mark pays somebody else"
+        );
+
+        // And the dice really ride the hit.
+        let strike = Strike::new(20, vec![DamageRoll::new(1, 4, 0, DamageKind::Slashing)]);
+        let with = fight.extra_damage_plan(0, 1, &strike, &[], RollMode::Normal, true);
+        assert_eq!(
+            with.rolls,
+            vec![DamageRoll::new(1, 6, 0, DamageKind::Force)]
+        );
+        let without = fight.extra_damage_plan(2, 1, &strike, &[], RollMode::Normal, true);
+        assert!(without.rolls.is_empty());
     }
 
     /// Guiding Bolt's mark: Advantage on the next attack roll against its

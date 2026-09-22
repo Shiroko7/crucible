@@ -63,6 +63,47 @@ pub enum MoveKind {
     Spell,
 }
 
+/// Something that has to already be true before a move can be taken at all.
+///
+/// Distinct from what a move *costs* ([`Cost`], [`Uses`], a spell slot):
+/// those are budgets, spent when the move is taken. This is a state of the
+/// fight - something standing beside its summoner, a spell already on a
+/// blade - without which the move has nothing to act on. Checked by
+/// `sim::fight` wherever a move's legality is, so no policy can pick one and
+/// no search can plan one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Requirement {
+    /// At least `count` of the user's `which`th summon standing.
+    ///
+    /// Several moves can name the same summon with different counts - one
+    /// double strikes for less than three striking together - and each is
+    /// legal only while that many are up, so what the user can command is
+    /// exactly what it has called up.
+    Summon { which: usize, count: u32 },
+    /// Fewer than `max` of the user's `which`th summon standing: the room to
+    /// call up another one.
+    SummonRoom { which: usize, max: u32 },
+    /// The user's `which`th boon active - a blade whose enchantment can be
+    /// let go of in a burst only while it is still lit.
+    Boon { which: usize },
+}
+
+/// What taking a move uses up, beyond its own budget: the other half of
+/// [`Requirement`], for a move that consumes the very thing it needed.
+///
+/// A double let go of in a burst, a blade's enchantment discharged in a
+/// flash of light. Not a [`Cost`], which is points out of a pool: this is a
+/// thing standing on the field or riding on its owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spend {
+    /// One of the user's `which`th summons - see
+    /// [`crate::creature::Creature::summons`].
+    Summon(usize),
+    /// The user's `which`th boon, which ends - see
+    /// [`crate::creature::Creature::boons`].
+    Boon(usize),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Move {
     pub name: String,
@@ -120,6 +161,12 @@ pub struct Move {
     /// [`crate::creature::Creature::mouth`]. [`Reach::Any`] for every
     /// ordinary move, and ignored on any creature without a mouth.
     pub reach: Reach,
+    /// What has to already be true for this move to be taken - see
+    /// [`Requirement`]. `None` for every ordinary move.
+    pub requires: Option<Requirement>,
+    /// What taking this move uses up beyond its own budget - see [`Spend`].
+    /// `None` for every ordinary move.
+    pub spends: Option<Spend>,
 }
 
 impl Move {
@@ -137,6 +184,8 @@ impl Move {
             bypasses_casting_restrictions: false,
             legendary_cost: 1,
             reach: Reach::Any,
+            requires: None,
+            spends: None,
         }
     }
 
@@ -197,6 +246,18 @@ impl Move {
     /// Reach only these zones - see [`Move::reach`].
     pub fn with_reach(mut self, reach: Reach) -> Self {
         self.reach = reach;
+        self
+    }
+
+    /// Takeable only while this holds - see [`Requirement`].
+    pub fn requiring(mut self, requirement: Requirement) -> Self {
+        self.requires = Some(requirement);
+        self
+    }
+
+    /// Taking it uses something up - see [`Spend`].
+    pub fn spending(mut self, spend: Spend) -> Self {
+        self.spends = Some(spend);
         self
     }
 

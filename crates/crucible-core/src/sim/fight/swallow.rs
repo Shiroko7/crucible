@@ -88,10 +88,11 @@ impl<'a> Fight<'a> {
         let attacker = self.fighters[me].creature;
         for i in self.held_by(me) {
             let against = self.fighters[i].creature;
-            let reduce = reducer(attacker, against, false);
+            let defending = self.boon_resistances(i);
+            let reduce = reducer(attacker, against, false, &defending);
             let raw: i32 = damage
                 .iter()
-                .map(|roll| roll.sample(rng, false, reduce(roll.kind)))
+                .map(|roll| roll.sample(rng, false, roll.reduction_against(&reduce)))
                 .sum();
             let (dealt, _) = self.deal(rng, me, i, raw, false);
             if record {
@@ -180,6 +181,7 @@ mod tests {
     use crate::creature::{Creature, Effect, Move, Rider};
     use crate::rules::{Ability, DamageKind};
     use crate::sim::fight::test_support::{fight_of, no_log, puncher, strike_once};
+    use crate::sim::fight::value::Boost;
     use crate::sim::Side;
 
     /// A worm (seat 0) against a hero (1) and the hero's friend (2).
@@ -280,7 +282,7 @@ mod tests {
                 damage: vec![DamageRoll::new(0, 1, 5, DamageKind::Bludgeoning)],
             },
         );
-        assert!((fight.move_value(0, 2, &squeeze, false) - 5.0).abs() < 1e-9);
+        assert!((fight.move_value(0, 2, &squeeze, Boost::default()) - 5.0).abs() < 1e-9);
         strike_once(&mut fight, &mut rng, 0, 2, &squeeze);
         assert_eq!(fight.fighters[1].hp, 85);
         assert_eq!(fight.fighters[2].hp, 100);

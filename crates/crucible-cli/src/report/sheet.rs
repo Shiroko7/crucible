@@ -1,7 +1,8 @@
 //! Formats and prints the parsed creature sheet.
 
 use crucible_core::creature::{
-    AttackTrigger, Creature, Effect, Move, MoveKind, Reach, ReactionTrigger, Rider, Uses,
+    AttackTrigger, Boon, Creature, Effect, Move, MoveKind, Reach, ReactionTrigger, Requirement,
+    Rider, Uses,
 };
 use crucible_core::rules::DamageRoll;
 /// Strip copy numbers like "Hero 3" back to "Hero", so resizing does not stack
@@ -50,12 +51,19 @@ pub fn print_sheet(roster: &[&Creature]) {
             ("aura", &c.auras),
         ];
         let print_move = |label: &str, m: &Move, extra: String| {
+            // A move waiting on something that is not there yet - a double
+            // still to be called up, a blade still to be lit - has no value
+            // to print, and printing minus infinity for it would be noise.
+            let value = crucible_core::sim::expected_damage(c, m, against);
+            let against_name = strip_number(&against.name);
+            let worth = match value.is_finite() {
+                true => format!("{value:>5.1} avg vs {against_name}"),
+                false => format!("{:>5} {}", "-", waiting_on(m)),
+            };
             println!(
-                "    {label:<10} {:<24} {:<46} {:>5.1} avg vs {}",
+                "    {label:<10} {:<24} {:<46} {worth}",
                 m.name,
                 format!("{extra}{}", describe(c, m)),
-                crucible_core::sim::expected_damage(c, m, against),
-                strip_number(&against.name)
             );
         };
         for (label, moves) in groups {
@@ -231,6 +239,20 @@ pub fn body(owner: &Creature, effect: &Effect) -> String {
             }
         ),
         Effect::HarmSwallowed { damage } => format!("{} to all swallowed", damage_list(damage)),
+        Effect::Afflict { condition, .. } => format!("{} - no save", condition.name()),
+        Effect::Boon { which, .. } => owner
+            .boons
+            .get(*which)
+            .map_or_else(|| "a boon".to_string(), describe_boon),
+        Effect::Summon { which } => owner.summons.get(*which).map_or_else(
+            || "a summon".to_string(),
+            |summon| {
+                format!(
+                    "summons {} (ac {}, {} hp)",
+                    summon.name, summon.ac, summon.hp
+                )
+            },
+        ),
         Effect::Sequence(parts) => parts
             .iter()
             .map(|p| body(owner, p))
@@ -250,12 +272,68 @@ pub fn body(owner: &Creature, effect: &Effect) -> String {
     }
 }
 
+/// What a move is waiting for before it can be taken at all - see
+/// [`Requirement`].
+fn waiting_on(m: &Move) -> String {
+    match m.requires {
+        Some(Requirement::Summon { count, .. }) => match count {
+            1 => "needs one summoned".to_string(),
+            n => format!("needs {n} summoned"),
+        },
+        Some(Requirement::SummonRoom { max, .. }) => format!("at most {max} summoned"),
+        Some(Requirement::Boon { .. }) => "needs its boon active".to_string(),
+        None => "cannot land from here".to_string(),
+    }
+}
+
+/// What a lasting boon does while it is up, for the sheet: the extra damage
+/// it puts on a hit and what it lets its holder shrug off.
+pub fn describe_boon(boon: &Boon) -> String {
+    let mut parts = Vec::new();
+    if let Some(damage) = boon.damage {
+        parts.push(format!(
+            "+{}d{}{:+} {}{}",
+            damage.count,
+            damage.sides,
+            damage.bonus,
+            damage.kind.name(),
+            match (&boon.weapon, boon.weapon_only) {
+                (Some(weapon), _) => format!(" with {weapon}"),
+                (None, true) => " on weapon hits".to_string(),
+                (None, false) => String::new(),
+            }
+        ));
+    }
+    if !boon.resist.is_empty() {
+        parts.push(format!(
+            "resist {}",
+            boon.resist
+                .iter()
+                .map(|k| k.name())
+                .collect::<Vec<_>>()
+                .join("/")
+        ));
+    }
+    format!("{}: {}", boon.name, parts.join(", "))
+}
+
 pub fn describe_trait(rider: &Rider) -> String {
     match rider {
         Rider::NothingOnSuccess { ability } => {
             format!("evasion: a made {} save takes nothing", ability.name())
         }
-        Rider::AlwaysSucceed { uses } => format!("legendary resistance {uses}/fight"),
+        Rider::AlwaysSucceed {
+            uses,
+            ability,
+            reaction,
+        } => format!(
+            "{}{uses}/fight{}",
+            match ability {
+                Some(a) => format!("a failed {} save succeeds instead, ", a.name()),
+                None => "legendary resistance ".to_string(),
+            },
+            if *reaction { " (reaction)" } else { "" }
+        ),
         Rider::ReduceDamage { kinds, roll } => format!(
             "reaction: reduce {} damage by {}d{}{:+}",
             kinds.iter().map(|k| k.name()).collect::<Vec<_>>().join("/"),
@@ -286,12 +364,19 @@ pub fn describe_trait(rider: &Rider) -> String {
             "+{dice_count}d{dice_sides} on advantage or an adjacent ally, not disadvantage{}",
             if *once_per_turn { " (once/turn)" } else { "" }
         ),
-        Rider::ReactionOnTargeted { ac_bonus, trigger } => format!(
-            "reaction: +{ac_bonus} ac vs one {}",
+        Rider::ReactionOnTargeted {
+            ac_bonus,
+            trigger,
+            lasting,
+        } => format!(
+            "reaction: +{ac_bonus} ac vs {} {}{}",
+            if *lasting { "every" } else { "one" },
             match trigger {
                 AttackTrigger::AnyAttack => "attack",
                 AttackTrigger::RangedWeaponAttack => "ranged weapon attack",
-            }
+                AttackTrigger::MeleeAttack => "melee attack",
+            },
+            if *lasting { " until its next turn" } else { "" }
         ),
         Rider::CunningStrike { dc } => {
             format!("cunning strike: spend sneak attack dice dc {dc}")
@@ -306,6 +391,24 @@ pub fn describe_trait(rider: &Rider) -> String {
             "+{dice_count}d{dice_sides}{bonus:+} {} vs {}",
             damage_kind.name(),
             creature_type.name()
+        ),
+        Rider::OncePerTurnDamage {
+            dice_count,
+            dice_sides,
+            bonus,
+            damage_kind,
+        } => format!(
+            "+{dice_count}d{dice_sides}{bonus:+} {} on its first hit each of its turns",
+            damage_kind.name()
+        ),
+        Rider::BonusDamageVsQuarry {
+            dice_count,
+            dice_sides,
+            bonus,
+            damage_kind,
+        } => format!(
+            "+{dice_count}d{dice_sides}{bonus:+} {} against its marked quarry",
+            damage_kind.name()
         ),
         Rider::CunningStrikeTrip => {
             "cunning strike: trip (1d6, dex save vs cunning strike dc or prone)".to_string()

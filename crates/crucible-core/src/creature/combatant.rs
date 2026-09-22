@@ -1,6 +1,6 @@
 //! The Creature combatant model.
 
-use crate::creature::{Move, Reaction, Resource, Rider, Tactic};
+use crate::creature::{Boon, Move, Reaction, Resource, Rider, Tactic};
 use crate::rules::{
     Ability, Condition, CreatureType, DamageKind, DamageRoll, Reduction, Size, SpellCastingProfile,
     SpellSlots,
@@ -97,6 +97,15 @@ pub struct Creature {
     /// triggered or conditional; see [`Creature::check_floor`] for where the
     /// "proficient" half of the rule is applied.
     pub reliable_talent_floor: Option<i32>,
+    /// Lasting boons this creature can put on itself - see [`Boon`]. Held
+    /// while active as a [`Condition::Boon`] naming the index into this list.
+    pub boons: Vec<Boon>,
+    /// Creatures this one can call up beside it - see
+    /// [`crate::creature::Effect::Summon`]. Declared on the summoner because
+    /// a summon is part of its kit, the same as a move or a rider, and
+    /// because that is what lets a fight hand out a reference to one without
+    /// owning a creature of its own.
+    pub summons: Vec<Creature>,
     /// A player character drops to 0 hit points unconscious rather than dead,
     /// so healing can bring it back mid-fight - unless the blow that dropped
     /// it had damage left over equal to its hit point maximum, which kills it
@@ -133,6 +142,8 @@ impl Creature {
             difficult_terrain: false,
             tactic: Tactic::default(),
             reliable_talent_floor: None,
+            boons: Vec::new(),
+            summons: Vec::new(),
             player_character: false,
         }
     }
@@ -342,6 +353,31 @@ impl Creature {
     pub fn with_condition_immunity(mut self, condition: Condition) -> Self {
         self.condition_immunities.push(condition);
         self
+    }
+
+    /// Declare a lasting boon this creature can put on itself, returning the
+    /// index a [`Condition::Boon`] and an
+    /// [`crate::creature::Effect::Boon`] name it by.
+    pub fn add_boon(&mut self, boon: Boon) -> usize {
+        self.boons.push(boon);
+        self.boons.len() - 1
+    }
+
+    /// Declare a creature this one can call up beside it, returning the index
+    /// an [`crate::creature::Effect::Summon`] and a
+    /// [`crate::creature::Requirement::Summon`] name it by.
+    pub fn add_summon(&mut self, summon: Creature) -> usize {
+        self.summons.push(summon);
+        self.summons.len() - 1
+    }
+
+    /// The boon held as `condition`, if that is a [`Condition::Boon`] naming
+    /// one this creature actually has.
+    pub fn boon(&self, condition: Condition) -> Option<&Boon> {
+        match condition {
+            Condition::Boon(i) => self.boons.get(usize::from(i)),
+            _ => None,
+        }
     }
 }
 

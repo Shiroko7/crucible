@@ -133,15 +133,25 @@ impl<'a> Fight<'a> {
 }
 
 /// How `target` reduces each damage type from `attacker`: its own
-/// reductions, with its weak spot's resistances on top when the damage came
-/// through it.
+/// reductions, plus whatever a boon it is holding lets it shrug off
+/// (`boons`), plus its weak spot's resistances when the damage came through
+/// it.
+///
+/// `boons` is passed in rather than read off the target because a boon is
+/// per-fight state - see [`crate::creature::Boon`] - while everything else
+/// here is on the stat block. Empty for a creature holding none, which is
+/// every creature in most fights.
 pub(super) fn reducer<'c>(
     attacker: &'c Creature,
     target: &'c Creature,
     weak: bool,
+    boons: &'c [DamageKind],
 ) -> impl Fn(DamageKind) -> Reduction + 'c {
     move |kind| {
-        let base = target.reduction_from(kind, attacker);
+        let mut base = target.reduction_from(kind, attacker);
+        if boons.contains(&kind) {
+            base = base.with_resistance();
+        }
         if weak && target.weak_spot_resists().contains(&kind) {
             base.with_resistance()
         } else {

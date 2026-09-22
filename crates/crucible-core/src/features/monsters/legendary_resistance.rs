@@ -25,7 +25,14 @@ impl FeaturePlugin for LegendaryResistancePlugin {
     }
 
     fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
-        builder.add_rider(Rider::AlwaysSucceed { uses: self.uses });
+        builder.add_rider(Rider::AlwaysSucceed {
+            uses: self.uses,
+            // Legendary Resistance answers any save, and costs nothing but
+            // itself; a ring that rescues one kind of save at the price of a
+            // reaction fills those two fields in instead.
+            ability: None,
+            reaction: false,
+        });
         Ok(())
     }
 }

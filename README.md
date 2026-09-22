@@ -42,13 +42,13 @@ times, reported.
 | `exact` | `prob::exact` | closed-form kill curves and expected attacks, by dynamic programming |
 | rules | `rules` | core 5e rules, one concept per file: abilities, sizes, creature types, conditions and their lifetimes, damage and reduction, healing, spell slots, saves, checks |
 | attacks | `rules::attack` | attack resolution, both exact and sampled: crits, advantage, resistance, composable `AttackModifier`/`DamageRider` lists (Bless, Bane, extra damage dice) |
-| `creature` | `creature` | modular combatant model: moves and their effects, multi-type damage, saves, recharge, resource pools, riders, reactions that are moves of their own, auras |
-| riders | `creature::rider` | Evasion, Legendary Resistance, Stunning Strike, Sneak Attack and Cunning Strike, bonus dice against a creature type, weapon buffs armed by a condition, injury poisons, immunity downgrades, a damage threshold with a weak spot, swallowing, and reactions (Deflect Attacks, Uncanny Dodge, a reactive AC boost) - as general mechanisms, all applied in live fights |
-| features | `features` | the ruleset as plugins (`FeaturePlugin`, `CreatureBuilder`, `FeatureRegistry`), one file per feature: `classes/` (a folder per class and subclass), `spells/`, `monsters/`, `spellcasting/`, `items/`; each feature registers its own TOML factory |
+| `creature` | `creature` | modular combatant model: moves and their effects, multi-type damage (either of two types, chosen per target), saves, recharge, resource pools, riders, reactions that are moves of their own, auras, lasting boons, summons |
+| riders | `creature::rider` | Evasion, Legendary Resistance (and a ring that rescues one kind of save for a reaction), Stunning Strike, Sneak Attack and Cunning Strike, bonus dice against a creature type or against a marked quarry, dice on the first hit of each of its turns, weapon buffs armed by a condition, injury poisons, immunity downgrades, a damage threshold with a weak spot, swallowing, and reactions (Deflect Attacks, Uncanny Dodge, a reactive AC boost that can stay up) - as general mechanisms, all applied in live fights |
+| features | `features` | the ruleset as plugins (`FeaturePlugin`, `CreatureBuilder`, `FeatureRegistry`), one file per feature: `classes/` (a folder per class and subclass), `spells/`, `monsters/`, `spellcasting/`, `items/`, `summons/`, and a lasting boon directly under `features/`; each feature registers its own TOML factory |
 | grammar | `dsl::grammar` | the phrase grammar moves and traits are written in, shared by every creature format and by features that take a move as a parameter |
 | `scenario` | `dsl::scenario` | scenario parser supporting both external creature configs (`source:`) and inline declarations |
 | configs | `dsl::config` | TOML PC and Monster loaders |
-| fight | `sim::fight` | team combat rounds, one file per stage of a turn: initiative, action economy, auras, reactions, condition lifetimes, concentration, a damage threshold, swallowing, where enemies stand around a creature with a mouth, legendary actions of any cost between turns |
+| fight | `sim::fight` | team combat rounds, one file per stage of a turn: initiative, action economy, auras, reactions, condition lifetimes, concentration, a damage threshold, swallowing, summons and boons, where enemies stand around a creature with a mouth, legendary actions of any cost between turns |
 | `analysis` | `sim::analysis` | win and death probability, CVaR of the bad tail, exact pacing check |
 | policies | `sim::policy` | eight of the nine from `DESIGN.md`: `solver`, `nova`, `greedy`, `focus-fire`, `scattered`, `in-order`, `defensive`, `attrition`, `thrifty` |
 | search | `sim::fight` | flat Monte Carlo over one turn, to a depth budget |
@@ -71,7 +71,12 @@ lot:
 | `BonusDamageVsCreatureType` | a slaying weapon, Favored Enemy damage |
 | `ReduceDamage` | Deflect Attacks, Heavy Armor Master |
 | `HalveAttackDamage` | Uncanny Dodge |
-| `ReactionOnTargeted` | the Shield spell, an item raised against ranged weapon attacks |
+| `ReactionOnTargeted` | the Shield spell, an item raised against ranged weapon attacks, a parry that stays up until its next turn |
+| `OncePerTurnDamage` | a swarm that joins one blow a turn, a once-a-turn elemental strike |
+| `BonusDamageVsQuarry` with `Afflict` | Hunter's Mark, Hex: a mark the caster concentrates on and pays out against |
+| `Boon` | a card that turns its bearer into something with tougher hide and heavier blows, a spell laid on one blade, a stance of ice |
+| `Summon` with `Requirement` | a double called up beside its summoner, commanded out of its bonus action and spent in a burst |
+| damage of either type | a blade that can deal cold "instead of the weapon's normal damage type" |
 | `DamageThreshold` | an armoured shell or hull; a mouth or a crack as its weak spot |
 | `Swallow`, `Digestion`, `Regurgitate` | a purple worm's, a behir's or a tarrasque's gullet |
 | a `Reaction` move with a trigger | a snap at whoever is dragged into reach, a spray from a breached shell |
@@ -129,10 +134,27 @@ up, not Incapacitated, leads with a melee attack, and is going after the same
 target. A party's archers never count for each other; its front line counts for
 everyone.
 
+A summoned double is kit rather than a combatant. It has hit points, it can be
+attacked and destroyed, and it goes when its summoner does - but it takes no
+turn of its own (everything it does costs its summoner a move, and commanding
+several of them together hits harder than any one), its destruction is not a
+death on its side, its hit points are not part of how healthy that side
+finished, and a side with nothing left but doubles has lost.
+
+Something that lasts - a mark, a form, an enchantment on a blade - is worth
+what it adds to this creature's best blow, counted over the fight's own
+planning horizon (the search's depth budget) or the effect's duration,
+whichever is shorter, and nothing at all once it is already up. So a playstyle
+that ranks on damage puts a mark up once and then swings, one that hoards never
+bothers, and the solver finds the rest by playing it out. Nothing counts what a
+boon is worth *defensively*: resistances have no attack value, so a purely
+defensive form scores zero.
+
 One deliberate simplification: a creature gets one once-per-turn trigger for
 Stunning-Strike-style riders per turn in total rather than one per rider. That is
 exact for Stunning Strike and understates anything with two, which is the safe
-direction here. Sneak Attack keeps its own once-per-turn budget.
+direction here. Sneak Attack keeps its own once-per-turn budget, and so does a
+rider that joins the first hit of each of the creature's own turns.
 
 ### The objective needs a margin term
 
@@ -251,5 +273,8 @@ weapons, items used through Fast Hands and reactions - with every plugin and tra
 it needs, and fights proving each one is live. `tests/swallowing_titan.rs` does the same for
 a monster: a shell, a gullet, an aura, reactions and legendary actions of several costs.
 `tests/positions_around_a_maw.rs` does it for a creature with a mouth and the places its
-enemies stand around it, under each tactic. `dsl::scenario`'s module docs list the move and
-trait syntax.
+enemies stand around it, under each tactic. `tests/dual_wielding_summoner.rs` does it for a
+two-weapon build: a marked quarry, a swarm joining one blow a turn, an enchantment on one of
+its two blades, a form it puts on for a minute, a parry that stays up, a ring that rescues a
+failed save, and doubles it calls up and commands. `dsl::scenario`'s module docs list the
+move and trait syntax.

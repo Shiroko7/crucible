@@ -4,7 +4,7 @@
 use crate::creature::{Effect, Move, Reach, Rider};
 use crate::prob::Rng;
 use crate::rules::{apply_healing, Condition, Landed};
-use crate::sim::fight::reactions::{ac_boost_reaction, react_to_hit};
+use crate::sim::fight::reactions::{ac_boost_reaction, react_to_hit, standing_ac_boost};
 use crate::sim::fight::saves::saving_throw;
 use crate::sim::fight::threshold::{reducer, Shell};
 use crate::sim::fight::{ActiveConcentration, Answer, ConcentrationEffect, Expiry, Fight};
@@ -118,6 +118,9 @@ impl<'a> Fight<'a> {
                     let mode = self.attack_mode_consuming(strike.mode, me, current_target);
                     // Paralyzed: any hit against it is an automatic critical hit.
                     let force_crit = self.fighters[current_target].has(Condition::auto_crits);
+                    // A blade already raised is just a higher AC; a fresh
+                    // reaction is a decision, and may leave it raised.
+                    let standing = standing_ac_boost(&self.fighters[current_target], strike.kind);
                     let boost = ac_boost_reaction(&self.fighters[current_target], strike.kind);
                     let plan =
                         self.extra_damage_plan(me, current_target, strike, move_riders, mode, true);
@@ -127,19 +130,39 @@ impl<'a> Fight<'a> {
                         && self
                             .aimed_hit(me, current_target, strike, mode, force_crit, &plan.rolls)
                             .1;
+                    let defending = self.boon_resistances(current_target);
                     let (raw, landed, consumed) = strike.sample_reduced(
                         rng,
-                        &reducer(attacker, against, weak),
-                        against.ac,
+                        &reducer(attacker, against, weak, &defending),
+                        against.ac + standing,
                         mode,
                         force_crit,
                         &modifiers,
                         &plan.rolls,
-                        boost.unwrap_or(0),
+                        boost.map_or(0, |(bonus, _)| bonus),
                         boost.is_some(),
                     );
                     if consumed {
-                        self.fighters[current_target].reaction = false;
+                        let defender = &mut self.fighters[current_target];
+                        defender.reaction = false;
+                        if let Some((bonus, true)) = boost {
+                            defender.reactive_ac = Some((
+                                defender
+                                    .creature
+                                    .riders
+                                    .iter()
+                                    .find_map(|r| match r {
+                                        Rider::ReactionOnTargeted {
+                                            trigger,
+                                            lasting: true,
+                                            ..
+                                        } if trigger.answers(strike.kind) => Some(*trigger),
+                                        _ => None,
+                                    })
+                                    .expect("the rider that just fired"),
+                                bonus,
+                            ));
+                        }
                     }
                     let (raw, answer) =
                         react_to_hit(rng, &mut self.fighters[current_target], strike, raw);
@@ -172,6 +195,9 @@ impl<'a> Fight<'a> {
                     if landed != Landed::Miss {
                         if plan.sneak_attack {
                             self.fighters[me].sneak_attack_spent = true;
+                        }
+                        if plan.once_per_turn_damage {
+                            self.fighters[me].once_per_turn_damage_spent = true;
                         }
                         if let Some(choice) = plan.cunning {
                             self.resolve_cunning_strike(
@@ -246,9 +272,10 @@ impl<'a> Fight<'a> {
                     let evasion = against.has_evasion(save.ability)
                         && !self.fighters[i].has(Condition::blocks_riders);
                     let weak = self.through_weak_spot(me, i, None);
+                    let defending = self.boon_resistances(i);
                     let raw = save.sample_known_by(
                         rng,
-                        &reducer(attacker, against, weak),
+                        &reducer(attacker, against, weak, &defending),
                         saved,
                         evasion,
                     );
@@ -338,7 +365,9 @@ impl<'a> Fight<'a> {
                     // A dart hits the creature, not a spot on it - unless it
                     // was loosed from inside.
                     let weak = self.through_weak_spot(me, current_target, None);
-                    let raw = roll.sample(rng, false, reducer(attacker, against, weak)(roll.kind));
+                    let defending = self.boon_resistances(current_target);
+                    let reduce = reducer(attacker, against, weak, &defending);
+                    let raw = roll.sample(rng, false, roll.reduction_against(&reduce));
                     let (dealt, shell) = self.deal(rng, me, current_target, raw, weak);
                     if record {
                         notes.push(match shell {
@@ -430,6 +459,52 @@ impl<'a> Fight<'a> {
                     save_modifier: *save_modifier,
                 });
             }
+            Effect::Afflict {
+                condition,
+                duration,
+            } => {
+                // A mark lands with no roll to resist it, so the only thing
+                // that can stop it is the target being immune to it - the
+                // same gate every other applied condition goes through.
+                let (conditions, _) =
+                    self.conditions_against(me, target, &[(*condition, *duration)]);
+                for (condition, duration) in conditions {
+                    self.land_condition(me, target, condition, duration, landed_conditions);
+                    if record {
+                        notes.push(format!(
+                            "{} {}",
+                            self.fighters[target].creature.name,
+                            condition.name()
+                        ));
+                    }
+                }
+            }
+            Effect::Boon { which, duration } => {
+                // On itself, like a stance - and like a stance, it is what
+                // the move's concentration then maintains, if it has any.
+                let Some(boon) = self.fighters[me].creature.boons.get(*which) else {
+                    return;
+                };
+                let name = boon.name.clone();
+                let Ok(index) = u8::try_from(*which) else {
+                    return;
+                };
+                let expiry = self.expiry(me, me, *duration);
+                self.apply_condition(me, Condition::Boon(index), expiry);
+                landed_conditions.push((me, Condition::Boon(index)));
+                if record {
+                    notes.push(name);
+                }
+            }
+            Effect::Summon { which } => {
+                let called = self.summon(me, *which);
+                if record {
+                    notes.push(match called {
+                        Some(seat) => format!("{} stands up", self.fighters[seat].creature.name),
+                        None => "nothing answers".to_string(),
+                    });
+                }
+            }
             Effect::Sequence(parts) => {
                 for part in parts {
                     self.resolve(
@@ -490,6 +565,7 @@ impl<'a> Fight<'a> {
             f.hp = 0;
             self.end_concentration(target);
             self.release_all(target, false);
+            self.release_summons(target);
         } else if dealt > 0 {
             self.concentration_check(rng, target, dealt);
         }

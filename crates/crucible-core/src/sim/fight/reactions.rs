@@ -38,7 +38,7 @@ impl<'a> Fight<'a> {
                 && f.reactions[i].available()
                 && f.can_pay(r.action.cost)
                 && f.can_cast(r.action.spell_slot_level)
-                && f.move_allowed(&r.action)
+                && self.can_take(me, &r.action)
                 && self.move_lands(me, at, &r.action)
         }) else {
             return;
@@ -47,6 +47,9 @@ impl<'a> Fight<'a> {
         self.fighters[me].pay(m.cost);
         self.fighters[me].cast_spell_slot(m.spell_slot_level);
         self.fighters[me].spend_reaction(i);
+        if let Some(spend) = m.spends {
+            self.spend(me, spend);
+        }
         let previous = self.sole_target.replace(at);
         let mut line = String::new();
         self.apply(m, rng, me, at, record, &mut line);
@@ -85,15 +88,35 @@ impl<'a> Fight<'a> {
 
 /// The AC bonus a [`Rider::ReactionOnTargeted`] offers against an incoming
 /// attack of `kind`, if this creature has one that answers it and a reaction
-/// left to spend on it - never while Incapacitated.
-pub(super) fn ac_boost_reaction(f: &Fighter<'_>, kind: AttackKind) -> Option<i32> {
+/// left to spend on it - never while Incapacitated - and whether spending it
+/// leaves the bonus up until the start of its next turn.
+pub(super) fn ac_boost_reaction(f: &Fighter<'_>, kind: AttackKind) -> Option<(i32, bool)> {
     if !f.reaction || f.incapacitated() {
         return None;
     }
     f.creature.riders.iter().find_map(|rider| match rider {
-        Rider::ReactionOnTargeted { trigger, ac_bonus } if trigger.answers(kind) => Some(*ac_bonus),
+        Rider::ReactionOnTargeted {
+            trigger,
+            ac_bonus,
+            lasting,
+        } if trigger.answers(kind) => Some((*ac_bonus, *lasting)),
         _ => None,
     })
+}
+
+/// The AC bonus a reaction *already spent* is still holding up against an
+/// attack of `kind` - a raised blade, a shield still glowing. Zero unless
+/// this creature has spent a `lasting` [`Rider::ReactionOnTargeted`] since
+/// the start of its last turn on something this attack answers.
+///
+/// Unlike [`ac_boost_reaction`] this costs nothing and is not a decision: it
+/// is simply how hard this creature is to hit right now, so it is added to
+/// its Armor Class rather than routed through the reaction machinery.
+pub(super) fn standing_ac_boost(f: &Fighter<'_>, kind: AttackKind) -> i32 {
+    match f.reactive_ac {
+        Some((trigger, bonus)) if trigger.answers(kind) => bonus,
+        _ => 0,
+    }
 }
 
 /// Spend this creature's reaction to cut an incoming hit's damage, if it has
@@ -233,6 +256,7 @@ mod tests {
                 // Large enough that, whenever the reaction fires, it always
                 // succeeds in turning the hit into a miss.
                 ac_bonus: 100,
+                lasting: false,
             });
             c
         };
@@ -273,12 +297,13 @@ mod tests {
         c.riders.push(Rider::ReactionOnTargeted {
             trigger: AttackTrigger::AnyAttack,
             ac_bonus: 5,
+            lasting: false,
         });
         let mut f = Fighter::new(&c, Side::A, Policy::Greedy, 0);
 
         assert_eq!(
             ac_boost_reaction(&f, AttackKind::MELEE_WEAPON),
-            Some(5),
+            Some((5, false)),
             "the reaction should be available before anything spends it"
         );
 
@@ -296,7 +321,7 @@ mod tests {
         refresh(&mut f, &mut rng);
         assert_eq!(
             ac_boost_reaction(&f, AttackKind::MELEE_WEAPON),
-            Some(5),
+            Some((5, false)),
             "a new turn should refresh the reaction"
         );
 
@@ -304,6 +329,120 @@ mod tests {
         f.conditions
             .push((Condition::Stunned, Expiry::TurnStart(0)));
         assert_eq!(ac_boost_reaction(&f, AttackKind::MELEE_WEAPON), None);
+    }
+
+    /// A parry stays up: one reaction, but the Armor Class it buys answers
+    /// every melee attack until the start of its holder's next turn - and
+    /// nothing else. An arrow goes straight past it.
+    #[test]
+    fn a_lasting_reactive_boost_answers_every_melee_attack_until_its_next_turn() {
+        let mut c = Creature::new("duelist", 19, 60);
+        c.riders.push(Rider::ReactionOnTargeted {
+            trigger: AttackTrigger::MeleeAttack,
+            ac_bonus: 4,
+            lasting: true,
+        });
+        let mut f = Fighter::new(&c, Side::A, Policy::Greedy, 0);
+
+        assert_eq!(
+            ac_boost_reaction(&f, AttackKind::MELEE_WEAPON),
+            Some((4, true))
+        );
+        assert_eq!(
+            ac_boost_reaction(&f, AttackKind::RANGED_WEAPON),
+            None,
+            "a parry answers a blade, not an arrow"
+        );
+        assert_eq!(standing_ac_boost(&f, AttackKind::MELEE_WEAPON), 0);
+
+        // Spent the way the strike loop spends it.
+        f.reaction = false;
+        f.reactive_ac = Some((AttackTrigger::MeleeAttack, 4));
+        assert_eq!(
+            ac_boost_reaction(&f, AttackKind::MELEE_WEAPON),
+            None,
+            "the reaction itself is gone"
+        );
+        assert_eq!(
+            standing_ac_boost(&f, AttackKind::MELEE_WEAPON),
+            4,
+            "but the blade is still raised"
+        );
+        assert_eq!(standing_ac_boost(&f, AttackKind::RANGED_SPELL), 0);
+
+        // Its own turn takes the raised blade down with it.
+        let mut rng = Rng::new(2);
+        refresh(&mut f, &mut rng);
+        assert_eq!(standing_ac_boost(&f, AttackKind::MELEE_WEAPON), 0);
+        assert_eq!(
+            ac_boost_reaction(&f, AttackKind::MELEE_WEAPON),
+            Some((4, true))
+        );
+    }
+
+    /// End to end: a duelist with a lasting parry takes clearly less from a
+    /// multiattacking enemy than the same duelist without one, because the
+    /// boost answers the second and third swing too.
+    #[test]
+    fn a_lasting_parry_blunts_a_whole_multiattack() {
+        let attacker = {
+            let mut c = puncher("attacker", 10, 10_000, 5, 0);
+            c.actions[0].effect = Effect::Strikes {
+                strike: Strike::new(8, vec![DamageRoll::new(2, 6, 4, DamageKind::Slashing)]),
+                count: 3,
+            };
+            c.initiative = -100;
+            c
+        };
+        let plain = {
+            let mut c = Creature::new("plain", 16, 10_000);
+            c.initiative = 100;
+            c
+        };
+        let duelist = {
+            let mut c = plain.clone();
+            c.riders.push(Rider::ReactionOnTargeted {
+                trigger: AttackTrigger::MeleeAttack,
+                ac_bonus: 4,
+                lasting: true,
+            });
+            c
+        };
+        let one_shot = {
+            let mut c = plain.clone();
+            c.riders.push(Rider::ReactionOnTargeted {
+                trigger: AttackTrigger::MeleeAttack,
+                ac_bonus: 4,
+                lasting: false,
+            });
+            c
+        };
+
+        let taken = |defender: &Creature| {
+            let mut rng = Rng::new(5);
+            let mut total = 0i64;
+            for _ in 0..400 {
+                let mut log = no_log();
+                let o = run(
+                    &mut rng,
+                    [defender, &attacker],
+                    [Policy::Greedy; 2],
+                    5,
+                    &mut log,
+                );
+                total += o.damage_dealt[1];
+            }
+            total
+        };
+        let (base, once, lasting) = (taken(&plain), taken(&one_shot), taken(&duelist));
+        assert!(
+            once < base,
+            "even one parried swing helps: {once} vs {base}"
+        );
+        assert!(
+            lasting < once,
+            "a parry that stays up should blunt the whole multiattack: {lasting} vs {once}"
+        );
     }
 
     /// A reaction limited to ranged weapon attacks answers exactly those:
@@ -314,9 +453,13 @@ mod tests {
         c.riders.push(Rider::ReactionOnTargeted {
             trigger: AttackTrigger::RangedWeaponAttack,
             ac_bonus: 5,
+            lasting: false,
         });
         let f = Fighter::new(&c, Side::A, Policy::Greedy, 0);
-        assert_eq!(ac_boost_reaction(&f, AttackKind::RANGED_WEAPON), Some(5));
+        assert_eq!(
+            ac_boost_reaction(&f, AttackKind::RANGED_WEAPON),
+            Some((5, false))
+        );
         assert_eq!(ac_boost_reaction(&f, AttackKind::MELEE_WEAPON), None);
         assert_eq!(ac_boost_reaction(&f, AttackKind::RANGED_SPELL), None);
     }
@@ -343,6 +486,7 @@ mod tests {
         defender.riders.push(Rider::ReactionOnTargeted {
             trigger: AttackTrigger::AnyAttack,
             ac_bonus: 100,
+            lasting: false,
         });
 
         let mut rng = Rng::new(3);
@@ -379,6 +523,7 @@ mod tests {
             .with_rider(Rider::ReactionOnTargeted {
                 trigger: AttackTrigger::AnyAttack,
                 ac_bonus: 100,
+                lasting: false,
             });
         let mut f = Fighter::new(&rogue, Side::A, Policy::Greedy, 0);
         let strike = Strike::new(5, vec![DamageRoll::new(1, 6, 0, DamageKind::Slashing)]);

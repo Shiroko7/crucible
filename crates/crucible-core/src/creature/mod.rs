@@ -5,15 +5,19 @@
 //! fight with it is [`crate::sim`]'s job; building one from a class feature,
 //! a spell or an item is [`crate::features`]'.
 
+mod boon;
 mod combatant;
 mod effect;
 mod moves;
 mod rider;
 mod zone;
 
+pub use boon::Boon;
 pub use combatant::Creature;
 pub use effect::{AttackKind, Effect, SaveEffect, Strike};
-pub use moves::{Cost, Move, MoveKind, Reaction, ReactionTrigger, Resource, Uses};
+pub use moves::{
+    Cost, Move, MoveKind, Reaction, ReactionTrigger, Requirement, Resource, Spend, Uses,
+};
 pub use rider::{
     injury_poison_forcing_save, save_success_probability, saving_throw_against_condition,
     AttackTrigger, Rider,

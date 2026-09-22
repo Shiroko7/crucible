@@ -57,7 +57,8 @@ pub(super) fn parse_dice(expr: &str) -> Result<(u32, u32, i32), String> {
     }
 }
 
-/// `1d10+8 slashing, 2d4 fire` - or a flat `5 fire`.
+/// `1d10+8 slashing, 2d4 fire` - or a flat `5 fire`, or `1d6+7 slashing or
+/// cold` for damage its dealer can choose the type of per attack.
 pub(super) fn parse_damage(clause: &str) -> Result<Vec<DamageRoll>, String> {
     let mut out = Vec::new();
     for term in clause.split(',') {
@@ -65,13 +66,37 @@ pub(super) fn parse_damage(clause: &str) -> Result<Vec<DamageRoll>, String> {
         let (Some(expr), Some(kind_word)) = (words.next(), words.next()) else {
             return Err(format!("expected `2d6+3 fire`, got `{}`", term.trim()));
         };
-        if words.next().is_some() {
-            return Err(format!("`{}` has more than a roll and a type", term.trim()));
-        }
         let kind = DamageKind::parse(kind_word)
             .ok_or_else(|| format!("unknown damage type `{kind_word}`"))?;
+        // `... or <type>`: the same damage, dealt as whichever of the two
+        // suits its dealer - see `DamageRoll::alternative`.
+        let alternative = match words.next() {
+            None => None,
+            Some(w) if w.eq_ignore_ascii_case("or") => {
+                let alt_word = words.next().ok_or_else(|| {
+                    format!("`{}` says `or` without a second damage type", term.trim())
+                })?;
+                Some(
+                    DamageKind::parse(alt_word)
+                        .ok_or_else(|| format!("unknown damage type `{alt_word}`"))?,
+                )
+            }
+            Some(_) => {
+                return Err(format!(
+                    "`{}` has more than a roll and a type - `2d6+3 fire`, or `2d6+3 fire or cold`",
+                    term.trim()
+                ))
+            }
+        };
+        if words.next().is_some() {
+            return Err(format!("unexpected words at the end of `{}`", term.trim()));
+        }
         let (dice, sides, bonus) = parse_dice(expr)?;
-        out.push(DamageRoll::new(dice, sides, bonus, kind));
+        let roll = DamageRoll::new(dice, sides, bonus, kind);
+        out.push(match alternative {
+            Some(alt) => roll.or(alt),
+            None => roll,
+        });
     }
     Ok(out)
 }

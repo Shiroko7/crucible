@@ -99,14 +99,26 @@ pub(crate) fn parse_trait(value: &str) -> Result<TraitEffect, String> {
                 .ok_or_else(|| format!("unknown ability `{name}` in `{value}`"))?;
             Ok(TraitEffect::Rider(Rider::NothingOnSuccess { ability }))
         }
-        // `legendary resistance 3`, or the mechanism's own name.
+        // `legendary resistance 3` - turn a failed save into a success that
+        // many times. `always succeed dex 3 reaction` narrows it to one kind
+        // of save and makes it cost a reaction, which is a ring that rescues
+        // its wearer from a botched Dexterity save: the same mechanism with
+        // two of its three fields filled in rather than a second one.
         "legendary" | "always" => {
             let n = words
                 .iter()
                 .rev()
                 .find_map(|w| count(w).ok())
                 .ok_or_else(|| format!("expected a number of uses in `{value}`"))?;
-            Ok(TraitEffect::Rider(Rider::AlwaysSucceed { uses: n }))
+            let ability = words[1..].iter().find_map(|w| Ability::parse(w));
+            let reaction = words[1..]
+                .iter()
+                .any(|w| w.eq_ignore_ascii_case("reaction"));
+            Ok(TraitEffect::Rider(Rider::AlwaysSucceed {
+                uses: n,
+                ability,
+                reaction,
+            }))
         }
         // `deflect 1d10+7 bludgeoning, piercing, slashing` - a reaction.
         "deflect" | "reduce" => {
@@ -143,30 +155,47 @@ pub(crate) fn parse_trait(value: &str) -> Result<TraitEffect, String> {
         // `halve attack damage`, or the feature's own name `uncanny dodge` -
         // a reaction that halves one hit.
         "halve" | "uncanny" => Ok(TraitEffect::Rider(Rider::HalveAttackDamage)),
-        // `reaction ac 5 [vs ranged weapon]` - a reaction that raises AC
-        // against one attack roll, optionally only a ranged weapon one.
+        // `reaction ac 5 [vs ranged weapon|melee] [until next turn]` - a
+        // reaction that raises AC against an attack roll: against that one
+        // attack, or - with `until next turn` - against every further attack
+        // it answers until the start of its holder's next turn, which is what
+        // the Shield spell and a parry both do.
         "reaction" => {
             if !arg(&words, 1, value)?.eq_ignore_ascii_case("ac") {
                 return Err(format!("expected `reaction ac <n> ...`, got `{value}`"));
             }
             let ac_bonus = number(arg(&words, 2, value)?)?;
-            let trigger = match words.get(3).map(|w| w.to_ascii_lowercase()) {
-                None => AttackTrigger::AnyAttack,
-                Some(w) if w == "vs" => {
-                    let rest = words[4..].join(" ").to_ascii_lowercase();
-                    match rest.as_str() {
-                        "any" | "any attack" => AttackTrigger::AnyAttack,
-                        "ranged weapon" | "ranged weapon attack" | "ranged weapon attacks" => {
-                            AttackTrigger::RangedWeaponAttack
-                        }
-                        other => return Err(format!("`vs {other}` is not an attack trigger")),
-                    }
+            let mut rest: Vec<String> = words[3..].iter().map(|w| w.to_ascii_lowercase()).collect();
+            // `until next turn` / `until your next turn`, wherever the phrase
+            // ends: what is left is the trigger.
+            let lasting = rest.iter().any(|w| w == "until");
+            if lasting {
+                let at = rest.iter().position(|w| w == "until").expect("just found");
+                let tail = rest[at..].join(" ");
+                if !matches!(
+                    tail.as_str(),
+                    "until next turn" | "until your next turn" | "until my next turn"
+                ) {
+                    return Err(format!("`{tail}` is not a duration in `{value}`"));
                 }
-                Some(other) => return Err(format!("unexpected `{other}` in `{value}`")),
+                rest.truncate(at);
+            }
+            let trigger = match rest.split_first() {
+                None => AttackTrigger::AnyAttack,
+                Some((first, named)) if first == "vs" => match named.join(" ").as_str() {
+                    "any" | "any attack" => AttackTrigger::AnyAttack,
+                    "ranged weapon" | "ranged weapon attack" | "ranged weapon attacks" => {
+                        AttackTrigger::RangedWeaponAttack
+                    }
+                    "melee" | "melee attack" | "melee attacks" => AttackTrigger::MeleeAttack,
+                    other => return Err(format!("`vs {other}` is not an attack trigger")),
+                },
+                Some((other, _)) => return Err(format!("unexpected `{other}` in `{value}`")),
             };
             Ok(TraitEffect::Rider(Rider::ReactionOnTargeted {
                 trigger,
                 ac_bonus,
+                lasting,
             }))
         }
         // `ac 2`, or the more readable `ac bonus 2` - a passive item's flat
@@ -189,6 +218,45 @@ pub(crate) fn parse_trait(value: &str) -> Result<TraitEffect, String> {
                 return Err(format!("`{value}` needs at least one damage type"));
             }
             Ok(TraitEffect::Resistance(kinds))
+        }
+        // `once per turn 1d6 piercing` - extra dice on the first hit this
+        // creature lands on each of its own turns, whatever it hits with: a
+        // swarm that joins one blow a turn.
+        "once" => {
+            let at = words
+                .iter()
+                .position(|w| parse_dice(w).is_ok())
+                .ok_or_else(|| format!("expected `once per turn NdM <type>`, got `{value}`"))?;
+            let (dice, sides, bonus) = parse_dice(words[at])?;
+            let kind_word = arg(&words, at + 1, value)?;
+            let damage_kind = DamageKind::parse(kind_word)
+                .ok_or_else(|| format!("unknown damage type `{kind_word}` in `{value}`"))?;
+            if at + 2 != words.len() {
+                return Err(format!("unexpected words at the end of `{value}`"));
+            }
+            Ok(TraitEffect::Rider(Rider::OncePerTurnDamage {
+                dice_count: dice,
+                dice_sides: sides,
+                bonus,
+                damage_kind,
+            }))
+        }
+        // `quarry 1d6 force` - extra dice on every hit against whatever this
+        // creature has marked as its quarry and is still concentrating on.
+        "quarry" => {
+            let (dice, sides, bonus) = parse_dice(arg(&words, 1, value)?)?;
+            let kind_word = arg(&words, 2, value)?;
+            let damage_kind = DamageKind::parse(kind_word)
+                .ok_or_else(|| format!("unknown damage type `{kind_word}` in `{value}`"))?;
+            if words.len() > 3 {
+                return Err(format!("unexpected words at the end of `{value}`"));
+            }
+            Ok(TraitEffect::Rider(Rider::BonusDamageVsQuarry {
+                dice_count: dice,
+                dice_sides: sides,
+                bonus,
+                damage_kind,
+            }))
         }
         // `bonus 3d6 piercing vs dragon` - extra damage dice on a hit against
         // one creature type, on every attack this creature makes: a
@@ -456,7 +524,7 @@ trait: deflect 1d10+7 bludgeoning, piercing, slashing
         assert!(c
             .riders
             .iter()
-            .any(|r| matches!(r, Rider::AlwaysSucceed { uses: 3 })));
+            .any(|r| matches!(r, Rider::AlwaysSucceed { uses: 3, .. })));
         let deflect = c
             .riders
             .iter()
@@ -470,6 +538,71 @@ trait: deflect 1d10+7 bludgeoning, piercing, slashing
             (deflect.1.count, deflect.1.sides, deflect.1.bonus),
             (1, 10, 7)
         );
+    }
+
+    /// The four newest trait phrases, each read back as the rider it stands
+    /// for - and the two widened ones keeping their old readings.
+    #[test]
+    fn the_newer_trait_phrases_parse_into_their_riders() {
+        let text = "
+creature: x
+hp: 10
+trait: once per turn 1d6 piercing
+trait: quarry 1d6 force
+trait: always succeed dex 3 reaction
+trait: reaction ac 4 vs melee until next turn
+trait: legendary resistance 3
+trait: reaction ac 5 vs ranged weapon
+";
+        let c = &parse(text).unwrap()[0];
+        assert_eq!(
+            c.riders,
+            vec![
+                Rider::OncePerTurnDamage {
+                    dice_count: 1,
+                    dice_sides: 6,
+                    bonus: 0,
+                    damage_kind: DamageKind::Piercing,
+                },
+                Rider::BonusDamageVsQuarry {
+                    dice_count: 1,
+                    dice_sides: 6,
+                    bonus: 0,
+                    damage_kind: DamageKind::Force,
+                },
+                Rider::AlwaysSucceed {
+                    uses: 3,
+                    ability: Some(Ability::Dex),
+                    reaction: true,
+                },
+                Rider::ReactionOnTargeted {
+                    trigger: AttackTrigger::MeleeAttack,
+                    ac_bonus: 4,
+                    lasting: true,
+                },
+                // Legendary Resistance is still the same words and the same
+                // rider: any save, no reaction.
+                Rider::AlwaysSucceed {
+                    uses: 3,
+                    ability: None,
+                    reaction: false,
+                },
+                Rider::ReactionOnTargeted {
+                    trigger: AttackTrigger::RangedWeaponAttack,
+                    ac_bonus: 5,
+                    lasting: false,
+                },
+            ]
+        );
+
+        for bad in [
+            "creature: x\nhp: 1\ntrait: once per turn 1d6 confusion\n",
+            "creature: x\nhp: 1\ntrait: quarry 1d6\n",
+            "creature: x\nhp: 1\ntrait: reaction ac 4 vs melee until dawn\n",
+            "creature: x\nhp: 1\ntrait: reaction ac 4 vs teeth\n",
+        ] {
+            assert!(parse(bad).is_err(), "should be rejected: {bad}");
+        }
     }
 
     /// The generic "bonus damage vs a creature type" trait: any weapon or
@@ -775,11 +908,13 @@ condition immune: poisoned, prone
                 Rider::HalveAttackDamage,
                 Rider::ReactionOnTargeted {
                     trigger: AttackTrigger::RangedWeaponAttack,
-                    ac_bonus: 5
+                    ac_bonus: 5,
+                    lasting: false,
                 },
                 Rider::ReactionOnTargeted {
                     trigger: AttackTrigger::AnyAttack,
-                    ac_bonus: 5
+                    ac_bonus: 5,
+                    lasting: false,
                 },
             ]
         );

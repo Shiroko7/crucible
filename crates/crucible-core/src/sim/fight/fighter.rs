@@ -85,6 +85,9 @@ impl<'a> Fighter<'a> {
             reaction: true,
             armed: vec![false; creature.riders.len()],
             melee: fights_in_melee(creature),
+            summoned_by: None,
+            once_per_turn_damage_spent: false,
+            reactive_ac: None,
             dead: false,
             slot_spent_this_turn: false,
             inside_damage: 0,
@@ -97,6 +100,12 @@ impl<'a> Fighter<'a> {
 
     pub(super) fn alive(&self) -> bool {
         self.hp > 0
+    }
+
+    /// Called up mid-fight rather than one of the combatants the fight is
+    /// about - see [`Fighter::summoned_by`].
+    pub(super) fn is_summon(&self) -> bool {
+        self.summoned_by.is_some()
     }
 
     /// Down but not dead: a player character at 0 hit points that healing
@@ -292,7 +301,9 @@ pub(super) fn refresh(f: &mut Fighter<'_>, rng: &mut Rng) {
     }
     f.legendary_left = creature.legendary_uses;
     f.once_per_turn_spent = false;
+    f.once_per_turn_damage_spent = false;
     f.reaction = true;
+    f.reactive_ac = None;
     f.slot_spent_this_turn = false;
 }
 

@@ -24,6 +24,9 @@ pub enum AttackTrigger {
     /// Only a ranged weapon attack - an item that can be raised against
     /// arrows but not against a sword or a spell.
     RangedWeaponAttack,
+    /// Only a melee attack - a parry, which answers a blade and not an arrow
+    /// or a spell cast from across the room.
+    MeleeAttack,
 }
 
 impl AttackTrigger {
@@ -32,6 +35,7 @@ impl AttackTrigger {
         match self {
             AttackTrigger::AnyAttack => true,
             AttackTrigger::RangedWeaponAttack => kind.ranged_weapon(),
+            AttackTrigger::MeleeAttack => !kind.ranged,
         }
     }
 }
@@ -65,9 +69,20 @@ pub enum Rider {
     NothingOnSuccess { ability: Ability },
     /// Turn a failed save into a success, a fixed number of times per fight.
     ///
-    /// Legendary Resistance. A fighter's Indomitable is the same shape with
-    /// one use and a reroll instead of a pass.
-    AlwaysSucceed { uses: u32 },
+    /// Legendary Resistance, which answers any save at no cost. `ability`
+    /// narrows it to one kind of save and `reaction` makes it cost the
+    /// creature's reaction, which together are a ring that saves its wearer
+    /// from a failed Dexterity save a few times a day - the same mechanism,
+    /// not a second one. A fighter's Indomitable is this shape too, with one
+    /// use and a reroll instead of a pass.
+    AlwaysSucceed {
+        uses: u32,
+        /// The only save it answers, or `None` for any of them.
+        ability: Option<Ability>,
+        /// Spends the creature's one reaction a round, shared with every
+        /// other reaction it has - see [`Rider::is_reaction`].
+        reaction: bool,
+    },
     /// A reaction that reduces the damage of an incoming *attack* whose types
     /// include one of `kinds` by `roll`.
     ///
@@ -96,6 +111,16 @@ pub enum Rider {
     ReactionOnTargeted {
         trigger: AttackTrigger,
         ac_bonus: i32,
+        /// The bonus stays up against every further attack of the same kind
+        /// until the start of this creature's next turn, rather than
+        /// answering only the one attack that set it off: the Shield spell's
+        /// "until the start of your next turn", a parry that leaves the blade
+        /// raised. `false` is the one-attack kind - an item raised against a
+        /// single arrow.
+        ///
+        /// Either way it is one reaction: what lasts is the AC, not a licence
+        /// to react again.
+        lasting: bool,
     },
     /// A reaction that halves (rounding down) the damage of one attack that
     /// hits this creature.
@@ -170,6 +195,36 @@ pub enum Rider {
         bonus: i32,
         damage_kind: DamageKind,
         creature_type: CreatureType,
+    },
+    /// Extra damage dice on the first hit this creature lands on each of its
+    /// own turns, whatever it hits with and whatever the situation.
+    ///
+    /// A swarm of nature spirits that joins one blow a turn, a once-a-turn
+    /// elemental strike. Unlike [`Rider::ConditionalExtraDamage`] there is no
+    /// gate to qualify for - the budget *is* the limit - and unlike
+    /// [`Rider::BonusDamageVsCreatureType`] it applies to everything. It is
+    /// counted on the creature's own turns only, which is what "once on each
+    /// of your turns" means, and it keeps its own budget rather than sharing
+    /// the Stunning-Strike-style one (see `README.md`).
+    OncePerTurnDamage {
+        dice_count: u32,
+        dice_sides: u32,
+        bonus: i32,
+        damage_kind: DamageKind,
+    },
+    /// Extra damage dice on every hit against the creature this one has
+    /// marked as its quarry - the [`Condition::Quarry`] its own
+    /// concentration is holding.
+    ///
+    /// Hunter's Mark, and Hex. The mark itself is applied by a move
+    /// ([`crate::creature::Effect::Afflict`]) and lasts as long as the hunter
+    /// concentrates; this is the other half, and it is inert until the mark
+    /// is out there: no concentration, no quarry, no dice.
+    BonusDamageVsQuarry {
+        dice_count: u32,
+        dice_sides: u32,
+        bonus: i32,
+        damage_kind: DamageKind,
     },
     /// The 2024 Rogue's Cunning Strike: Trip option (Rogue 5) is unlocked:
     /// spend 1d6 of a qualifying Sneak Attack's pool (see
@@ -363,7 +418,7 @@ impl Rider {
     /// reaction per round, which `sim::fight` tracks itself.
     pub fn initial_uses(&self) -> u32 {
         match self {
-            Rider::AlwaysSucceed { uses } => *uses,
+            Rider::AlwaysSucceed { uses, .. } => *uses,
             Rider::InjuryPoison { .. } => 1,
             _ => 0,
         }
@@ -376,6 +431,7 @@ impl Rider {
             Rider::ReduceDamage { .. }
                 | Rider::ReactionOnTargeted { .. }
                 | Rider::HalveAttackDamage
+                | Rider::AlwaysSucceed { reaction: true, .. }
         )
     }
 }

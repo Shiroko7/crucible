@@ -743,7 +743,12 @@ mod tests {
         // An unrelated rider never answers yes either, the same "not
         // mistaken for a different marker" check every other rider accessor
         // in this module is held to.
-        assert!(!Rider::AlwaysSucceed { uses: 3 }.arms_on_condition(Condition::Poisoned));
+        assert!(!Rider::AlwaysSucceed {
+            uses: 3,
+            ability: None,
+            reaction: false,
+        }
+        .arms_on_condition(Condition::Poisoned));
     }
 
     #[test]

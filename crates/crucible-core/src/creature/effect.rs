@@ -90,6 +90,17 @@ pub struct Strike {
     pub damage: Vec<DamageRoll>,
     /// What kind of attack roll this is - see [`AttackKind`].
     pub kind: AttackKind,
+    /// Which weapon this swing is made with, for a build that swings more
+    /// than one and has something riding on only one of them: an enchantment
+    /// laid on a single blade (see [`crate::creature::Boon::weapon`]).
+    /// `None` - every ordinary strike - matches no such enchantment and is
+    /// matched by none.
+    ///
+    /// A label rather than a weapon object: nothing here needs a weapon's
+    /// own statistics, which are already baked into the strike's to-hit and
+    /// damage. All it has to answer is "is this the blade the spell was cast
+    /// on".
+    pub weapon: Option<String>,
 }
 
 impl Strike {
@@ -99,6 +110,7 @@ impl Strike {
             mode: RollMode::Normal,
             damage,
             kind: AttackKind::default(),
+            weapon: None,
         }
     }
 
@@ -106,6 +118,19 @@ impl Strike {
     pub fn with_kind(mut self, kind: AttackKind) -> Self {
         self.kind = kind;
         self
+    }
+
+    /// Name the weapon this swing is made with - see [`Strike::weapon`].
+    pub fn with_weapon(mut self, weapon: impl Into<String>) -> Self {
+        self.weapon = Some(weapon.into());
+        self
+    }
+
+    /// Is this swing made with the weapon named `weapon`, case-insensitively?
+    pub fn made_with(&self, weapon: &str) -> bool {
+        self.weapon
+            .as_deref()
+            .is_some_and(|w| w.eq_ignore_ascii_case(weapon))
     }
 
     /// The damage type of this strike's first damage component - the
@@ -136,7 +161,7 @@ impl Strike {
             .iter()
             .chain(extra)
             .fold(Pmf::constant(0), |acc, roll| {
-                acc.convolve(&roll.pmf(crit, reduce(roll.kind)))
+                acc.convolve(&roll.pmf(crit, roll.reduction_against(reduce)))
             })
     }
 
@@ -245,7 +270,7 @@ impl Strike {
             .damage
             .iter()
             .chain(extra_damage)
-            .map(|roll| roll.sample(rng, crit, reduce(roll.kind)))
+            .map(|roll| roll.sample(rng, crit, roll.reduction_against(reduce)))
             .sum();
         (total, landed, consumed)
     }
@@ -361,7 +386,7 @@ impl Strike {
             .damage
             .iter()
             .chain(extra_damage)
-            .map(|roll| roll.sample(rng, crit, target.reduction(roll.kind)))
+            .map(|roll| roll.sample(rng, crit, roll.reduction_against(&|k| target.reduction(k))))
             .sum();
         (total, landed)
     }
@@ -450,7 +475,7 @@ impl SaveEffect {
             if share == Share::Half {
                 p = p.map_values(|d| d / 2);
             }
-            let reduction = reduce(roll.kind);
+            let reduction = roll.reduction_against(reduce);
             acc.convolve(&p.map_values(move |d| reduction.apply(d)))
         })
     }
@@ -523,7 +548,7 @@ impl SaveEffect {
                 if share == Share::Half {
                     dealt /= 2;
                 }
-                reduce(roll.kind).apply(dealt)
+                roll.reduction_against(reduce).apply(dealt)
             })
             .sum()
     }
@@ -681,6 +706,42 @@ pub enum Effect {
         save_modifier: SaveModifier,
         max_targets: Option<u32>,
     },
+    /// A condition laid on one enemy with no roll to resist it - Hunter's
+    /// Mark's [`Condition::Quarry`], Hex's, a hunter's sense.
+    ///
+    /// The targeted twin of [`Effect::Stance`], which puts a condition on the
+    /// user instead, and the roll-free twin of [`Effect::Save`]'s
+    /// `on_failure`: nothing about a mark is resistible, so offering a save
+    /// against it - even one at an impossible DC - would be a lie about the
+    /// mechanism. A move using this to maintain something should also set
+    /// [`crate::creature::Move::concentration`], which is what makes the mark
+    /// end when the caster's attention does.
+    Afflict {
+        condition: Condition,
+        duration: Duration,
+    },
+    /// A lasting boon the user puts on itself: the `which`th entry of its own
+    /// [`crate::creature::Creature::boons`], for `duration`.
+    ///
+    /// Everything the boon does - extra damage on its hits, resistances -
+    /// lives on the creature, declared once; this only says when it starts
+    /// and how long it lasts. A card that turns its bearer into something
+    /// with tougher hide and a heavier blow, a blade enchantment, an icy
+    /// stance.
+    Boon {
+        which: usize,
+        duration: Duration,
+    },
+    /// Calls up one of the user's own [`crate::creature::Creature::summons`]
+    /// beside it: a double of running water, a spectral ally.
+    ///
+    /// The summoned creature is added to the fight on the user's side. It
+    /// takes no turn of its own - it acts only when its summoner spends a
+    /// move commanding it (see [`crate::creature::Requirement::Summon`]) -
+    /// but it has hit points, it can be attacked, and it can be destroyed.
+    Summon {
+        which: usize,
+    },
 }
 
 impl Effect {
@@ -703,7 +764,10 @@ impl Effect {
             Effect::Stance { .. }
             | Effect::Buff { .. }
             | Effect::SaveOrModifier { .. }
-            | Effect::HarmSwallowed { .. } => 0.0,
+            | Effect::HarmSwallowed { .. }
+            | Effect::Afflict { .. }
+            | Effect::Boon { .. }
+            | Effect::Summon { .. } => 0.0,
             Effect::Sequence(parts) => parts.iter().map(|p| p.mean_damage(target)).sum(),
             Effect::Part { effect, .. } => effect.mean_damage(target),
         }
@@ -723,12 +787,15 @@ impl Effect {
             Effect::Save(save) => save.damage_pmf(target),
             Effect::Heal(_) => Pmf::constant(0),
             Effect::AutoHit { damage } => damage.iter().fold(Pmf::constant(0), |acc, roll| {
-                acc.convolve(&roll.pmf(false, target.reduction(roll.kind)))
+                acc.convolve(&roll.pmf(false, roll.reduction_against(&|k| target.reduction(k))))
             }),
             Effect::Stance { .. }
             | Effect::Buff { .. }
             | Effect::SaveOrModifier { .. }
-            | Effect::HarmSwallowed { .. } => Pmf::constant(0),
+            | Effect::HarmSwallowed { .. }
+            | Effect::Afflict { .. }
+            | Effect::Boon { .. }
+            | Effect::Summon { .. } => Pmf::constant(0),
             Effect::Sequence(parts) => parts.iter().fold(Pmf::constant(0), |acc, p| {
                 acc.convolve(&p.damage_pmf(target))
             }),

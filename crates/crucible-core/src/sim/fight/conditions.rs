@@ -68,7 +68,7 @@ impl<'a> Fight<'a> {
 
     /// How a just-applied condition ends, once `duration` is pinned to the
     /// specific applier and victim that made it real.
-    fn expiry(&self, applier: usize, victim: usize, duration: Duration) -> Expiry {
+    pub(super) fn expiry(&self, applier: usize, victim: usize, duration: Duration) -> Expiry {
         match duration {
             Duration::ApplierTurn => Expiry::TurnStart(applier),
             Duration::VictimTurn => Expiry::TurnStart(victim),

@@ -45,20 +45,37 @@ pub(super) fn saving_throw(
         return (true, false);
     }
 
-    // Legendary Resistance, and anything else shaped like it. A hoarding policy
-    // never reaches for it, which is most of what separates a well-run monster
-    // from a badly run one.
+    // Legendary Resistance, and anything else shaped like it: a ring that
+    // rescues one kind of save at the price of a reaction is the same rider
+    // with `ability` and `reaction` filled in. A hoarding policy never
+    // reaches for any of them, which is most of what separates a well-run
+    // monster from a badly run one.
     if fighters[who].will_spend() {
         let creature = fighters[who].creature;
+        let f = &fighters[who];
         let mut slot = None;
         for (i, rider) in creature.riders.iter().enumerate() {
-            if matches!(rider, Rider::AlwaysSucceed { .. }) && fighters[who].rider_uses[i] > 0 {
+            let usable = match rider {
+                Rider::AlwaysSucceed {
+                    ability: only,
+                    reaction,
+                    ..
+                } => {
+                    only.is_none_or(|a| a == ability)
+                        && (!reaction || (f.reaction && !f.incapacitated()))
+                }
+                _ => false,
+            };
+            if usable && f.rider_uses[i] > 0 {
                 slot = Some(i);
                 break;
             }
         }
         if let Some(i) = slot {
             fighters[who].rider_uses[i] -= 1;
+            if creature.riders[i].is_reaction() {
+                fighters[who].reaction = false;
+            }
             return (true, true);
         }
     }
@@ -69,7 +86,9 @@ pub(super) fn saving_throw(
 mod tests {
     use super::*;
     use crate::creature::Creature;
+    use crate::prob::Rng;
     use crate::rules::Condition;
+    use crate::sim::fight::fighter::refresh;
     use crate::sim::fight::Expiry;
     use crate::sim::{Policy, Side};
 
@@ -92,6 +111,54 @@ mod tests {
             save_mode(&fighter, Ability::Dex, false),
             RollMode::Normal,
             "the disadvantage must not outlive the condition"
+        );
+    }
+
+    /// A ring that rescues one kind of save: it answers a Dexterity save and
+    /// no other, it costs the reaction, and it runs out - the same rider
+    /// Legendary Resistance is, with two of its fields filled in.
+    #[test]
+    fn a_narrowed_auto_success_answers_one_save_and_costs_a_reaction() {
+        let mut creature = Creature::new("wearer", 15, 40);
+        creature.saves = [-100; 6]; // nothing is ever made on the roll
+        creature.riders.push(Rider::AlwaysSucceed {
+            uses: 2,
+            ability: Some(Ability::Dex),
+            reaction: true,
+        });
+        let mut fighters = vec![Fighter::new(&creature, Side::A, Policy::Greedy, 0)];
+        let mut rng = Rng::new(7);
+
+        // A Wisdom save is not what it answers.
+        assert_eq!(
+            saving_throw(&mut fighters, &mut rng, 0, Ability::Wis, 20, false),
+            (false, false)
+        );
+        assert!(fighters[0].reaction, "and nothing was spent on it");
+
+        // A Dexterity save is, and it costs the reaction.
+        assert_eq!(
+            saving_throw(&mut fighters, &mut rng, 0, Ability::Dex, 20, false),
+            (true, true)
+        );
+        assert!(!fighters[0].reaction);
+        assert_eq!(fighters[0].rider_uses[0], 1, "one charge gone");
+
+        // With the reaction already spent it cannot fire again this round,
+        // however many charges are left.
+        assert_eq!(
+            saving_throw(&mut fighters, &mut rng, 0, Ability::Dex, 20, false),
+            (false, false)
+        );
+        assert_eq!(fighters[0].rider_uses[0], 1, "and no charge was wasted");
+
+        // The reaction back, the last charge goes, and then it is empty.
+        refresh(&mut fighters[0], &mut rng);
+        assert!(saving_throw(&mut fighters, &mut rng, 0, Ability::Dex, 20, false).0);
+        refresh(&mut fighters[0], &mut rng);
+        assert_eq!(
+            saving_throw(&mut fighters, &mut rng, 0, Ability::Dex, 20, false),
+            (false, false)
         );
     }
 
