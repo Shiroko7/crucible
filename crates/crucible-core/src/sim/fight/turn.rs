@@ -43,13 +43,19 @@ impl<'a> Fight<'a> {
         plan: Option<Plan>,
     ) {
         self.start_of_turn(who);
+        self.acting = Some(who);
+        if self.fighters[who].alive() {
+            self.auras_on(round, who, rng, log);
+            self.digest(round, who, rng, log);
+        }
         if !self.fighters[who].alive() {
             // A creature that is down keeps its place in the order: whatever
             // was set to last until the start or end of its turn ends anyway.
             self.end_of_turn(who);
+            self.check_regurgitation(round, rng, log);
+            self.acting = None;
             return;
         }
-        self.acting = Some(who);
         if !self.turn(round, who, rng, log, plan) {
             self.turns_lost[self.fighters[who].side.index()] += 1;
         }
@@ -58,7 +64,41 @@ impl<'a> Fight<'a> {
         // when its next chance to shake the condition off falls.
         self.end_of_turn_saves(round, who, rng, log);
         self.end_of_turn(who);
+        self.check_regurgitation(round, rng, log);
         self.acting = None;
+    }
+
+    /// Every aura on the other side washes over `who` as its turn starts,
+    /// each resolved against `who` alone - and whatever it lands can set off
+    /// its owner's reaction.
+    fn auras_on(&mut self, round: u32, who: usize, rng: &mut Rng, log: &mut Option<Vec<String>>) {
+        let side = self.fighters[who].side;
+        for owner in 0..self.fighters.len() {
+            let creature = self.fighters[owner].creature;
+            if creature.auras.is_empty()
+                || self.fighters[owner].side == side
+                || !self.fighters[owner].alive()
+            {
+                continue;
+            }
+            for m in &creature.auras {
+                if !self.fighters[who].alive() || !self.reaches(owner, who) {
+                    break;
+                }
+                let mut line = String::new();
+                let previous = self.sole_target.replace(who);
+                self.apply(m, rng, owner, who, log.is_some(), &mut line);
+                self.sole_target = previous;
+                if let Some(l) = log.as_mut() {
+                    l.push(format!(
+                        "r{round} {} (aura): {line}  [{} {} hp]",
+                        creature.name,
+                        self.fighters[who].creature.name,
+                        self.fighters[who].hp.max(0)
+                    ));
+                }
+            }
+        }
     }
 
     /// Everything that happens as `who`'s turn starts, whether or not it is
@@ -69,6 +109,7 @@ impl<'a> Fight<'a> {
     pub(super) fn start_of_turn(&mut self, who: usize) {
         for f in self.fighters.iter_mut() {
             f.sneak_attack_spent = false;
+            f.inside_damage = 0;
             f.conditions.retain_mut(|(_, expiry)| match expiry {
                 Expiry::TurnStart(x) => *x != who,
                 Expiry::Rounds { who: w, left } if *w == who => {
@@ -123,7 +164,7 @@ impl<'a> Fight<'a> {
             return false;
         }
 
-        let Some(mut target) = self.pick_target(me) else {
+        let Some(mut target) = self.aim(me) else {
             return true; // nothing left to hit
         };
 
@@ -148,8 +189,8 @@ impl<'a> Fight<'a> {
         let mut line = String::new();
         for (slot, pick) in order {
             let Some(pick) = pick else { continue };
-            if !self.fighters[target].alive() {
-                let Some(new_target) = self.pick_target(me) else {
+            if !self.fighters[target].alive() || !self.reaches(me, target) {
+                let Some(new_target) = self.aim(me) else {
                     break;
                 };
                 target = new_target;
@@ -252,7 +293,7 @@ impl<'a> Fight<'a> {
         if self.fighters[me].legendary_left == 0 {
             return;
         }
-        let Some(target) = self.pick_target(me) else {
+        let Some(target) = self.aim(me) else {
             return;
         };
 
@@ -262,15 +303,20 @@ impl<'a> Fight<'a> {
             let f = &self.fighters[me];
             // Legendary actions are chosen by policy even for the search, which
             // only plans whole turns. Searching them too would multiply the
-            // rollout count by the number of windows.
+            // rollout count by the number of windows. One costing more than
+            // is left this round is not a choice.
             f.policy.choose(&creature.legendary, &f.legendary, f, |m| {
-                self.move_value(me, target, m, false)
+                if m.legendary_cost > f.legendary_left {
+                    f64::NEG_INFINITY
+                } else {
+                    self.move_value(me, target, m, false)
+                }
             })
         };
         let Some(pick) = pick else { return };
         let chosen = &creature.legendary[pick];
 
-        self.fighters[me].legendary_left -= 1;
+        self.fighters[me].legendary_left -= chosen.legendary_cost;
         self.fighters[me].pay(chosen.cost);
         self.fighters[me].cast_spell_slot(chosen.spell_slot_level);
         self.fighters[me].spend_move(Slot::Legendary, pick, chosen.uses);
@@ -636,5 +682,32 @@ mod tests {
             !fight.fighters[0].has(|c| c == Condition::SteadyAim),
             "used up by the attack roll"
         );
+    }
+
+    /// A legendary action costing two takes two of the round's three, and
+    /// one costing more than is left is passed over for one that fits.
+    #[test]
+    fn a_legendary_action_takes_what_it_costs() {
+        let zap = |name: &str, damage: i32, cost: u32| {
+            Move::new(
+                name,
+                Effect::AutoHit {
+                    damage: vec![DamageRoll::new(0, 1, damage, DamageKind::Force)],
+                },
+            )
+            .with_legendary_cost(cost)
+        };
+        let mut boss = Creature::new("boss", 10, 1_000);
+        boss.legendary_uses = 3;
+        boss.legendary.push(zap("Big", 10, 2));
+        boss.legendary.push(zap("Small", 1, 1));
+        let hero = Creature::new("hero", 10, 1_000);
+        let (mut fight, mut rng) = fight_of(&[(&boss, Side::B), (&hero, Side::A)], 1);
+
+        for _ in 0..3 {
+            fight.legendary(1, 0, &mut rng, &mut no_log());
+        }
+        assert_eq!(fight.fighters[0].legendary_left, 0);
+        assert_eq!(fight.fighters[1].hp, 1_000 - 10 - 1, "Big, then Small");
     }
 }

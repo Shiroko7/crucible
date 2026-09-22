@@ -1,8 +1,9 @@
 //! The Creature combatant model.
 
-use crate::creature::{Move, Resource, Rider};
+use crate::creature::{Move, Reaction, Resource, Rider};
 use crate::rules::{
-    Ability, Condition, CreatureType, DamageKind, Reduction, Size, SpellCastingProfile, SpellSlots,
+    Ability, Condition, CreatureType, DamageKind, DamageRoll, Reduction, Size, SpellCastingProfile,
+    SpellSlots,
 };
 
 /// One side of a fight.
@@ -65,9 +66,17 @@ pub struct Creature {
     pub actions: Vec<Move>,
     pub bonus_actions: Vec<Move>,
     pub legendary: Vec<Move>,
-    /// Legendary actions available each round, each move costing one. Real
-    /// blocks have moves costing two or three; nothing here needs that yet.
+    /// Legendary actions available each round. Each move takes
+    /// [`Move::legendary_cost`] of them - one, unless it says otherwise.
     pub legendary_uses: u32,
+    /// Reactions that are moves of their own, each waiting on a trigger -
+    /// see [`Reaction`]. They share the one reaction a round with the
+    /// reaction [`Rider`]s.
+    pub reactions: Vec<Reaction>,
+    /// Effects every enemy is subject to at the start of each of its turns -
+    /// a whirlpool's drag, a stench - resolved against that enemy alone.
+    /// Taking one costs nothing: an aura is always on.
+    pub auras: Vec<Move>,
     /// Reliable Talent (2024 Rogue 7): a floor under a d20 roll for a check
     /// the creature is proficient in - `Some(10)` for the standard feature,
     /// `None` for a creature without it. Plain field rather than a
@@ -105,6 +114,8 @@ impl Creature {
             bonus_actions: Vec::new(),
             legendary: Vec::new(),
             legendary_uses: 0,
+            reactions: Vec::new(),
+            auras: Vec::new(),
             reliable_talent_floor: None,
             player_character: false,
         }
@@ -189,6 +200,56 @@ impl Creature {
         self.riders
             .iter()
             .any(|r| matches!(r, Rider::ExtraDamageAppliesToSpellAttacks))
+    }
+
+    /// This creature's damage threshold, and whether a breach cracks it - see
+    /// [`Rider::DamageThreshold`]. `None` for anything without a shell.
+    pub fn damage_threshold(&self) -> Option<(i32, bool)> {
+        self.riders.iter().find_map(|r| match r {
+            Rider::DamageThreshold {
+                threshold, cracks, ..
+            } => Some((*threshold, *cracks)),
+            _ => None,
+        })
+    }
+
+    /// The damage types resisted by a hit that reaches this creature's weak
+    /// spot - empty for a creature without a damage threshold.
+    pub fn weak_spot_resists(&self) -> &[DamageKind] {
+        self.riders
+            .iter()
+            .find_map(|r| match r {
+                Rider::DamageThreshold {
+                    weak_spot_resists, ..
+                } => Some(weak_spot_resists.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// What each creature this one has swallowed takes at the start of its
+    /// turns - see [`Rider::Digestion`]. Empty if nothing.
+    pub fn digestion(&self) -> &[DamageRoll] {
+        self.riders
+            .iter()
+            .find_map(|r| match r {
+                Rider::Digestion { damage } => Some(damage.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// How much damage from inside it in one turn makes this creature save
+    /// against regurgitating, and the save - see [`Rider::Regurgitate`].
+    pub fn regurgitation(&self) -> Option<(i32, Ability, i32)> {
+        self.riders.iter().find_map(|r| match r {
+            Rider::Regurgitate {
+                threshold,
+                ability,
+                dc,
+            } => Some((*threshold, *ability, *dc)),
+            _ => None,
+        })
     }
 
     pub fn resource_index(&self, name: &str) -> Option<usize> {

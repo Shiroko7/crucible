@@ -15,6 +15,9 @@
 //! Riders fire at fixed points, which is where the event pipeline `DESIGN.md`
 //! describes will eventually go:
 //!
+//! - **at the start of a turn**, every aura on the other side resolves
+//!   against the creature whose turn it is, and a swallower digests whatever
+//!   it holds ([`Rider::Digestion`]);
 //! - **as an attack roll is made**, the attacker's damage riders are gathered:
 //!   Sneak Attack if the roll qualifies (see [`Fight::extra_damage_plan`]),
 //!   bonus dice against the target's creature type, a weapon buff armed by an
@@ -25,11 +28,19 @@
 //! - **on an incoming attack's damage**, [`Rider::ReduceDamage`] or
 //!   [`Rider::HalveAttackDamage`] spends a reaction to cut it - one reaction
 //!   a round between all of them;
+//! - **as damage lands**, a [`Rider::DamageThreshold`] absorbs it or is
+//!   breached - unless it came through a weak spot - and a breach sets off a
+//!   reaction waiting for one ([`ReactionTrigger::Breached`]);
 //! - **on a hit**, [`Rider::SaveOrCondition`] forces a save and may apply a
 //!   condition, [`Rider::ConditionOnHit`] applies one outright, a Cunning
-//!   Strike effect resolves, and an [`Rider::InjuryPoison`] dose is used up;
+//!   Strike effect resolves, an [`Rider::InjuryPoison`] dose is used up, and
+//!   a [`Rider::Swallow`] takes the target in;
+//! - **as a condition lands on an enemy**, a reaction waiting for it answers
+//!   ([`ReactionTrigger::EnemyGains`]);
 //! - **on a failed save**, [`Rider::AlwaysSucceed`] may buy it back;
-//! - **on a save for half**, [`Rider::NothingOnSuccess`] reshapes the outcome.
+//! - **on a save for half**, [`Rider::NothingOnSuccess`] reshapes the outcome;
+//! - **at the end of a turn**, a swallower that took enough damage from inside
+//!   saves or regurgitates ([`Rider::Regurgitate`]).
 //!
 //! Those points are chosen here rather than subscribed to, and a rider cannot
 //! modify another rider. Getting from this to the real pipeline is a refactor of
@@ -41,7 +52,8 @@
 //! party that spread out would not all be in one cone. `max_targets` on a saving
 //! throw is the only control over that. "An ally within 5 feet of the target",
 //! which Sneak Attack asks about, is read off who is fighting what instead: see
-//! [`Fight::ally_adjacent`].
+//! [`Fight::ally_adjacent`]. The one kind of reach there is comes from being
+//! swallowed - see [`Fight::reaches`].
 //!
 //! [`Rider::ReactionOnTargeted`]: crate::creature::Rider::ReactionOnTargeted
 //! [`Rider::ReduceDamage`]: crate::creature::Rider::ReduceDamage
@@ -51,6 +63,12 @@
 //! [`Rider::InjuryPoison`]: crate::creature::Rider::InjuryPoison
 //! [`Rider::AlwaysSucceed`]: crate::creature::Rider::AlwaysSucceed
 //! [`Rider::NothingOnSuccess`]: crate::creature::Rider::NothingOnSuccess
+//! [`Rider::Digestion`]: crate::creature::Rider::Digestion
+//! [`Rider::DamageThreshold`]: crate::creature::Rider::DamageThreshold
+//! [`Rider::Swallow`]: crate::creature::Rider::Swallow
+//! [`Rider::Regurgitate`]: crate::creature::Rider::Regurgitate
+//! [`ReactionTrigger::Breached`]: crate::creature::ReactionTrigger::Breached
+//! [`ReactionTrigger::EnemyGains`]: crate::creature::ReactionTrigger::EnemyGains
 
 mod attack;
 mod concentration;
@@ -62,8 +80,10 @@ mod reactions;
 mod resolve;
 mod saves;
 mod search;
+mod swallow;
 #[cfg(test)]
 mod test_support;
+mod threshold;
 mod turn;
 mod value;
 
@@ -126,6 +146,8 @@ struct Fighter<'a> {
     actions: Vec<MoveState>,
     bonus_actions: Vec<MoveState>,
     legendary: Vec<MoveState>,
+    /// Parallel to `creature.reactions`.
+    reactions: Vec<MoveState>,
     legendary_left: u32,
     /// Remaining points in each of the creature's shared pools.
     resources: Vec<u32>,
@@ -176,6 +198,10 @@ struct Fighter<'a> {
     /// A spell slot has already been expended this turn - see
     /// [`Fighter::can_cast`]. Back at the start of this creature's turn.
     slot_spent_this_turn: bool,
+    /// Damage taken this turn - whoever's turn it is - from creatures this
+    /// one has swallowed, which is what
+    /// [`crate::creature::Rider::Regurgitate`] measures.
+    inside_damage: i32,
     dealt: i64,
     /// Resource points and limited uses burnt. This is the second column of the
     /// table `DESIGN.md` wants, because a win probability means nothing without
@@ -206,6 +232,11 @@ enum Expiry {
         ability: Ability,
         dc: i32,
     },
+    /// Held by this roster index - swallowed by it - until it lets go or
+    /// dies. No clock touches it; see `swallow`.
+    HeldBy(usize),
+    /// Cleared once every creature has had its turn this round.
+    RoundEnd,
 }
 
 /// What a concentration spell is maintaining, so ending concentration can
@@ -330,6 +361,11 @@ struct Fight<'a> {
     /// action between turns has none. Decides whether "the end of the
     /// applier's next turn" is this turn's end or the one after.
     acting: Option<usize>,
+    /// Set while an aura or a reaction resolves: everything the move does
+    /// lands on this one creature - the enemy starting its turn, or whoever
+    /// set the reaction off - rather than on every enemy an area would catch,
+    /// and a strike whose target is gone is not redirected.
+    sole_target: Option<usize>,
 }
 
 impl<'a> Fight<'a> {
@@ -379,6 +415,7 @@ impl<'a> Fight<'a> {
             budget,
             rollout_plan: None,
             acting: None,
+            sole_target: None,
         }
     }
 
@@ -405,8 +442,17 @@ impl<'a> Fight<'a> {
                 phase += 1;
             }
             phase = 0;
+            self.end_of_round();
         }
         self.unresolved(self.max_rounds)
+    }
+
+    /// Everything lasting until the end of the round ends.
+    fn end_of_round(&mut self) {
+        for f in self.fighters.iter_mut() {
+            f.conditions
+                .retain(|&(_, expiry)| expiry != Expiry::RoundEnd);
+        }
     }
 
     fn phase(&mut self, round: u32, phase: usize, rng: &mut Rng, log: &mut Option<Vec<String>>) {

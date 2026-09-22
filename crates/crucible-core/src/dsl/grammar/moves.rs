@@ -2,12 +2,13 @@
 //! it costs, joined with `&&` for a move made of several effects.
 
 use crate::creature::{
-    AttackKind, Cost, Creature, Effect, Move, MoveKind, Rider, SaveEffect, Strike, Uses,
+    AttackKind, Cost, Creature, Effect, Move, MoveKind, Reaction, ReactionTrigger, Rider,
+    SaveEffect, Strike, Uses,
 };
 use crate::dsl::grammar::lex::{arg, parse_damage, parse_dice};
 use crate::dsl::grammar::traits::parse_bonus_vs;
 use crate::dsl::grammar::{count, number, parse_duration, DurationSpec};
-use crate::rules::{Ability, Condition, DamageRoll, Duration, HealRoll, RollMode};
+use crate::rules::{Ability, Condition, DamageRoll, Duration, HealRoll, RollMode, Size};
 
 /// Parse a move string against a creature owner.
 pub fn parse_move_external(value: &str, owner: &Creature) -> Result<Move, String> {
@@ -30,37 +31,107 @@ pub(crate) fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> 
         (name, parse_body(parts, owner)?)
     };
 
-    let mut effects = vec![built
+    let head_effect = built
         .effect
         .take()
-        .ok_or_else(|| format!("`{name}` does nothing - give it damage, a save, or a stance"))?];
+        .ok_or_else(|| format!("`{name}` does nothing - give it damage, a save, or a stance"))?;
+    let mut parts = vec![(head_effect, std::mem::take(&mut built.riders))];
     for segment in segments {
         let tail = parse_body(segment.split('|'), owner)?;
-        effects.push(
+        parts.push((
             tail.effect
                 .ok_or_else(|| format!("the `&&` part of `{name}` does nothing"))?,
-        );
-        built.riders.extend(tail.riders);
+            tail.riders,
+        ));
         built.kind = built.kind.or(tail.kind);
         built.spell_slot_level = built.spell_slot_level.or(tail.spell_slot_level);
         built.concentration |= tail.concentration;
+        built.legendary_cost = built.legendary_cost.or(tail.legendary_cost);
     }
+
+    // One part keeps its riders on the move. Several keep each part's riders
+    // on that part: a bite's swallow is not the slam's knockdown.
+    let (effect, riders) = if parts.len() == 1 {
+        parts.pop().unwrap()
+    } else {
+        let parts = parts
+            .into_iter()
+            .map(|(effect, riders)| match riders.is_empty() {
+                true => effect,
+                false => Effect::WithRiders {
+                    effect: Box::new(effect),
+                    riders,
+                },
+            })
+            .collect();
+        (Effect::Sequence(parts), Vec::new())
+    };
 
     Ok(Move {
         name,
         uses: built.uses,
         cost: built.cost,
         spell_slot_level: built.spell_slot_level,
-        riders: built.riders,
-        effect: if effects.len() == 1 {
-            effects.pop().unwrap()
-        } else {
-            Effect::Sequence(effects)
-        },
+        riders,
+        effect,
         concentration: built.concentration,
         kind: built.kind.unwrap_or_default(),
         before_action: false,
         bypasses_casting_restrictions: false,
+        legendary_cost: built.legendary_cost.unwrap_or(1),
+    })
+}
+
+/// Parse a reaction string against a creature owner.
+pub fn parse_reaction_external(value: &str, owner: &Creature) -> Result<Reaction, String> {
+    parse_reaction(value, owner)
+}
+
+/// A move with a `when <trigger>` clause anywhere after its name:
+/// `Snap | when enemy pulled | hit +9 | 2d10+5 piercing`.
+///
+/// - `when enemy <condition>`: this creature has just given an enemy that
+///   condition ([`ReactionTrigger::EnemyGains`]);
+/// - `when breached`: damage has just broken through its damage threshold
+///   ([`ReactionTrigger::Breached`]).
+pub(crate) fn parse_reaction(value: &str, owner: &Creature) -> Result<Reaction, String> {
+    let mut trigger = None;
+    let mut kept: Vec<&str> = Vec::new();
+    for (i, clause) in value.split('|').enumerate() {
+        let words: Vec<&str> = clause.split_whitespace().collect();
+        let is_when = i > 0
+            && words
+                .first()
+                .is_some_and(|w| w.eq_ignore_ascii_case("when"));
+        if !is_when {
+            kept.push(clause);
+            continue;
+        }
+        if trigger.is_some() {
+            return Err(format!("`{}` has two `when` clauses", value.trim()));
+        }
+        trigger = Some(match words[1..] {
+            [w] if w.eq_ignore_ascii_case("breached") => ReactionTrigger::Breached,
+            [w, name] if w.eq_ignore_ascii_case("enemy") => ReactionTrigger::EnemyGains(
+                Condition::parse(name).ok_or_else(|| format!("unknown condition `{name}`"))?,
+            ),
+            _ => {
+                return Err(format!(
+                    "expected `when enemy <condition>` or `when breached`, got `{}`",
+                    clause.trim()
+                ))
+            }
+        });
+    }
+    let trigger = trigger.ok_or_else(|| {
+        format!(
+            "reaction `{}` needs a `when ...` clause saying what sets it off",
+            value.split('|').next().unwrap_or("").trim()
+        )
+    })?;
+    Ok(Reaction {
+        trigger,
+        action: parse_move(&kept.join("|"), owner)?,
     })
 }
 
@@ -73,6 +144,7 @@ struct Body {
     kind: Option<MoveKind>,
     spell_slot_level: Option<u32>,
     concentration: bool,
+    legendary_cost: Option<u32>,
 }
 
 fn parse_body<'a>(
@@ -92,6 +164,7 @@ fn parse_body<'a>(
     let mut attack = AttackKind::MELEE_WEAPON;
     let mut spell = false;
     let mut weapon_named = false;
+    let mut to_swallowed = false;
     let mut out = Body::default();
 
     for clause in clauses {
@@ -118,6 +191,14 @@ fn parse_body<'a>(
                 out.spell_slot_level = Some(level);
             }
             "concentration" => out.concentration = true,
+            "points" => {
+                let n = count(arg(&words, 1, clause)?)?;
+                if n == 0 {
+                    return Err(format!("`{clause}`: a legendary action takes at least one"));
+                }
+                out.legendary_cost = Some(n);
+            }
+            "swallowed" => to_swallowed = true,
             "ranged" => attack.ranged = true,
             "melee" => attack.ranged = false,
             "finesse" => attack.finesse = true,
@@ -169,6 +250,14 @@ fn parse_body<'a>(
         Some(Effect::Stance { condition })
     } else if let Some(roll) = heal {
         Some(Effect::Heal(roll))
+    } else if to_swallowed {
+        if damage.is_empty() || save.is_some() || to_hit.is_some() {
+            return Err(
+                "`swallowed` damage lands without a roll: give it damage and no `hit` or `save`"
+                    .into(),
+            );
+        }
+        Some(Effect::HarmSwallowed { damage })
     } else if let Some((ability, dc)) = save {
         Some(Effect::Save(SaveEffect {
             ability,
@@ -210,10 +299,21 @@ fn parse_on_fail(words: &[&str], clause: &str) -> Result<(Condition, DurationSpe
     Ok((condition, duration))
 }
 
-/// `on hit save con dc 16 stunned [once] [cost focus 1] [duration]`
+/// `on hit save con dc 16 stunned [once] [cost focus 1] [duration]`, or
+/// `on hit swallow <size>` - swallow a target of that size or smaller.
 fn parse_on_hit(words: &[&str], clause: &str, owner: &Creature) -> Result<Rider, String> {
     if !arg(words, 1, clause)?.eq_ignore_ascii_case("hit") {
         return Err(format!("expected `on hit ...`, got `{clause}`"));
+    }
+    if arg(words, 2, clause)?.eq_ignore_ascii_case("swallow") {
+        let size = arg(words, 3, clause)?;
+        if words.len() > 4 {
+            return Err(format!("unexpected words at the end of `{clause}`"));
+        }
+        return Ok(Rider::Swallow {
+            max_size: Size::parse(size)
+                .ok_or_else(|| format!("unknown size `{size}` in `{clause}`"))?,
+        });
     }
     if !arg(words, 2, clause)?.eq_ignore_ascii_case("save") {
         return Err(format!("expected `on hit save ...`, got `{clause}`"));
@@ -437,6 +537,114 @@ bonus: Wand | item | hit +7 | 1d6 force
             )]
         );
         assert_eq!(c.bonus_actions[0].kind, MoveKind::MagicItem);
+    }
+
+    /// Each part of a Multiattack keeps its own on-hit riders: the bite's
+    /// swallow is not the slams' knockdown.
+    #[test]
+    fn a_multiattack_keeps_each_parts_riders_on_that_part() {
+        let text = "
+creature: x
+hp: 10
+action: Multiattack | hit +9 | 2d10+5 piercing | on hit swallow large
+                    && strikes 2 | hit +9 | 2d8+5 bludgeoning | on hit save str dc 17 prone
+                    && stance exposed
+";
+        let m = &parse(text).unwrap()[0].actions[0];
+        assert!(m.riders.is_empty(), "nothing rides the whole move");
+        let Effect::Sequence(parts) = &m.effect else {
+            panic!("expected a sequence, got {:?}", m.effect)
+        };
+        let riders_of = |p: &Effect| match p {
+            Effect::WithRiders { riders, .. } => riders.clone(),
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            riders_of(&parts[0]),
+            vec![Rider::Swallow {
+                max_size: Size::Large
+            }]
+        );
+        assert!(matches!(
+            riders_of(&parts[1])[..],
+            [Rider::SaveOrCondition {
+                condition: Condition::Prone,
+                ..
+            }]
+        ));
+        assert_eq!(
+            parts[2],
+            Effect::Stance {
+                condition: Condition::Exposed
+            }
+        );
+    }
+
+    #[test]
+    fn legendary_points_and_a_squeeze_of_the_swallowed_parse() {
+        let text = "
+creature: x
+hp: 10
+legendary: Squeeze | points 2 | swallowed | 4d10 bludgeoning
+legendary: Swipe | hit +9 | 1d6 slashing
+";
+        let c = &parse(text).unwrap()[0];
+        assert_eq!(c.legendary[0].legendary_cost, 2);
+        assert_eq!(
+            c.legendary[0].effect,
+            Effect::HarmSwallowed {
+                damage: vec![DamageRoll::new(4, 10, 0, DamageKind::Bludgeoning)]
+            }
+        );
+        assert_eq!(c.legendary[1].legendary_cost, 1, "one unless it says so");
+
+        let rolled =
+            parse("creature: x\nhp: 1\nlegendary: Squeeze | swallowed | hit +3 | 1d4 acid\n")
+                .unwrap_err();
+        assert!(rolled.message.contains("without a roll"), "{rolled}");
+        let free =
+            parse("creature: x\nhp: 1\nlegendary: Nap | points 0 | stance dodging\n").unwrap_err();
+        assert!(free.message.contains("at least one"), "{free}");
+    }
+
+    #[test]
+    fn a_reaction_is_a_move_with_a_when_clause() {
+        let text = "
+creature: x
+hp: 10
+reaction: Snap | when enemy pulled | hit +9 | 2d10 piercing
+reaction: Spray | save dex dc 18 | 4d10 piercing | half on success | when breached
+";
+        let c = &parse(text).unwrap()[0];
+        assert_eq!(
+            c.reactions[0].trigger,
+            ReactionTrigger::EnemyGains(Condition::Pulled)
+        );
+        assert_eq!(c.reactions[0].action.name, "Snap");
+        assert!(matches!(
+            c.reactions[0].action.effect,
+            Effect::Strikes { .. }
+        ));
+        assert_eq!(c.reactions[1].trigger, ReactionTrigger::Breached);
+        assert!(matches!(c.reactions[1].action.effect, Effect::Save(_)));
+
+        let untriggered =
+            parse("creature: x\nhp: 1\nreaction: Snap | hit +9 | 2d10 piercing\n").unwrap_err();
+        assert!(untriggered.message.contains("`when ...`"), "{untriggered}");
+        let odd =
+            parse("creature: x\nhp: 1\nreaction: Snap | when sneezes | hit +9 | 2d10 piercing\n")
+                .unwrap_err();
+        assert!(odd.message.contains("when enemy <condition>"), "{odd}");
+    }
+
+    #[test]
+    fn an_aura_is_a_move_every_enemy_meets() {
+        let text = "creature: x\nhp: 10\naura: Undertow | save str dc 15 | on fail pulled\n";
+        let c = &parse(text).unwrap()[0];
+        let Effect::Save(save) = &c.auras[0].effect else {
+            panic!("expected a save")
+        };
+        assert_eq!(save.on_failure[0].0, Condition::Pulled);
     }
 
     /// A potion is a heal from a pool, and an object.

@@ -1,9 +1,84 @@
 //! Reactions: a creature's one per round, spent on an AC boost against an
-//! incoming attack or on cutting a hit's damage.
+//! incoming attack, on cutting a hit's damage, or on a move of its own when
+//! its trigger happens.
 
-use crate::creature::{AttackKind, Rider, Strike};
+use crate::creature::{AttackKind, ReactionTrigger, Rider, Strike};
 use crate::prob::Rng;
-use crate::sim::fight::{Answer, Fighter};
+use crate::rules::Condition;
+use crate::sim::fight::{Answer, Fight, Fighter};
+
+impl<'a> Fight<'a> {
+    /// Take `me`'s first [`crate::creature::Reaction`] answering `trigger`,
+    /// aimed at `at` alone - if `me` is up, can act, still has its reaction
+    /// this round, and can reach `at`, and the move is one it can take right
+    /// now.
+    pub(super) fn react(
+        &mut self,
+        rng: &mut Rng,
+        me: usize,
+        trigger: ReactionTrigger,
+        at: usize,
+        record: bool,
+        notes: &mut Vec<String>,
+    ) {
+        let f = &self.fighters[me];
+        if !f.alive()
+            || !f.reaction
+            || f.incapacitated()
+            || !self.fighters[at].alive()
+            || !self.reaches(me, at)
+        {
+            return;
+        }
+        let creature = f.creature;
+        let Some(i) = creature.reactions.iter().enumerate().position(|(i, r)| {
+            r.trigger == trigger
+                && f.reactions[i].available()
+                && f.can_pay(r.action.cost)
+                && f.can_cast(r.action.spell_slot_level)
+                && f.move_allowed(&r.action)
+        }) else {
+            return;
+        };
+        let m = &creature.reactions[i].action;
+        self.fighters[me].pay(m.cost);
+        self.fighters[me].cast_spell_slot(m.spell_slot_level);
+        self.fighters[me].spend_reaction(i);
+        let previous = self.sole_target.replace(at);
+        let mut line = String::new();
+        self.apply(m, rng, me, at, record, &mut line);
+        self.sole_target = previous;
+        if record {
+            notes.push(format!("{} reacts: {line}", creature.name));
+        }
+    }
+
+    /// Answer the conditions `me` has just given enemies with the reaction
+    /// waiting for one - [`ReactionTrigger::EnemyGains`] - the first that
+    /// fires, since there is one reaction a round.
+    pub(super) fn react_to_landed(
+        &mut self,
+        rng: &mut Rng,
+        me: usize,
+        landed: &[(usize, Condition)],
+        record: bool,
+        notes: &mut Vec<String>,
+    ) {
+        let side = self.fighters[me].side;
+        for &(victim, condition) in landed {
+            if self.fighters[victim].side != side {
+                self.react(
+                    rng,
+                    me,
+                    ReactionTrigger::EnemyGains(condition),
+                    victim,
+                    record,
+                    notes,
+                );
+            }
+        }
+    }
+}
 
 /// The AC bonus a [`Rider::ReactionOnTargeted`] offers against an incoming
 /// attack of `kind`, if this creature has one that answers it and a reaction
@@ -323,5 +398,77 @@ mod tests {
             (21, None),
             "nothing while Incapacitated"
         );
+    }
+
+    /// A whirlpool (seat 0) that drags whoever starts a turn in it, and snaps
+    /// at whoever it drags in - with its one reaction a round.
+    fn whirlpool() -> Creature {
+        let mut c = Creature::new("whirlpool", 10, 1_000);
+        c.auras.push(Move::new(
+            "Undertow",
+            Effect::Save(crate::creature::SaveEffect {
+                ability: crate::rules::Ability::Str,
+                dc: 99,
+                damage: vec![],
+                half_on_success: false,
+                on_failure: vec![(Condition::Pulled, crate::rules::Duration::ApplierTurn)],
+                max_targets: None,
+                requires_type: None,
+            }),
+        ));
+        c.reactions.push(crate::creature::Reaction {
+            trigger: ReactionTrigger::EnemyGains(Condition::Pulled),
+            action: Move::new(
+                "Snap",
+                Effect::AutoHit {
+                    damage: vec![DamageRoll::new(0, 1, 5, DamageKind::Piercing)],
+                },
+            ),
+        });
+        c
+    }
+
+    #[test]
+    fn an_aura_pull_sets_off_a_snap_at_whoever_it_drags_in_once_a_round() {
+        let pool = whirlpool();
+        let a = Creature::new("a", 10, 100);
+        let b = Creature::new("b", 10, 100);
+        let roster = [(&pool, Side::B), (&a, Side::A), (&b, Side::A)];
+        let (mut fight, mut rng) = crate::sim::fight::test_support::fight_of(&roster, 1);
+        let mut log = Some(Vec::new());
+
+        fight.take_turn(1, 1, &mut rng, &mut log, None);
+        assert!(fight.fighters[1].has(|c| c == Condition::Pulled));
+        assert_eq!(fight.fighters[1].hp, 95, "dragged in and bitten");
+        fight.take_turn(1, 2, &mut rng, &mut log, None);
+        assert!(fight.fighters[2].has(|c| c == Condition::Pulled));
+        assert_eq!(fight.fighters[2].hp, 100, "the reaction is already spent");
+
+        fight.take_turn(2, 0, &mut rng, &mut log, None);
+        fight.take_turn(2, 2, &mut rng, &mut log, None);
+        assert_eq!(fight.fighters[2].hp, 95, "back on the whirlpool's turn");
+        let narration = log.unwrap().join("\n");
+        assert!(narration.contains("(aura)"), "{narration}");
+        assert!(narration.contains("whirlpool reacts: Snap"), "{narration}");
+    }
+
+    /// A reaction waits for its own trigger: a breach does not set off one
+    /// waiting for a pull.
+    #[test]
+    fn a_reaction_waits_for_its_own_trigger() {
+        let pool = whirlpool();
+        let a = Creature::new("a", 10, 100);
+        let roster = [(&pool, Side::B), (&a, Side::A)];
+        let (mut fight, mut rng) = crate::sim::fight::test_support::fight_of(&roster, 1);
+        fight.react(
+            &mut rng,
+            0,
+            ReactionTrigger::Breached,
+            1,
+            false,
+            &mut Vec::new(),
+        );
+        assert_eq!(fight.fighters[1].hp, 100);
+        assert!(fight.fighters[0].reaction);
     }
 }

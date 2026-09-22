@@ -4,9 +4,9 @@
 use crate::creature::{Effect, Move, Rider};
 use crate::prob::Rng;
 use crate::rules::{apply_healing, Condition, Landed};
-use crate::sim::fight::conditions::halve_if_suppressed;
 use crate::sim::fight::reactions::{ac_boost_reaction, react_to_hit};
 use crate::sim::fight::saves::saving_throw;
+use crate::sim::fight::threshold::{reducer, Shell};
 use crate::sim::fight::{ActiveConcentration, Answer, ConcentrationEffect, Expiry, Fight};
 
 impl<'a> Fight<'a> {
@@ -54,6 +54,9 @@ impl<'a> Fight<'a> {
                 });
             }
         }
+        if !self.fighters[me].creature.reactions.is_empty() {
+            self.react_to_landed(rng, me, &landed, record, &mut notes);
+        }
         if record {
             if !line.is_empty() {
                 line.push_str(" | ");
@@ -90,7 +93,12 @@ impl<'a> Fight<'a> {
                 let modifiers = self.fighters[me].attack_modifiers.clone();
                 let attacker = self.fighters[me].creature;
                 for _ in 0..*count {
-                    if !self.fighters[current_target].alive() {
+                    if !self.fighters[current_target].alive() || !self.reaches(me, current_target) {
+                        // An aura's or a reaction's strike answers one
+                        // creature; it is not redirected at another.
+                        if self.sole_target.is_some() {
+                            break;
+                        }
                         let Some(new_target) = self.pick_target(me) else {
                             break;
                         };
@@ -106,10 +114,16 @@ impl<'a> Fight<'a> {
                     let boost = ac_boost_reaction(&self.fighters[current_target], strike.kind);
                     let plan =
                         self.extra_damage_plan(me, current_target, strike, move_riders, mode, true);
-                    let (raw, landed, consumed) = strike.sample_from(
+                    // Aimed at an open weak spot when that is worth more than
+                    // the shell - see `Fight::aimed_hit`.
+                    let weak = self.through_weak_spot(me, current_target, true)
+                        && self
+                            .aimed_hit(me, current_target, strike, mode, force_crit, &plan.rolls)
+                            .1;
+                    let (raw, landed, consumed) = strike.sample_reduced(
                         rng,
-                        attacker,
-                        against,
+                        &reducer(attacker, against, weak),
+                        against.ac,
                         mode,
                         force_crit,
                         &modifiers,
@@ -120,28 +134,34 @@ impl<'a> Fight<'a> {
                     if consumed {
                         self.fighters[current_target].reaction = false;
                     }
-                    let (dealt, answer) =
+                    let (raw, answer) =
                         react_to_hit(rng, &mut self.fighters[current_target], strike, raw);
-                    let dealt = halve_if_suppressed(&self.fighters, me, dealt);
-                    self.fighters[me].dealt += i64::from(dealt);
-                    self.apply_damage(rng, current_target, dealt);
+                    let (dealt, shell) = self.deal(rng, me, current_target, raw, weak);
                     if record {
                         let sneak = if plan.sneak_attack && landed != Landed::Miss {
                             " sneak"
                         } else {
                             ""
                         };
+                        let shell_note = match shell {
+                            Shell::Open => String::new(),
+                            Shell::Absorbed => format!(" (shell took {raw})"),
+                            Shell::Breached => " (breach)".to_string(),
+                        };
                         notes.push(match (landed, answer) {
                             (Landed::Miss, _) if consumed => "miss (AC boosted)".to_string(),
                             (Landed::Miss, _) => "miss".to_string(),
                             (_, Some(Answer::Deflected(cut))) => {
-                                format!("{dealt}{sneak} (deflected {cut})")
+                                format!("{dealt}{sneak} (deflected {cut}){shell_note}")
                             }
-                            (_, Some(Answer::Halved)) => format!("{dealt}{sneak} (halved)"),
-                            (Landed::Crit, None) => format!("{dealt} crit{sneak}"),
-                            (Landed::Hit, None) => format!("{dealt}{sneak}"),
+                            (_, Some(Answer::Halved)) => {
+                                format!("{dealt}{sneak} (halved){shell_note}")
+                            }
+                            (Landed::Crit, None) => format!("{dealt} crit{sneak}{shell_note}"),
+                            (Landed::Hit, None) => format!("{dealt}{sneak}{shell_note}"),
                         });
                     }
+                    self.answer_breach(rng, me, current_target, shell, record, notes);
                     if landed != Landed::Miss {
                         if plan.sneak_attack {
                             self.fighters[me].sneak_attack_spent = true;
@@ -182,9 +202,9 @@ impl<'a> Fight<'a> {
             Effect::Save(save) => {
                 // No positioning, so an area effect catches every enemy up to its
                 // target cap. Pessimistic, and stated as such.
-                let side = self.fighters[me].side;
-                let mut caught: Vec<usize> = (0..self.fighters.len())
-                    .filter(|&i| self.fighters[i].side != side && self.fighters[i].alive())
+                let mut caught: Vec<usize> = self
+                    .caught(me)
+                    .into_iter()
                     // A type-restricted save (Hold Person's "humanoid") never
                     // catches anything else at all - not even a rolled save
                     // that then does nothing, the same way `max_targets` caps
@@ -217,10 +237,14 @@ impl<'a> Fight<'a> {
                     // Evasion is explicitly unavailable while Incapacitated.
                     let evasion = against.has_evasion(save.ability)
                         && !self.fighters[i].has(Condition::blocks_riders);
-                    let dealt = save.sample_known_from(rng, attacker, against, saved, evasion);
-                    let dealt = halve_if_suppressed(&self.fighters, me, dealt);
-                    self.fighters[me].dealt += i64::from(dealt);
-                    self.apply_damage(rng, i, dealt);
+                    let weak = self.through_weak_spot(me, i, false);
+                    let raw = save.sample_known_by(
+                        rng,
+                        &reducer(attacker, against, weak),
+                        saved,
+                        evasion,
+                    );
+                    let (dealt, shell) = self.deal(rng, me, i, raw, weak);
                     if !saved {
                         for &(condition, duration) in &conditions {
                             self.land_condition(me, i, condition, duration, landed_conditions);
@@ -239,11 +263,17 @@ impl<'a> Fight<'a> {
                         } else {
                             String::new()
                         };
+                        let shell_note = match shell {
+                            Shell::Absorbed => format!(" (shell took {raw})"),
+                            Shell::Breached => " (breach)".to_string(),
+                            Shell::Open => String::new(),
+                        };
                         notes.push(format!(
-                            "{} {how} for {dealt}{extra}",
+                            "{} {how} for {dealt}{shell_note}{extra}",
                             self.fighters[i].creature.name
                         ));
                     }
+                    self.answer_breach(rng, me, i, shell, record, notes);
                 }
             }
             Effect::Stance { condition } => {
@@ -283,22 +313,32 @@ impl<'a> Fight<'a> {
                 let attacker = self.fighters[me].creature;
                 let mut current_target = target;
                 for roll in damage {
-                    if !self.fighters[current_target].alive() {
+                    if !self.fighters[current_target].alive() || !self.reaches(me, current_target) {
+                        if self.sole_target.is_some() {
+                            break;
+                        }
                         let Some(new_target) = self.pick_target(me) else {
                             break;
                         };
                         current_target = new_target;
                     }
                     let against = self.fighters[current_target].creature;
-                    let dealt =
-                        roll.sample(rng, false, against.reduction_from(roll.kind, attacker));
-                    let dealt = halve_if_suppressed(&self.fighters, me, dealt);
-                    self.fighters[me].dealt += i64::from(dealt);
-                    self.apply_damage(rng, current_target, dealt);
+                    // A dart hits the creature, not a spot on it - unless it
+                    // was loosed from inside.
+                    let weak = self.through_weak_spot(me, current_target, false);
+                    let raw = roll.sample(rng, false, reducer(attacker, against, weak)(roll.kind));
+                    let (dealt, shell) = self.deal(rng, me, current_target, raw, weak);
                     if record {
-                        notes.push(dealt.to_string());
+                        notes.push(match shell {
+                            Shell::Absorbed => format!("0 (shell took {raw})"),
+                            _ => dealt.to_string(),
+                        });
                     }
+                    self.answer_breach(rng, me, current_target, shell, record, notes);
                 }
+            }
+            Effect::HarmSwallowed { damage } => {
+                self.harm_swallowed(rng, me, damage, record, notes);
             }
             Effect::Buff {
                 attack_modifier,
@@ -311,7 +351,10 @@ impl<'a> Fight<'a> {
                 let side = self.fighters[me].side;
                 let mut caught: Vec<usize> = vec![me];
                 caught.extend((0..self.fighters.len()).filter(|&i| {
-                    i != me && self.fighters[i].side == side && self.fighters[i].alive()
+                    i != me
+                        && self.fighters[i].side == side
+                        && self.fighters[i].alive()
+                        && self.reaches(me, i)
                 }));
                 if let Some(max) = max_targets {
                     caught.truncate(*max as usize);
@@ -341,10 +384,7 @@ impl<'a> Fight<'a> {
             } => {
                 // Same pessimistic "every enemy up to the cap" reading as
                 // Effect::Save - no positioning to choose among them.
-                let side = self.fighters[me].side;
-                let mut caught: Vec<usize> = (0..self.fighters.len())
-                    .filter(|&i| self.fighters[i].side != side && self.fighters[i].alive())
-                    .collect();
+                let mut caught = self.caught(me);
                 if let Some(max) = max_targets {
                     caught.truncate(*max as usize);
                 }
@@ -393,6 +433,20 @@ impl<'a> Fight<'a> {
                     );
                 }
             }
+            Effect::WithRiders { effect, riders } => {
+                let riders: Vec<Rider> = move_riders.iter().chain(riders).cloned().collect();
+                self.resolve(
+                    effect,
+                    rng,
+                    me,
+                    target,
+                    &riders,
+                    record,
+                    notes,
+                    landed_conditions,
+                    concentration_effect,
+                );
+            }
         }
     }
 
@@ -405,6 +459,8 @@ impl<'a> Fight<'a> {
     /// creature's hit point maximum kills it outright - no healing brings
     /// that back - while anything less leaves a player character down but
     /// revivable.
+    ///
+    /// A swallower that drops lets go of everything it holds.
     pub(super) fn apply_damage(&mut self, rng: &mut Rng, target: usize, dealt: i32) {
         let f = &mut self.fighters[target];
         let before = f.hp;
@@ -415,9 +471,26 @@ impl<'a> Fight<'a> {
             }
             f.hp = 0;
             self.end_concentration(target);
+            self.release_all(target, false);
         } else if dealt > 0 {
             self.concentration_check(rng, target, dealt);
         }
+    }
+
+    /// Every enemy an area effect from `me` catches: all of them it can reach
+    /// - or, while an aura or a reaction resolves, the one it answers.
+    pub(super) fn caught(&self, me: usize) -> Vec<usize> {
+        let side = self.fighters[me].side;
+        let candidates: Vec<usize> = match self.sole_target {
+            Some(t) => vec![t],
+            None => (0..self.fighters.len())
+                .filter(|&i| self.fighters[i].side != side)
+                .collect(),
+        };
+        candidates
+            .into_iter()
+            .filter(|&i| self.fighters[i].alive() && self.reaches(me, i))
+            .collect()
     }
 }
 

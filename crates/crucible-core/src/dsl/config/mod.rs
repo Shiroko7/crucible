@@ -11,7 +11,7 @@ use crate::dsl::grammar::TraitEffect;
 pub use monster::MonsterDefinition;
 pub use pc::PlayerCharacter;
 
-use crate::creature::{Creature, Move};
+use crate::creature::{Creature, Move, Reaction};
 use crate::features::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
 use crate::rules::{Ability, SpellCastingProfile};
 use serde::Deserialize;
@@ -109,6 +109,14 @@ pub fn parse_trait_str(value: &str) -> FeatureResult<TraitEffect> {
 pub fn parse_move_entry(entry: &MoveEntry, owner: &Creature) -> FeatureResult<Move> {
     let full = format!("{} | {}", entry.name, entry.effect);
     crate::dsl::grammar::parse_move_external(&full, owner)
+        .map_err(FeatureError::InvalidConfiguration)
+}
+
+/// Parse a reaction entry - a move whose effect carries a `when ...` trigger
+/// clause - given the current combatant context.
+pub fn parse_reaction_entry(entry: &MoveEntry, owner: &Creature) -> FeatureResult<Reaction> {
+    let full = format!("{} | {}", entry.name, entry.effect);
+    crate::dsl::grammar::parse_reaction_external(&full, owner)
         .map_err(FeatureError::InvalidConfiguration)
 }
 

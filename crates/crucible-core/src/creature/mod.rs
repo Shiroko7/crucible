@@ -12,7 +12,7 @@ mod rider;
 
 pub use combatant::Creature;
 pub use effect::{AttackKind, Effect, SaveEffect, Strike};
-pub use moves::{Cost, Move, MoveKind, Resource, Uses};
+pub use moves::{Cost, Move, MoveKind, Reaction, ReactionTrigger, Resource, Uses};
 pub use rider::{
     injury_poison_forcing_save, save_success_probability, saving_throw_against_condition,
     AttackTrigger, Rider,

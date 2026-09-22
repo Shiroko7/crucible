@@ -191,11 +191,42 @@ impl Strike {
         ac_bonus: i32,
         reaction_available: bool,
     ) -> (i32, Landed, bool) {
+        self.sample_reduced(
+            rng,
+            &|kind| target.reduction_from(kind, attacker),
+            target.ac,
+            mode,
+            force_crit,
+            modifiers,
+            extra_damage,
+            ac_bonus,
+            reaction_available,
+        )
+    }
+
+    /// As [`Strike::sample_from`], with each damage component reduced by
+    /// `reduce` rather than by the target's own reductions against the
+    /// attacker - for a hit that lands somewhere those do not describe, a
+    /// weak spot with resistances of its own (see
+    /// [`crate::creature::Rider::DamageThreshold`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_reduced(
+        &self,
+        rng: &mut Rng,
+        reduce: &dyn Fn(DamageKind) -> Reduction,
+        ac: i32,
+        mode: RollMode,
+        force_crit: bool,
+        modifiers: &[AttackModifier],
+        extra_damage: &[DamageRoll],
+        ac_bonus: i32,
+        reaction_available: bool,
+    ) -> (i32, Landed, bool) {
         let (landed, consumed) = sample_hit_with_reaction(
             rng,
             self.to_hit,
             mode,
-            target.ac,
+            ac,
             modifiers,
             ac_bonus,
             reaction_available,
@@ -214,7 +245,7 @@ impl Strike {
             .damage
             .iter()
             .chain(extra_damage)
-            .map(|roll| roll.sample(rng, crit, target.reduction_from(roll.kind, attacker)))
+            .map(|roll| roll.sample(rng, crit, reduce(roll.kind)))
             .sum();
         (total, landed, consumed)
     }
@@ -408,7 +439,7 @@ impl SaveEffect {
         }
     }
 
-    fn outcome_pmf(&self, target: &Creature, share: Share) -> Pmf {
+    fn outcome_pmf(&self, reduce: &dyn Fn(DamageKind) -> Reduction, share: Share) -> Pmf {
         if share == Share::None {
             return Pmf::constant(0);
         }
@@ -419,7 +450,7 @@ impl SaveEffect {
             if share == Share::Half {
                 p = p.map_values(|d| d / 2);
             }
-            let reduction = target.reduction(roll.kind);
+            let reduction = reduce(roll.kind);
             acc.convolve(&p.map_values(move |d| reduction.apply(d)))
         })
     }
@@ -432,13 +463,24 @@ impl SaveEffect {
     /// `duel` handles those and `tests/duel_agreement.rs` tests them
     /// separately.
     pub fn damage_pmf(&self, target: &Creature) -> Pmf {
+        self.damage_pmf_by(target, &|kind| target.reduction(kind))
+    }
+
+    /// As [`SaveEffect::damage_pmf`], with each damage component reduced by
+    /// `reduce` rather than by `target`'s own reductions - the exact
+    /// counterpart of [`SaveEffect::sample_known_by`].
+    pub fn damage_pmf_by(
+        &self,
+        target: &Creature,
+        reduce: &dyn Fn(DamageKind) -> Reduction,
+    ) -> Pmf {
         let evasion = target.has_evasion(self.ability);
         let fail = self.failure_chance(target);
         Pmf::mixture(&[
-            (fail, self.outcome_pmf(target, self.share(false, evasion))),
+            (fail, self.outcome_pmf(reduce, self.share(false, evasion))),
             (
                 1.0 - fail,
-                self.outcome_pmf(target, self.share(true, evasion)),
+                self.outcome_pmf(reduce, self.share(true, evasion)),
             ),
         ])
     }
@@ -498,11 +540,24 @@ impl SaveEffect {
         saved: bool,
         evasion: bool,
     ) -> i32 {
-        self.sample_share_by(
+        self.sample_known_by(
             rng,
             &|kind| target.reduction_from(kind, attacker),
-            self.share(saved, evasion),
+            saved,
+            evasion,
         )
+    }
+
+    /// As [`SaveEffect::sample_known_from`], with each damage component
+    /// reduced by `reduce` - see [`Strike::sample_reduced`].
+    pub fn sample_known_by(
+        &self,
+        rng: &mut Rng,
+        reduce: &dyn Fn(DamageKind) -> Reduction,
+        saved: bool,
+        evasion: bool,
+    ) -> i32 {
+        self.sample_share_by(rng, reduce, self.share(saved, evasion))
     }
 
     /// Roll the save only, for a caller that wants to react to the result -
@@ -567,9 +622,28 @@ pub enum Effect {
     AutoHit {
         damage: Vec<DamageRoll>,
     },
+    /// Damage to every creature the user has swallowed, with no roll - a
+    /// swallower's gut clenching on command, on top of the
+    /// [`crate::creature::Rider::Digestion`] it gets every turn anyway.
+    ///
+    /// Who that is exists only in a fight, so against a lone target outside
+    /// the fight this is worth nothing: [`Effect::mean_damage`] and
+    /// [`Effect::damage_pmf`] read zero, and `sim::fight` values it against
+    /// whoever is actually inside.
+    HarmSwallowed {
+        damage: Vec<DamageRoll>,
+    },
     /// Several effects in one move. A Multiattack of two claws and a bite, or
     /// a monk replacing one of its attacks with a breath weapon.
     Sequence(Vec<Effect>),
+    /// One part of a [`Effect::Sequence`] with on-hit riders of its own, on
+    /// top of the move's: a bite that swallows alongside slams that knock
+    /// prone, in one Multiattack, where neither rider belongs on the other
+    /// attack.
+    WithRiders {
+        effect: Box<Effect>,
+        riders: Vec<crate::creature::Rider>,
+    },
     /// An unconditional buff to some of the user's own side: each of up to
     /// `max_targets` allies - the user included - gains `attack_modifier` on
     /// its attack rolls and `save_modifier` on its saving throws, including
@@ -619,11 +693,16 @@ impl Effect {
             // Heals nothing, damages nothing: it has its own accounting.
             Effect::Heal(_) => 0.0,
             Effect::AutoHit { .. } => self.damage_pmf(target).mean(),
-            // None of these deal damage - a Stance changes footing, Buff/
-            // SaveOrModifier alter attack rolls and saves rather than
-            // dealing damage themselves.
-            Effect::Stance { .. } | Effect::Buff { .. } | Effect::SaveOrModifier { .. } => 0.0,
+            // None of these deal damage to `target` - a Stance changes
+            // footing, Buff/SaveOrModifier alter attack rolls and saves
+            // rather than dealing damage themselves, and HarmSwallowed only
+            // reaches whoever is inside.
+            Effect::Stance { .. }
+            | Effect::Buff { .. }
+            | Effect::SaveOrModifier { .. }
+            | Effect::HarmSwallowed { .. } => 0.0,
             Effect::Sequence(parts) => parts.iter().map(|p| p.mean_damage(target)).sum(),
+            Effect::WithRiders { effect, .. } => effect.mean_damage(target),
         }
     }
 
@@ -643,12 +722,14 @@ impl Effect {
             Effect::AutoHit { damage } => damage.iter().fold(Pmf::constant(0), |acc, roll| {
                 acc.convolve(&roll.pmf(false, target.reduction(roll.kind)))
             }),
-            Effect::Stance { .. } | Effect::Buff { .. } | Effect::SaveOrModifier { .. } => {
-                Pmf::constant(0)
-            }
+            Effect::Stance { .. }
+            | Effect::Buff { .. }
+            | Effect::SaveOrModifier { .. }
+            | Effect::HarmSwallowed { .. } => Pmf::constant(0),
             Effect::Sequence(parts) => parts.iter().fold(Pmf::constant(0), |acc, p| {
                 acc.convolve(&p.damage_pmf(target))
             }),
+            Effect::WithRiders { effect, .. } => effect.damage_pmf(target),
         }
     }
 
@@ -661,6 +742,7 @@ impl Effect {
             Effect::Sequence(parts) => parts
                 .iter()
                 .fold(Pmf::constant(0), |acc, p| acc.convolve(&p.heal_pmf())),
+            Effect::WithRiders { effect, .. } => effect.heal_pmf(),
             _ => Pmf::constant(0),
         }
     }
@@ -674,6 +756,7 @@ impl Effect {
         match self {
             Effect::Stance { condition } => Some(*condition),
             Effect::Sequence(parts) => parts.iter().find_map(|p| p.stance()),
+            Effect::WithRiders { effect, .. } => effect.stance(),
             _ => None,
         }
     }

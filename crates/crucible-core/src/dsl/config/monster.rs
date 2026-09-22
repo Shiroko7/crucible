@@ -48,6 +48,13 @@ pub struct MonsterDefinition {
     pub legendary_uses: u32,
     #[serde(default)]
     pub legendary: Vec<super::MoveEntry>,
+    /// Reactions with a `when ...` trigger clause - see
+    /// [`crate::creature::Reaction`].
+    #[serde(default)]
+    pub reactions: Vec<super::MoveEntry>,
+    /// See [`crate::creature::Creature::auras`].
+    #[serde(default)]
+    pub auras: Vec<super::MoveEntry>,
 }
 
 impl MonsterDefinition {
@@ -146,6 +153,16 @@ impl MonsterDefinition {
         for entry in &self.legendary {
             let m = super::parse_move_entry(entry, &builder.creature)?;
             builder.add_legendary_action(m);
+        }
+
+        for entry in &self.reactions {
+            let r = super::parse_reaction_entry(entry, &builder.creature)?;
+            builder.creature.reactions.push(r);
+        }
+
+        for entry in &self.auras {
+            let m = super::parse_move_entry(entry, &builder.creature)?;
+            builder.creature.auras.push(m);
         }
 
         builder.build()
