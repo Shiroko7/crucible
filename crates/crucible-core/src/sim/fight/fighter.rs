@@ -83,6 +83,7 @@ impl<'a> Fighter<'a> {
             once_per_turn_spent: false,
             sneak_attack_spent: false,
             reaction: true,
+            reactions_left: creature.reactions_per_round,
             armed: vec![false; creature.riders.len()],
             melee: fights_in_melee(creature),
             summoned_by: None,
@@ -249,7 +250,23 @@ impl<'a> Fighter<'a> {
             self.spent += 1;
         }
         self.reactions[i].spend(uses);
+        self.spend_reaction_budget();
+    }
+
+    /// Spend the reaction itself - the one thing every reaction shares.
+    /// Takes it for this turn, and one off what is left for the round.
+    pub(super) fn spend_reaction_budget(&mut self) {
         self.reaction = false;
+        self.reactions_left = self.reactions_left.saturating_sub(1);
+    }
+
+    /// The start of any turn, its own or anybody else's: a creature with
+    /// reactions left this round has one again. One per turn, however many
+    /// the round allows.
+    pub(super) fn offer_reaction(&mut self) {
+        if self.reactions_left > 0 {
+            self.reaction = true;
+        }
     }
 
     pub(super) fn add_condition(&mut self, condition: Condition, expiry: Expiry) {
@@ -302,6 +319,7 @@ pub(super) fn refresh(f: &mut Fighter<'_>, rng: &mut Rng) {
     f.legendary_left = creature.legendary_uses;
     f.once_per_turn_spent = false;
     f.once_per_turn_damage_spent = false;
+    f.reactions_left = creature.reactions_per_round;
     f.reaction = true;
     f.reactive_ac = None;
     f.slot_spent_this_turn = false;

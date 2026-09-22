@@ -74,7 +74,7 @@ pub(super) fn saving_throw(
         if let Some(i) = slot {
             fighters[who].rider_uses[i] -= 1;
             if creature.riders[i].is_reaction() {
-                fighters[who].reaction = false;
+                fighters[who].spend_reaction_budget();
             }
             return (true, true);
         }

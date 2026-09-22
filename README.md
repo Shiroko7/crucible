@@ -83,7 +83,9 @@ lot:
 | `mouth`, `reach`, `tactic` | a whirlpool, a kraken or a dragon turtle its enemies circle, and how it swims at them |
 
 A creature has one reaction a round, shared by every reaction it knows, and
-none while Incapacitated. An aura is a move every enemy meets at the start of
+none while Incapacitated - unless its stat block grants more (`reactions N`),
+in which case it still takes at most one per turn, so the budget buys it
+answers to several *different* creatures rather than a second answer to one. An aura is a move every enemy meets at the start of
 its turn, and a legendary action costs as many of the round's uses as it says. Heals go to the healer's own side - a downed player
 character first - and a player character dropped by less than massive damage
 is down, not dead, until healed or the fight ends. Under the 2024 rules at most

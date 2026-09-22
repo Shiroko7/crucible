@@ -113,6 +113,10 @@ impl<'a> Fight<'a> {
         for f in self.fighters.iter_mut() {
             f.sneak_attack_spent = false;
             f.inside_damage = 0;
+            // A creature with reactions to spare gets one for this turn -
+            // which for everything with the usual single reaction means the
+            // one it has not spent yet, unchanged.
+            f.offer_reaction();
             f.conditions.retain_mut(|(_, expiry)| match expiry {
                 Expiry::TurnStart(x) => *x != who,
                 Expiry::Rounds { who: w, left } if *w == who => {

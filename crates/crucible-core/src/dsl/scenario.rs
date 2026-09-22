@@ -39,6 +39,7 @@
 //! trait: quarry 1d6 force
 //! trait: always succeed dex 3 reaction
 //! trait: reaction ac 4 vs melee until next turn
+//! trait: reactions 3
 //! condition immune: poisoned
 //! action: Greatclub | strikes 1 | hit +6 | 2d8+4 bludgeoning
 //! action: Longbow | ranged | hit +8 | 1d8+4 piercing | bonus 3d6 piercing vs dragon
@@ -105,7 +106,10 @@
 //! `points N` is what a legendary action costs. A `reaction:` is a move with a
 //! `when enemy <condition>` or `when breached` clause, aimed at whoever set it
 //! off; an `aura:` is a move every enemy is subject to at the start of its
-//! turns, aimed at that enemy alone.
+//! turns, aimed at that enemy alone. A creature gets one reaction a round
+//! unless `reactions N` says otherwise, and never more than one per turn - so
+//! a bigger budget is what lets it answer several different creatures in the
+//! same round.
 //!
 //! A creature with a `mouth` has its enemies stand around it - at its mouth,
 //! beside its body, at range or far off in front (see

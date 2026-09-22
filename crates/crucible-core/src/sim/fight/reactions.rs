@@ -136,12 +136,12 @@ pub(super) fn react_to_hit(
     for rider in &creature.riders {
         match rider {
             Rider::ReduceDamage { kinds, roll } if strike.deals_any(kinds) => {
-                f.reaction = false;
+                f.spend_reaction_budget();
                 let cut = roll.sample_raw(rng).min(damage);
                 return (damage - cut, Some(Answer::Deflected(cut)));
             }
             Rider::HalveAttackDamage => {
-                f.reaction = false;
+                f.spend_reaction_budget();
                 return (damage / 2, Some(Answer::Halved));
             }
             _ => {}
@@ -442,6 +442,107 @@ mod tests {
         assert!(
             lasting < once,
             "a parry that stays up should blunt the whole multiattack: {lasting} vs {once}"
+        );
+    }
+
+    /// A titan whose stat block grants several reactions a round gets one
+    /// per turn - its own and everybody else's - until the round's budget is
+    /// gone, and the whole budget is back at the start of its own turn.
+    #[test]
+    fn several_reactions_a_round_is_still_one_a_turn() {
+        let mut titan = Creature::new("titan", 19, 200);
+        titan.reactions_per_round = 3;
+        let mut f = Fighter::new(&titan, Side::B, Policy::Greedy, 0);
+        let mut rng = Rng::new(1);
+
+        for spent in 1..=3 {
+            assert!(f.reaction, "reaction {spent} of the round");
+            f.spend_reaction_budget();
+            assert!(!f.reaction, "and only one inside a turn");
+            f.offer_reaction();
+        }
+        assert!(
+            !f.reaction,
+            "three is three: the fourth turn of the round offers nothing"
+        );
+
+        refresh(&mut f, &mut rng);
+        assert!(f.reaction, "its own turn brings the whole budget back");
+
+        // Everything that has not said otherwise is unchanged: one reaction,
+        // and no more until its own turn comes round.
+        let plain = Creature::new("plain", 15, 30);
+        assert_eq!(plain.reactions_per_round, 1);
+        let mut f = Fighter::new(&plain, Side::A, Policy::Greedy, 1);
+        f.spend_reaction_budget();
+        f.offer_reaction();
+        assert!(!f.reaction);
+        refresh(&mut f, &mut rng);
+        assert!(f.reaction);
+    }
+
+    /// In a live fight: a defender with three reactions a round cuts damage
+    /// from three different attackers in the same round, where one with a
+    /// single reaction cuts one.
+    #[test]
+    fn several_reactions_a_round_answer_several_attackers() {
+        let attacker = |name: &str| {
+            let mut c = puncher(name, 10, 200, 20, 0);
+            c.actions[0].effect = Effect::Strikes {
+                strike: Strike::new(20, vec![DamageRoll::new(2, 6, 10, DamageKind::Slashing)]),
+                count: 1,
+            };
+            c.initiative = 50;
+            c.team = 0;
+            c
+        };
+        let (a, b, d) = (attacker("a"), attacker("b"), attacker("c"));
+        let defender = |per_round: u32| {
+            let mut c = Creature::new("titan", 10, 10_000);
+            c.initiative = -50;
+            c.team = 1;
+            c.reactions_per_round = per_round;
+            c.riders.push(Rider::ReduceDamage {
+                kinds: vec![DamageKind::Slashing],
+                roll: DamageRoll::new(1, 4, 100, DamageKind::Slashing),
+            });
+            c
+        };
+
+        // Counted over twenty rounds rather than one, because a natural 1
+        // always misses and a swing that misses is nothing to react to.
+        let deflections = |per_round: u32| {
+            let target = defender(per_round);
+            let mut rng = Rng::new(4);
+            let mut total = 0;
+            for _ in 0..20 {
+                let mut log = Some(Vec::new());
+                crate::sim::run_teams(
+                    &mut rng,
+                    &[&a, &b, &d, &target],
+                    [Policy::Greedy; 2],
+                    1,
+                    crate::sim::Budget::default(),
+                    &mut log,
+                );
+                let round = log
+                    .unwrap()
+                    .join(
+                        "
+",
+                    )
+                    .matches("deflected")
+                    .count();
+                assert!(round <= per_round as usize, "never more than the budget");
+                total += round;
+            }
+            total
+        };
+        let (one, three) = (deflections(1), deflections(3));
+        assert!(one <= 20, "one a round, twenty rounds");
+        assert!(
+            three > 2 * one,
+            "three reactions should answer far more swings: {three} against {one}"
         );
     }
 

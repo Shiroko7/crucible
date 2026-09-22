@@ -70,9 +70,18 @@ pub struct Creature {
     /// [`Move::legendary_cost`] of them - one, unless it says otherwise.
     pub legendary_uses: u32,
     /// Reactions that are moves of their own, each waiting on a trigger -
-    /// see [`Reaction`]. They share the one reaction a round with the
+    /// see [`Reaction`]. They share this creature's reactions with the
     /// reaction [`Rider`]s.
     pub reactions: Vec<Reaction>,
+    /// How many reactions this creature gets a round - one, for everything
+    /// that has not said otherwise, and more for a titan whose stat block
+    /// grants them.
+    ///
+    /// However many it has, it can still only take **one per turn**: the
+    /// budget is what lets it answer several different creatures in a round,
+    /// not act twice inside one turn. Spent reactions come back at the start
+    /// of its own turn. See `sim::fight`'s turn bookkeeping.
+    pub reactions_per_round: u32,
     /// Effects every enemy is subject to at the start of each of its turns -
     /// a whirlpool's drag, a stench - resolved against that enemy alone.
     /// Taking one costs nothing: an aura is always on.
@@ -137,6 +146,7 @@ impl Creature {
             legendary: Vec::new(),
             legendary_uses: 0,
             reactions: Vec::new(),
+            reactions_per_round: 1,
             auras: Vec::new(),
             mouth: false,
             difficult_terrain: false,

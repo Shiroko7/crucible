@@ -37,6 +37,9 @@ pub enum TraitEffect {
     /// Enemies stand around this creature - see
     /// [`crate::creature::Creature::mouth`].
     Mouth,
+    /// How many reactions a round this creature gets - see
+    /// [`crate::creature::Creature::reactions_per_round`].
+    ReactionsPerRound(u32),
     /// Around it, enemies move one zone a turn - see
     /// [`crate::creature::Creature::difficult_terrain`].
     DifficultTerrain,
@@ -74,6 +77,7 @@ impl TraitEffect {
                 }
             }
             Self::Mouth => creature.mouth = true,
+            Self::ReactionsPerRound(n) => creature.reactions_per_round = n.max(1),
             Self::DifficultTerrain => creature.difficult_terrain = true,
         }
         Ok(())
@@ -155,6 +159,17 @@ pub(crate) fn parse_trait(value: &str) -> Result<TraitEffect, String> {
         // `halve attack damage`, or the feature's own name `uncanny dodge` -
         // a reaction that halves one hit.
         "halve" | "uncanny" => Ok(TraitEffect::Rider(Rider::HalveAttackDamage)),
+        // `reactions 3` - how many reactions a round, still one per turn.
+        "reactions" => {
+            let n = count(arg(&words, 1, value)?)?;
+            if words.len() > 2 {
+                return Err(format!("unexpected words at the end of `{value}`"));
+            }
+            if n == 0 {
+                return Err(format!("`{value}`: a creature gets at least one"));
+            }
+            Ok(TraitEffect::ReactionsPerRound(n))
+        }
         // `reaction ac 5 [vs ranged weapon|melee] [until next turn]` - a
         // reaction that raises AC against an attack roll: against that one
         // attack, or - with `until next turn` - against every further attack

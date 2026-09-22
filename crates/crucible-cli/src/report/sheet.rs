@@ -80,6 +80,12 @@ pub fn print_sheet(roster: &[&Creature]) {
             };
             print_move("reaction", &r.action, when);
         }
+        if c.reactions_per_round > 1 {
+            println!(
+                "    {:<10} {} a round, one per turn",
+                "reactions", c.reactions_per_round
+            );
+        }
         if c.legendary_uses > 0 {
             println!(
                 "    {:<10} {} a round, one per enemy turn",

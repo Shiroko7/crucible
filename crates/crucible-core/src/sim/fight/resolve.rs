@@ -144,7 +144,7 @@ impl<'a> Fight<'a> {
                     );
                     if consumed {
                         let defender = &mut self.fighters[current_target];
-                        defender.reaction = false;
+                        defender.spend_reaction_budget();
                         if let Some((bonus, true)) = boost {
                             defender.reactive_ac = Some((
                                 defender

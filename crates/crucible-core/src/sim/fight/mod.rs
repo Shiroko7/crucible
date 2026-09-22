@@ -188,10 +188,18 @@ struct Fighter<'a> {
     /// `once_per_turn_spent` so a creature with both a Stunning-Strike-style
     /// rider and Sneak Attack gets one of each.
     sneak_attack_spent: bool,
-    /// This creature's one reaction per round, shared by every reaction rider
-    /// it has - see [`crate::creature::Rider::is_reaction`]. Back at the start
-    /// of its own turn.
+    /// Whether this creature has a reaction to spend right now, shared by
+    /// every reaction rider and reaction move it has - see
+    /// [`crate::creature::Rider::is_reaction`]. One per turn at most: it comes
+    /// back at the start of *every* turn, as long as `reactions_left` holds
+    /// out.
     reaction: bool,
+    /// Reactions left this round, out of
+    /// [`Creature::reactions_per_round`]. Back to full at the start of this
+    /// creature's own turn. For the one-reaction creature everything has
+    /// always been, this is 1 and spending it stops the per-turn refresh
+    /// until its own turn comes round - exactly the old rule.
+    reactions_left: u32,
     /// Parallel to `creature.riders`: whether each
     /// [`crate::creature::Rider::ConditionTriggeredWeaponDamage`] has been
     /// armed by this creature landing its trigger condition on an enemy.
