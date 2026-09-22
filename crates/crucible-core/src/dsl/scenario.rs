@@ -46,6 +46,17 @@
 //! bonus: Patient Defense | cost focus 1 | stance dodging
 //! action: Breath | uses 3 | save dex dc 16 | 2d8 cold | half on success
 //!               && strikes 1 | hit +9 | 1d8+6 bludgeoning
+//! trait: damage threshold 30 cracks weak spot resists bludgeoning, piercing
+//! trait: digest 6d6 acid
+//! trait: regurgitate 30 con dc 21
+//! condition immune: prone, frightened
+//! action: Bite | hit +9 | 3d8+5 piercing | on hit swallow large
+//!              && stance exposed
+//! bonus: Clamp Shut | stance sealed
+//! legendary: Squeeze | points 2 | swallowed | 4d10 bludgeoning
+//! reaction: Snap | when enemy pulled | hit +9 | 3d8+5 piercing
+//! reaction: Spray | when breached | save dex dc 18 | 4d10 piercing | half on success
+//! aura: Undertow | save str dc 15 | on fail pulled
 //! ```
 //!
 //! `&&` joins a move out of several effects, for a Multiattack that is not all
@@ -60,9 +71,21 @@
 //! `until victim`, `until applier` (the default), `until end` (the end of the
 //! applier's next turn), `until save` (repeat the save at the end of each of
 //! the victim's turns), or `for N rounds|minutes|hours`.
+//!
+//! A shell and a gullet: `damage threshold N` ignores any single instance of
+//! damage below N, and a weak spot skips it - reached from inside, or by an
+//! attack roll while the creature is `exposed` and not `sealed`, or while a
+//! breach has left it `cracked`. `on hit swallow <size>` swallows a target
+//! that size or smaller; `digest` is what it takes each turn inside, a
+//! `swallowed` move hurts everything inside on demand, and `regurgitate` is
+//! the damage from inside in one turn that forces a save to keep it down.
+//! `points N` is what a legendary action costs. A `reaction:` is a move with a
+//! `when enemy <condition>` or `when breached` clause, aimed at whoever set it
+//! off; an `aura:` is a move every enemy is subject to at the start of its
+//! turns, aimed at that enemy alone.
 
 use crate::creature::{Creature, Resource};
-use crate::dsl::grammar::{count, number, parse_move, parse_trait};
+use crate::dsl::grammar::{count, number, parse_move, parse_reaction, parse_trait};
 use crate::rules::{Ability, Condition, DamageKind, Reduction};
 use std::fmt;
 
@@ -209,13 +232,18 @@ pub fn parse(text: &str) -> Result<Vec<Creature>, ParseError> {
                 let effect = parse_trait(&value).map_err(fail)?;
                 effect.apply(current).map_err(fail)?;
             }
-            "action" | "bonus" | "legendary" => {
+            "action" | "bonus" | "legendary" | "aura" => {
                 let m = parse_move(&value, current).map_err(fail)?;
                 match key.as_str() {
                     "action" => current.actions.push(m),
                     "bonus" => current.bonus_actions.push(m),
+                    "aura" => current.auras.push(m),
                     _ => current.legendary.push(m),
                 }
+            }
+            "reaction" => {
+                let r = parse_reaction(&value, current).map_err(fail)?;
+                current.reactions.push(r);
             }
             other => return Err(fail(format!("unknown key `{other}`"))),
         }

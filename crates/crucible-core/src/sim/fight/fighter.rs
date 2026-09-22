@@ -64,6 +64,11 @@ impl<'a> Fighter<'a> {
                 .iter()
                 .map(|m| MoveState::new(m.uses))
                 .collect(),
+            reactions: creature
+                .reactions
+                .iter()
+                .map(|r| MoveState::new(r.action.uses))
+                .collect(),
             // Available from the start of the fight, not from the creature's
             // first turn. The difference only shows when the legendary creature
             // loses initiative, which is exactly when it matters.
@@ -82,6 +87,7 @@ impl<'a> Fighter<'a> {
             melee: fights_in_melee(creature),
             dead: false,
             slot_spent_this_turn: false,
+            inside_damage: 0,
             dealt: 0,
             spent: 0,
         }
@@ -107,6 +113,16 @@ impl<'a> Fighter<'a> {
 
     pub(super) fn incapacitated(&self) -> bool {
         self.has(Condition::incapacitated)
+    }
+
+    /// The roster index of whoever has swallowed this creature, if anyone.
+    pub(super) fn swallowed_by(&self) -> Option<usize> {
+        self.conditions
+            .iter()
+            .find_map(|&(c, expiry)| match expiry {
+                Expiry::HeldBy(holder) if c == Condition::Swallowed => Some(holder),
+                _ => None,
+            })
     }
 
     /// Loses its turn entirely - what `Fight::turn` checks before letting a
@@ -214,6 +230,17 @@ impl<'a> Fighter<'a> {
         slot.states_mut(self)[pick].spend(uses);
     }
 
+    /// Spend this creature's reaction on its `i`th [`crate::creature::Reaction`],
+    /// with whatever that move costs out of its own budget.
+    pub(super) fn spend_reaction(&mut self, i: usize) {
+        let uses = self.creature.reactions[i].action.uses;
+        if !matches!(uses, Uses::Unlimited) {
+            self.spent += 1;
+        }
+        self.reactions[i].spend(uses);
+        self.reaction = false;
+    }
+
     pub(super) fn add_condition(&mut self, condition: Condition, expiry: Expiry) {
         if !self.conditions.iter().any(|&(c, _)| c == condition) {
             self.conditions.push((condition, expiry));
@@ -257,6 +284,9 @@ pub(super) fn refresh(f: &mut Fighter<'_>, rng: &mut Rng) {
         for (state, m) in states.iter_mut().zip(moves) {
             state.roll_recharge(m.uses, rng);
         }
+    }
+    for (state, r) in f.reactions.iter_mut().zip(&creature.reactions) {
+        state.roll_recharge(r.action.uses, rng);
     }
     f.legendary_left = creature.legendary_uses;
     f.once_per_turn_spent = false;

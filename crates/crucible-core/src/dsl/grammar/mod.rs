@@ -1,6 +1,7 @@
 //! The phrase grammar every creature format shares: a move
-//! (`Longbow | ranged | hit +8 | 1d8+4 piercing`), a trait (`evasion dex`),
-//! a condition's lifetime (`until save`).
+//! (`Longbow | ranged | hit +8 | 1d8+4 piercing`), a reaction - a move with
+//! a trigger (`Snap | when enemy pulled | hit +9 | 2d10 piercing`) - a trait
+//! (`evasion dex`), a condition's lifetime (`until save`).
 //!
 //! `.crucible` scenarios write whole stat blocks in it, TOML configs write
 //! their `traits` and `actions` in it, and feature factories that take a
@@ -13,9 +14,9 @@ mod moves;
 mod traits;
 
 pub use duration::{parse_duration, DurationSpec};
-pub use moves::parse_move_external;
+pub use moves::{parse_move_external, parse_reaction_external};
 pub use traits::{parse_trait_external, TraitEffect};
 
 pub(crate) use lex::{count, number};
-pub(crate) use moves::parse_move;
+pub(crate) use moves::{parse_move, parse_reaction};
 pub(crate) use traits::parse_trait;

@@ -42,18 +42,18 @@ times, reported.
 | `exact` | `prob::exact` | closed-form kill curves and expected attacks, by dynamic programming |
 | rules | `rules` | core 5e rules, one concept per file: abilities, sizes, creature types, conditions and their lifetimes, damage and reduction, healing, spell slots, saves, checks |
 | attacks | `rules::attack` | attack resolution, both exact and sampled: crits, advantage, resistance, composable `AttackModifier`/`DamageRider` lists (Bless, Bane, extra damage dice) |
-| `creature` | `creature` | modular combatant model: moves and their effects, multi-type damage, saves, recharge, resource pools, riders |
-| riders | `creature::rider` | Evasion, Legendary Resistance, Stunning Strike, Sneak Attack and Cunning Strike, bonus dice against a creature type, weapon buffs armed by a condition, injury poisons, immunity downgrades, and reactions (Deflect Attacks, Uncanny Dodge, a reactive AC boost) - as general mechanisms, all applied in live fights |
+| `creature` | `creature` | modular combatant model: moves and their effects, multi-type damage, saves, recharge, resource pools, riders, reactions that are moves of their own, auras |
+| riders | `creature::rider` | Evasion, Legendary Resistance, Stunning Strike, Sneak Attack and Cunning Strike, bonus dice against a creature type, weapon buffs armed by a condition, injury poisons, immunity downgrades, a damage threshold with a weak spot, swallowing, and reactions (Deflect Attacks, Uncanny Dodge, a reactive AC boost) - as general mechanisms, all applied in live fights |
 | features | `features` | the ruleset as plugins (`FeaturePlugin`, `CreatureBuilder`, `FeatureRegistry`), one file per feature: `classes/` (a folder per class and subclass), `spells/`, `monsters/`, `spellcasting/`, `items/`; each feature registers its own TOML factory |
 | grammar | `dsl::grammar` | the phrase grammar moves and traits are written in, shared by every creature format and by features that take a move as a parameter |
 | `scenario` | `dsl::scenario` | scenario parser supporting both external creature configs (`source:`) and inline declarations |
 | configs | `dsl::config` | TOML PC and Monster loaders |
-| fight | `sim::fight` | team combat rounds, one file per stage of a turn: initiative, action economy, reactions, condition lifetimes, concentration, legendary actions between turns |
+| fight | `sim::fight` | team combat rounds, one file per stage of a turn: initiative, action economy, auras, reactions, condition lifetimes, concentration, a damage threshold, swallowing, legendary actions of any cost between turns |
 | `analysis` | `sim::analysis` | win and death probability, CVaR of the bad tail, exact pacing check |
 | policies | `sim::policy` | eight of the nine from `DESIGN.md`: `solver`, `nova`, `greedy`, `focus-fire`, `scattered`, `in-order`, `defensive`, `attrition`, `thrifty` |
 | search | `sim::fight` | flat Monte Carlo over one turn, to a depth budget |
 | content | `content/` | data-driven PC (`content/characters/`) and Monster (`content/monsters/`) formatted configurations |
-| event pipeline | `sim::fight` | riders fire at fixed points (as an attack is rolled, on being targeted, on a hit's damage, on a hit, on a failed save, on a save for half); they do not yet subscribe to hooks |
+| event pipeline | `sim::fight` | riders fire at fixed points (at the start of a turn, as an attack is rolled, on being targeted, on a hit's damage, as damage lands, on a hit, as a condition lands, on a failed save, on a save for half, at the end of a turn); they do not yet subscribe to hooks |
 | `fitted` policy | | blocked: it means fitting parameters to logged play, and there are no logs |
 
 ### What is and is not modelled
@@ -72,9 +72,13 @@ lot:
 | `ReduceDamage` | Deflect Attacks, Heavy Armor Master |
 | `HalveAttackDamage` | Uncanny Dodge |
 | `ReactionOnTargeted` | the Shield spell, an item raised against ranged weapon attacks |
+| `DamageThreshold` | an armoured shell or hull; a mouth or a crack as its weak spot |
+| `Swallow`, `Digestion`, `Regurgitate` | a purple worm's, a behir's or a tarrasque's gullet |
+| a `Reaction` move with a trigger | a snap at whoever is dragged into reach, a spray from a breached shell |
 
 A creature has one reaction a round, shared by every reaction it knows, and
-none while Incapacitated. Heals go to the healer's own side - a downed player
+none while Incapacitated. An aura is a move every enemy meets at the start of
+its turn, and a legendary action costs as many of the round's uses as it says. Heals go to the healer's own side - a downed player
 character first - and a player character dropped by less than massive damage
 is down, not dead, until healed or the fight ends. Under the 2024 rules at most
 one spell slot is spent per turn.
@@ -84,7 +88,17 @@ so a dragon with an 80-foot fly speed stands still and trades hits. Anything
 whose point is where the combatants are - Wings Unfurled, a 60-foot cone, Shell
 Defense as a way to survive a round - is therefore out of scope until there is a
 movement model. So is everything non-combat: languages, tool proficiencies,
-Hold Breath.
+Hold Breath. A push changes nothing, and a pull is a condition only so that a
+reaction can wait for it. The one kind of reach there is comes from being
+swallowed: a swallowed creature can reach nothing but its swallower's insides,
+and nothing outside can reach it - not an attack, an area, or a heal.
+
+A damage threshold ignores any single hit, save or dart below it. An attack
+roll can go through an open weak spot instead - a mouth left gaping, a crack a
+breach leaves until the round ends - trading the threshold for the weak spot's
+resistances. An attacker takes whichever it expects to do more against, so a
+hit big enough to breach goes to the shell, where it lands whole. From inside,
+everything reaches the weak spot.
 
 "An ally within 5 feet of the target", which Sneak Attack asks about, has no
 geometry to read, so it is read off who is fighting what: an ally counts if it is
@@ -211,5 +225,6 @@ class (or spell list, or item) that has it, together with its TOML factory and i
 `crates/crucible-core/tests/multiclass_rogue_caster.rs` is the worked example of a whole
 multiclass build written that way - a rogue with a secondary spellcasting grant, magic
 weapons, items used through Fast Hands and reactions - with every plugin and trait keyword
-it needs, and fights proving each one is live. `dsl::scenario`'s module docs list the move
-and trait syntax.
+it needs, and fights proving each one is live. `tests/swallowing_titan.rs` does the same for
+a monster: a shell, a gullet, an aura, reactions and legendary actions of several costs.
+`dsl::scenario`'s module docs list the move and trait syntax.

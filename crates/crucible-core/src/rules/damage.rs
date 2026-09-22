@@ -138,6 +138,19 @@ impl Reduction {
             Reduction::Immune => 0,
         }
     }
+
+    /// This reduction with a resistance from a second source added. Two
+    /// resistances are one, immunity stays immunity, and resistance on top of
+    /// vulnerability cancels it - the rules apply both, halving and then
+    /// doubling, which is the damage rounded down to an even number: `Normal`
+    /// to within a point.
+    pub fn with_resistance(self) -> Reduction {
+        match self {
+            Reduction::Normal => Reduction::Resistant,
+            Reduction::Vulnerable => Reduction::Normal,
+            other => other,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -151,5 +164,13 @@ mod tests {
         assert_eq!(Reduction::Resistant.apply(1), 0);
         assert_eq!(Reduction::Vulnerable.apply(7), 14);
         assert_eq!(Reduction::Immune.apply(7), 0);
+    }
+
+    #[test]
+    fn a_second_resistance_never_stacks_and_never_undoes_immunity() {
+        assert_eq!(Reduction::Normal.with_resistance(), Reduction::Resistant);
+        assert_eq!(Reduction::Resistant.with_resistance(), Reduction::Resistant);
+        assert_eq!(Reduction::Immune.with_resistance(), Reduction::Immune);
+        assert_eq!(Reduction::Vulnerable.with_resistance(), Reduction::Normal);
     }
 }

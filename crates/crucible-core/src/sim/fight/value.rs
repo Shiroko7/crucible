@@ -2,8 +2,13 @@
 //! number every ranking policy compares.
 
 use crate::creature::{Creature, Effect, Move, Rider, Strike};
-use crate::rules::{hit_outcomes_with, AttackModifier, Condition, DamageRoll, HealRoll, RollMode};
+use crate::prob::Pmf;
+use crate::rules::{
+    hit_outcomes_with, AttackModifier, Condition, DamageKind, DamageRoll, HealRoll, Reduction,
+    RollMode,
+};
 use crate::sim::fight::attack::attack_mode;
+use crate::sim::fight::threshold::reducer;
 use crate::sim::fight::{Fight, Fighter};
 use crate::sim::{Budget, Policy, Side};
 
@@ -26,7 +31,16 @@ impl<'a> Fight<'a> {
         riders: &[Rider],
         steady: bool,
     ) -> f64 {
+        let attacker = self.fighters[me].creature;
+        let victim = self.fighters[target].creature;
         match effect {
+            // Anything aimed at a creature out of reach - swallowed, or
+            // outside the one that swallowed `me` - lands nowhere.
+            Effect::Strikes { .. } | Effect::Save(_) | Effect::AutoHit { .. }
+                if !self.reaches(me, target) =>
+            {
+                0.0
+            }
             Effect::Strikes { strike, count } => {
                 self.expected_strikes(me, target, strike, *count, riders, steady)
             }
@@ -35,17 +49,52 @@ impl<'a> Fight<'a> {
                 .iter()
                 .map(|p| self.effect_value(me, target, p, riders, steady))
                 .sum(),
+            Effect::WithRiders {
+                effect,
+                riders: own,
+            } => {
+                let riders: Vec<Rider> = riders.iter().chain(own).cloned().collect();
+                self.effect_value(me, target, effect, &riders, steady)
+            }
             // A save only some creature types are subject to, against a
             // target that is not one: it catches nobody.
             Effect::Save(save)
                 if save
                     .requires_type
                     .as_ref()
-                    .is_some_and(|t| !self.fighters[target].creature.is_creature_type(t)) =>
+                    .is_some_and(|t| !victim.is_creature_type(t)) =>
             {
                 f64::NEG_INFINITY
             }
-            other => other.mean_damage(self.fighters[target].creature),
+            Effect::Save(save) => {
+                let weak = self.through_weak_spot(me, target, false);
+                let pmf = save.damage_pmf_by(victim, &reducer(attacker, victim, weak));
+                self.past_threshold(target, weak, pmf).mean()
+            }
+            Effect::AutoHit { damage } => {
+                let weak = self.through_weak_spot(me, target, false);
+                let reduce = reducer(attacker, victim, weak);
+                damage
+                    .iter()
+                    .map(|r| {
+                        self.past_threshold(target, weak, r.pmf(false, reduce(r.kind)))
+                            .mean()
+                    })
+                    .sum()
+            }
+            // Whoever is inside, not `target`, takes it.
+            Effect::HarmSwallowed { damage } => self
+                .held_by(me)
+                .into_iter()
+                .map(|i| {
+                    let reduce = reducer(attacker, self.fighters[i].creature, false);
+                    damage
+                        .iter()
+                        .map(|r| r.pmf(false, reduce(r.kind)).mean())
+                        .sum::<f64>()
+                })
+                .sum(),
+            other => other.mean_damage(victim),
         }
     }
 
@@ -103,29 +152,66 @@ impl<'a> Fight<'a> {
         let mode = attack_mode(strike.mode, attacker, victim, steady);
         let force_crit = victim.has(Condition::auto_crits);
         let first = self.extra_damage_plan(me, target, strike, riders, mode, true);
-        let mut total = expected_hit(
-            attacker.creature,
-            victim.creature,
-            strike,
-            mode,
-            force_crit,
-            &attacker.attack_modifiers,
-            &first.rolls,
-        );
+        let mut total = self
+            .aimed_hit(me, target, strike, mode, force_crit, &first.rolls)
+            .0;
         if count > 1 {
             let rest = self.extra_damage_plan(me, target, strike, riders, mode, false);
             total += f64::from(count - 1)
-                * expected_hit(
-                    attacker.creature,
-                    victim.creature,
-                    strike,
-                    mode,
-                    force_crit,
-                    &attacker.attack_modifiers,
-                    &rest.rolls,
-                );
+                * self
+                    .aimed_hit(me, target, strike, mode, force_crit, &rest.rolls)
+                    .0;
         }
         total
+    }
+
+    /// Expected damage of one attack roll from `me` at `target` in `mode`,
+    /// with `extra` riding on a hit - and whether it is aimed at `target`'s
+    /// weak spot.
+    ///
+    /// From inside there is nothing else to aim at. From outside, an open
+    /// weak spot is taken when it is worth more than the shell: it skips the
+    /// threshold but resists some damage, so a hit big enough to breach can
+    /// do better against the shell, where it lands whole.
+    pub(super) fn aimed_hit(
+        &self,
+        me: usize,
+        target: usize,
+        strike: &Strike,
+        mode: RollMode,
+        force_crit: bool,
+        extra: &[DamageRoll],
+    ) -> (f64, bool) {
+        let attacker = &self.fighters[me];
+        let victim = &self.fighters[target];
+        let hit = |weak: bool| {
+            let threshold = match weak {
+                true => None,
+                false => victim.creature.damage_threshold().map(|(t, _)| t),
+            };
+            expected_hit(
+                &reducer(attacker.creature, victim.creature, weak),
+                threshold,
+                strike,
+                victim.creature.ac,
+                mode,
+                force_crit,
+                &attacker.attack_modifiers,
+                extra,
+            )
+        };
+        if !self.through_weak_spot(me, target, true) {
+            return (hit(false), false);
+        }
+        if attacker.swallowed_by() == Some(target) {
+            return (hit(true), true);
+        }
+        let (through, shell) = (hit(true), hit(false));
+        if through >= shell {
+            (through, true)
+        } else {
+            (shell, false)
+        }
     }
 
     /// A heal is worth a whole ally back in the fight when one is down - its
@@ -135,8 +221,9 @@ impl<'a> Fight<'a> {
         let side = self.fighters[me].side;
         self.fighters
             .iter()
-            .filter(|f| f.side == side && f.can_revive())
-            .map(|f| f64::from(f.creature.hp))
+            .enumerate()
+            .filter(|&(i, f)| f.side == side && f.can_revive() && self.reaches(me, i))
+            .map(|(_, f)| f64::from(f.creature.hp))
             .fold(0.0, f64::max)
     }
 }
@@ -145,31 +232,42 @@ pub(super) fn first_strike(effect: &Effect) -> Option<&Strike> {
     match effect {
         Effect::Strikes { strike, .. } => Some(strike),
         Effect::Sequence(parts) => parts.iter().find_map(first_strike),
+        Effect::WithRiders { effect, .. } => first_strike(effect),
         _ => None,
     }
 }
 
-/// Expected damage of one attack roll in `mode`, with `extra` riding on a
-/// hit: the probability of each outcome times the mean of each damage
-/// component, reduced the way `target` reduces it against `attacker`. A
-/// `force_crit` target turns every hit into a critical one.
+/// Expected damage of one attack roll in `mode` against `ac`, with `extra`
+/// riding on a hit: the probability of each outcome times the mean of each
+/// damage component, reduced by `reduce`. A `force_crit` target turns every
+/// hit into a critical one.
+///
+/// Against a damage `threshold` the components no longer simply add - a hit
+/// either clears it whole or lands nothing - so the hit's full distribution
+/// is built and cut at the threshold instead.
+#[allow(clippy::too_many_arguments)]
 fn expected_hit(
-    attacker: &Creature,
-    target: &Creature,
+    reduce: &dyn Fn(DamageKind) -> Reduction,
+    threshold: Option<i32>,
     strike: &Strike,
+    ac: i32,
     mode: RollMode,
     force_crit: bool,
     modifiers: &[AttackModifier],
     extra: &[DamageRoll],
 ) -> f64 {
-    let o = hit_outcomes_with(strike.to_hit, mode, target.ac, modifiers);
+    let o = hit_outcomes_with(strike.to_hit, mode, ac, modifiers);
+    let rolls = || strike.damage.iter().chain(extra);
     let landed = |crit: bool| -> f64 {
-        strike
-            .damage
-            .iter()
-            .chain(extra)
-            .map(|r| r.pmf(crit, target.reduction_from(r.kind, attacker)).mean())
-            .sum()
+        match threshold {
+            None => rolls().map(|r| r.pmf(crit, reduce(r.kind)).mean()).sum(),
+            Some(t) => rolls()
+                .fold(Pmf::constant(0), |acc, r| {
+                    acc.convolve(&r.pmf(crit, reduce(r.kind)))
+                })
+                .map_values(move |d| if d >= t { d } else { 0 })
+                .mean(),
+        }
     };
     let (hit, crit) = if force_crit {
         (0.0, o.hit + o.crit)
@@ -196,6 +294,7 @@ pub fn expected_damage(attacker: &Creature, m: &Move, target: &Creature) -> f64 
         budget: Budget::default(),
         rollout_plan: None,
         acting: None,
+        sole_target: None,
     };
     fight.move_value(0, 1, m, false)
 }

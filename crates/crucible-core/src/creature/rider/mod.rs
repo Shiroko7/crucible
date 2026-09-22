@@ -11,7 +11,7 @@ mod immunity;
 mod injury_poison;
 
 use crate::creature::{AttackKind, Cost};
-use crate::rules::{Ability, Condition, CreatureType, DamageKind, DamageRoll, Duration};
+use crate::rules::{Ability, Condition, CreatureType, DamageKind, DamageRoll, Duration, Size};
 pub use immunity::{save_success_probability, saving_throw_against_condition};
 pub use injury_poison::injury_poison_forcing_save;
 
@@ -311,6 +311,47 @@ pub enum Rider {
         debuffed_ability: Ability,
         condition: Option<Condition>,
         duration: Duration,
+    },
+    /// Immune to any single instance of damage below `threshold`: one hit,
+    /// one creature's share of one saving throw, one dart. An instance at or
+    /// over it lands in full. The damage threshold objects and vehicles
+    /// have, on a creature - an armoured shell, a carapace.
+    ///
+    /// A shell can have a way through it, which skips the threshold
+    /// entirely, and then `weak_spot_resists` are resisted instead - see
+    /// `sim::fight`'s damage landing for who reaches it: anything from inside
+    /// the creature (a creature it swallowed), and attack rolls while it is
+    /// [`Condition::Exposed`] and not [`Condition::Sealed`], or
+    /// [`Condition::Cracked`].
+    ///
+    /// Compared against the damage after resistance and every other
+    /// reduction - the damage it would actually take.
+    DamageThreshold {
+        threshold: i32,
+        /// A breach cracks the shell: attack rolls go through the crack until
+        /// the end of the round ([`Condition::Cracked`]).
+        cracks: bool,
+        weak_spot_resists: Vec<DamageKind>,
+    },
+    /// On a hit, a target of `max_size` or smaller is swallowed:
+    /// [`Condition::Swallowed`] until this creature regurgitates it or dies.
+    ///
+    /// A purple worm's bite, a behir's, a tarrasque's. What being inside
+    /// costs the victim each round is this creature's [`Rider::Digestion`];
+    /// what gets it out is [`Rider::Regurgitate`] or the swallower's death.
+    Swallow { max_size: Size },
+    /// At the start of each of this creature's turns, every creature it has
+    /// swallowed takes `damage` - no roll, only the victim's own resistances.
+    /// The acid in a purple worm's gut.
+    Digestion { damage: Vec<DamageRoll> },
+    /// If this creature takes `threshold` damage or more on a single turn
+    /// from creatures it has swallowed, it makes an `ability` save against
+    /// `dc` at the end of that turn, and on a failure regurgitates every one
+    /// of them, Prone.
+    Regurgitate {
+        threshold: i32,
+        ability: Ability,
+        dc: i32,
     },
 }
 

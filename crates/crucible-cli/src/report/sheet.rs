@@ -1,6 +1,9 @@
 //! Formats and prints the parsed creature sheet.
 
-use crucible_core::creature::{AttackTrigger, Creature, Effect, Move, MoveKind, Rider, Uses};
+use crucible_core::creature::{
+    AttackTrigger, Creature, Effect, Move, MoveKind, ReactionTrigger, Rider, Uses,
+};
+use crucible_core::rules::DamageRoll;
 /// Strip copy numbers like "Hero 3" back to "Hero", so resizing does not stack
 /// numbers.
 pub fn strip_number(name: &str) -> &str {
@@ -44,17 +47,30 @@ pub fn print_sheet(roster: &[&Creature]) {
             ("action", &c.actions),
             ("bonus", &c.bonus_actions),
             ("legendary", &c.legendary),
+            ("aura", &c.auras),
         ];
+        let print_move = |label: &str, m: &Move, extra: String| {
+            println!(
+                "    {label:<10} {:<24} {:<46} {:>5.1} avg vs {}",
+                m.name,
+                format!("{extra}{}", describe(c, m)),
+                crucible_core::sim::expected_damage(c, m, against),
+                strip_number(&against.name)
+            );
+        };
         for (label, moves) in groups {
             for m in moves.iter() {
-                println!(
-                    "    {label:<10} {:<24} {:<46} {:>5.1} avg vs {}",
-                    m.name,
-                    describe(c, m),
-                    crucible_core::sim::expected_damage(c, m, against),
-                    strip_number(&against.name)
-                );
+                print_move(label, m, String::new());
             }
+        }
+        for r in &c.reactions {
+            let when = match r.trigger {
+                ReactionTrigger::EnemyGains(condition) => {
+                    format!("when enemy {}: ", condition.name())
+                }
+                ReactionTrigger::Breached => "when breached: ".to_string(),
+            };
+            print_move("reaction", &r.action, when);
         }
         if c.legendary_uses > 0 {
             println!(
@@ -71,12 +87,16 @@ pub fn print_sheet(roster: &[&Creature]) {
         for (kind, reduction) in &c.reductions {
             println!("    {:<10} {} {:?}", "damage", kind.name(), reduction);
         }
+        if !c.condition_immunities.is_empty() {
+            let names: Vec<&str> = c.condition_immunities.iter().map(|c| c.name()).collect();
+            println!("    {:<10} {}", "immune", names.join(", "));
+        }
         println!();
     }
 }
 
 pub fn describe(owner: &Creature, m: &Move) -> String {
-    let mut bits = vec![body(&m.effect)];
+    let mut bits = vec![body(owner, &m.effect)];
     match m.kind {
         MoveKind::Standard => {}
         MoveKind::Spell => bits.push("spell".to_string()),
@@ -88,6 +108,9 @@ pub fn describe(owner: &Creature, m: &Move) -> String {
     }
     if m.concentration {
         bits.push("concentration".to_string());
+    }
+    if m.legendary_cost > 1 {
+        bits.push(format!("{} legendary actions", m.legendary_cost));
     }
     match m.uses {
         Uses::Unlimited => {}
@@ -104,8 +127,18 @@ pub fn describe(owner: &Creature, m: &Move) -> String {
                 .map_or("?", |r| r.name.as_str())
         ));
     }
-    for rider in &m.riders {
-        if let Rider::BonusDamageVsCreatureType { .. } | Rider::ConditionOnHit { .. } = rider {
+    bits.extend(on_hit(owner, &m.riders));
+    bits.join(", ")
+}
+
+/// What a move's on-hit riders do, in the sheet's words.
+fn on_hit(owner: &Creature, riders: &[Rider]) -> Vec<String> {
+    let mut bits = Vec::new();
+    for rider in riders {
+        if let Rider::BonusDamageVsCreatureType { .. }
+        | Rider::ConditionOnHit { .. }
+        | Rider::Swallow { .. } = rider
+        {
             bits.push(describe_trait(rider));
         }
         if let Rider::SaveOrCondition {
@@ -133,10 +166,10 @@ pub fn describe(owner: &Creature, m: &Move) -> String {
             ));
         }
     }
-    bits.join(", ")
+    bits
 }
 
-pub fn body(effect: &Effect) -> String {
+pub fn body(owner: &Creature, effect: &Effect) -> String {
     match effect {
         Effect::Strikes { strike, count } => format!(
             "{count}x {}{} at {:+}",
@@ -181,7 +214,17 @@ pub fn body(effect: &Effect) -> String {
                 None => " all".to_string(),
             }
         ),
-        Effect::Sequence(parts) => parts.iter().map(body).collect::<Vec<_>>().join(" + "),
+        Effect::HarmSwallowed { damage } => format!("{} to all swallowed", damage_list(damage)),
+        Effect::Sequence(parts) => parts
+            .iter()
+            .map(|p| body(owner, p))
+            .collect::<Vec<_>>()
+            .join(" + "),
+        Effect::WithRiders { effect, riders } => format!(
+            "{} ({})",
+            body(owner, effect),
+            on_hit(owner, riders).join(", ")
+        ),
     }
 }
 
@@ -286,5 +329,44 @@ pub fn describe_trait(rider: &Rider) -> String {
         Rider::ConditionOnHit { condition, .. } => {
             format!("{} on hit (no save)", condition.name())
         }
+        Rider::DamageThreshold {
+            threshold,
+            cracks,
+            weak_spot_resists,
+        } => {
+            let mut text = format!("damage threshold {threshold}: less in one go does nothing");
+            if *cracks {
+                text.push_str(", a breach cracks it open until the round ends");
+            }
+            if !weak_spot_resists.is_empty() {
+                text.push_str(&format!(
+                    ", weak spot resists {}",
+                    weak_spot_resists
+                        .iter()
+                        .map(|k| k.name())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                ));
+            }
+            text
+        }
+        Rider::Swallow { max_size } => format!("swallows {} or smaller on hit", max_size.name()),
+        Rider::Digestion { damage } => format!("digests {} a turn", damage_list(damage)),
+        Rider::Regurgitate {
+            threshold,
+            ability,
+            dc,
+        } => format!(
+            "{threshold}+ damage from inside in a turn: {} dc {dc} or regurgitate",
+            ability.name()
+        ),
     }
+}
+
+fn damage_list(damage: &[DamageRoll]) -> String {
+    damage
+        .iter()
+        .map(|r| format!("{}d{}{:+} {}", r.count, r.sides, r.bonus, r.kind.name()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

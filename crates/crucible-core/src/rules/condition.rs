@@ -105,6 +105,59 @@ pub enum Condition {
     /// (casting without components - Tricky Spells, Subtle Spell). See
     /// [`Condition::blocks_casting`].
     Silenced,
+    /// Can't attack whoever charmed it, and that creature has advantage on
+    /// social checks against it. Nothing here inflicts it or rolls a social
+    /// check, so it is tracked - a stat block's condition immunities name it -
+    /// without changing anything a fight resolves, the same gap
+    /// [`Condition::Deafened`] notes.
+    Charmed,
+    /// Disadvantage on its own attack rolls while the source of its fear is in
+    /// sight - always, with no line of sight to break - and it can't willingly
+    /// move closer, which has no movement model to apply to.
+    Frightened,
+    /// Turned to stone: Incapacitated, attacks against it have advantage, and
+    /// Strength and Dexterity saves fail flat - Paralyzed's bundle without the
+    /// automatic critical. Its resistance to all damage is not modelled:
+    /// nothing here inflicts it yet, and a stat block that is immune to it
+    /// needs only the name.
+    Petrified,
+    /// Exhaustion, whose levels take a penalty off every d20 test. Levels are
+    /// not modelled - nothing here inflicts any - so this is the name a stat
+    /// block's condition immunities need, and nothing more.
+    Exhaustion,
+    /// Dragged toward whoever applied it - a whirlpool's pull, a tentacle
+    /// reeling a creature in. There are no positions for the pull to change
+    /// (see `DESIGN.md`'s "Positioning is the gap that matters"), so on its
+    /// own it does nothing; it exists because being pulled in is what a
+    /// reaction can wait for - see
+    /// [`crate::creature::ReactionTrigger::EnemyGains`].
+    Pulled,
+    /// Inside the creature that swallowed it: Blinded and Restrained at once -
+    /// disadvantage on its own attack rolls and its Dexterity saves, advantage
+    /// to anyone attacking it - bundled the way [`Condition::Paralyzed`]
+    /// bundles Stunned's effects, so the two cannot drift apart.
+    ///
+    /// What makes it more than that bundle is total cover against everything
+    /// outside the swallower, and seeing nothing but its insides - who a
+    /// swallowed creature can reach, and who can reach it, which
+    /// `sim::fight` answers from who holds it. See
+    /// [`crate::creature::Rider::Swallow`].
+    Swallowed,
+    /// A weak spot is open to attack rolls: they bypass this creature's
+    /// damage threshold - see [`crate::creature::Rider::DamageThreshold`]. A
+    /// mouth that gapes while it bites is the shape: the move that opens it
+    /// puts this on its user as a stance.
+    Exposed,
+    /// Its weak spot is shut against attacks from outside, whatever opened it:
+    /// [`Condition::Exposed`] no longer lets anything through. A crack in its
+    /// shell ([`Condition::Cracked`]) is not a weak spot it can close, and a
+    /// creature it has swallowed is already inside.
+    Sealed,
+    /// Its damage threshold has been breached: attack rolls aimed at the
+    /// crack bypass the threshold until the end of the round. Put there by
+    /// `sim::fight` when a breach happens, for a threshold that
+    /// [`crate::creature::Rider::DamageThreshold::cracks`] says cracks.
+    Cracked,
 }
 
 impl Condition {
@@ -122,6 +175,15 @@ impl Condition {
             "suppressed" => Self::Suppressed,
             "marked" => Self::Marked,
             "silenced" => Self::Silenced,
+            "charmed" => Self::Charmed,
+            "frightened" => Self::Frightened,
+            "petrified" => Self::Petrified,
+            "exhaustion" | "exhausted" => Self::Exhaustion,
+            "pulled" => Self::Pulled,
+            "swallowed" => Self::Swallowed,
+            "exposed" => Self::Exposed,
+            "sealed" => Self::Sealed,
+            "cracked" => Self::Cracked,
             "disadvantage_str_saves" => Self::SaveDisadvantage(Ability::Str),
             "disadvantage_dex_saves" => Self::SaveDisadvantage(Ability::Dex),
             "disadvantage_con_saves" => Self::SaveDisadvantage(Ability::Con),
@@ -146,6 +208,15 @@ impl Condition {
             Self::Suppressed => "suppressed",
             Self::Marked => "marked",
             Self::Silenced => "silenced",
+            Self::Charmed => "charmed",
+            Self::Frightened => "frightened",
+            Self::Petrified => "petrified",
+            Self::Exhaustion => "exhaustion",
+            Self::Pulled => "pulled",
+            Self::Swallowed => "swallowed",
+            Self::Exposed => "exposed",
+            Self::Sealed => "sealed",
+            Self::Cracked => "cracked",
             Self::SaveDisadvantage(ability) => match ability {
                 Ability::Str => "disadvantage_str_saves",
                 Ability::Dex => "disadvantage_dex_saves",
@@ -157,11 +228,11 @@ impl Condition {
         }
     }
 
-    /// Can the creature act at all? Stunned and Paralyzed both include
-    /// Incapacitated, which is what takes away legendary actions as well as
-    /// the turn.
+    /// Can the creature act at all? Stunned, Paralyzed and Petrified all
+    /// include Incapacitated, which is what takes away legendary actions as
+    /// well as the turn.
     pub fn incapacitated(self) -> bool {
-        matches!(self, Self::Stunned | Self::Paralyzed)
+        matches!(self, Self::Stunned | Self::Paralyzed | Self::Petrified)
     }
 
     /// Does an attacker striking this creature get advantage?
@@ -171,7 +242,13 @@ impl Condition {
     pub fn advantage_to_attackers(self) -> bool {
         matches!(
             self,
-            Self::Stunned | Self::Prone | Self::Blinded | Self::Paralyzed | Self::Marked
+            Self::Stunned
+                | Self::Prone
+                | Self::Blinded
+                | Self::Paralyzed
+                | Self::Marked
+                | Self::Petrified
+                | Self::Swallowed
         )
     }
 
@@ -181,7 +258,10 @@ impl Condition {
 
     /// Does this creature's own attack roll suffer?
     pub fn disadvantage_on_attacks(self) -> bool {
-        matches!(self, Self::Prone | Self::Poisoned | Self::Blinded)
+        matches!(
+            self,
+            Self::Prone | Self::Poisoned | Self::Blinded | Self::Frightened | Self::Swallowed
+        )
     }
 
     /// Does this creature's own attack roll benefit? Steady Aim - the mirror
@@ -200,7 +280,7 @@ impl Condition {
     }
 
     pub fn auto_fails(self, ability: Ability) -> bool {
-        matches!(self, Self::Stunned | Self::Paralyzed)
+        matches!(self, Self::Stunned | Self::Paralyzed | Self::Petrified)
             && matches!(ability, Ability::Str | Ability::Dex)
     }
 
@@ -238,7 +318,8 @@ impl Condition {
 
     /// Does this creature roll an `ability` saving throw at disadvantage?
     /// [`Condition::Suppressed`] burdens every save,
-    /// [`Condition::SaveDisadvantage`] only its own ability's. Composed with
+    /// [`Condition::SaveDisadvantage`] only its own ability's, and
+    /// [`Condition::Swallowed`] Dexterity's, being Restrained. Composed with
     /// any other source of advantage or disadvantage on a save via the usual
     /// 5e cancellation rule rather than overriding it - see
     /// `sim::fight::save_mode`, the same stacking `attack_mode` already
@@ -247,6 +328,7 @@ impl Condition {
         match self {
             Self::Suppressed => true,
             Self::SaveDisadvantage(burdened) => burdened == ability,
+            Self::Swallowed => ability == Ability::Dex,
             _ => false,
         }
     }
@@ -419,6 +501,15 @@ mod tests {
             Condition::SaveDisadvantage(Ability::Wis),
             Condition::SaveDisadvantage(Ability::Cha),
             Condition::Silenced,
+            Condition::Charmed,
+            Condition::Frightened,
+            Condition::Petrified,
+            Condition::Exhaustion,
+            Condition::Pulled,
+            Condition::Swallowed,
+            Condition::Exposed,
+            Condition::Sealed,
+            Condition::Cracked,
         ] {
             assert_eq!(Condition::parse(c.name()), Some(c));
         }
@@ -491,5 +582,55 @@ mod tests {
         assert!(!burden.disadvantage_on_attacks());
         assert!(!burden.blocks_magic());
         assert!(!burden.halves_own_damage());
+    }
+
+    /// Swallowed is Blinded and Restrained at once, and nothing more: it
+    /// takes no turn away.
+    #[test]
+    fn swallowed_is_blinded_and_restrained() {
+        let s = Condition::Swallowed;
+        assert!(s.disadvantage_on_attacks());
+        assert!(s.advantage_to_attackers());
+        assert!(s.disadvantage_on_save(Ability::Dex));
+        assert!(!s.disadvantage_on_save(Ability::Con));
+        assert!(!s.incapacitated());
+        assert!(!s.auto_fails(Ability::Dex));
+    }
+
+    /// Petrified is Paralyzed without the automatic critical; Frightened
+    /// only burdens its own attacks.
+    #[test]
+    fn petrified_and_frightened_carry_what_the_engine_can_express() {
+        let p = Condition::Petrified;
+        assert!(p.incapacitated());
+        assert!(p.advantage_to_attackers());
+        assert!(p.auto_fails(Ability::Str));
+        assert!(p.auto_fails(Ability::Dex));
+        assert!(!p.auto_crits());
+
+        let f = Condition::Frightened;
+        assert!(f.disadvantage_on_attacks());
+        assert!(!f.advantage_to_attackers());
+        assert!(!f.incapacitated());
+    }
+
+    /// The positional and weak-spot markers change no roll on their own:
+    /// the fight reads them where a pull or a weak spot matters.
+    #[test]
+    fn markers_change_no_roll_on_their_own() {
+        for c in [
+            Condition::Charmed,
+            Condition::Exhaustion,
+            Condition::Pulled,
+            Condition::Exposed,
+            Condition::Sealed,
+            Condition::Cracked,
+        ] {
+            assert!(!c.incapacitated(), "{c:?}");
+            assert!(!c.advantage_to_attackers(), "{c:?}");
+            assert!(!c.disadvantage_to_attackers(), "{c:?}");
+            assert!(!c.disadvantage_on_attacks(), "{c:?}");
+            assert!(!c.disadvantage_on_save(Ability::Dex), "{c:?}");
+        }
     }
 }

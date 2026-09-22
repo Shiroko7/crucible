@@ -2,7 +2,9 @@
 //! or a flat passive stat bonus.
 
 use crate::creature::{AttackTrigger, Creature, Rider};
-use crate::dsl::grammar::lex::{arg, parse_damage_kinds, parse_dice, trailing_number};
+use crate::dsl::grammar::lex::{
+    arg, parse_damage, parse_damage_kinds, parse_dice, trailing_number,
+};
 use crate::dsl::grammar::{count, number, parse_duration};
 use crate::rules::{Ability, Condition, CreatureType, DamageKind, DamageRoll, Reduction};
 
@@ -314,6 +316,78 @@ pub(crate) fn parse_trait(value: &str) -> Result<TraitEffect, String> {
                 debuffed_ability,
                 condition,
                 duration: duration.resolve(Some((ability, dc)), value)?,
+            }))
+        }
+        // `damage threshold 51 [cracks] [weak spot resists bludgeoning,
+        // piercing, slashing]` - a shell that ignores any single instance of
+        // damage below the threshold; see `Rider::DamageThreshold`.
+        "damage" => {
+            if !arg(&words, 1, value)?.eq_ignore_ascii_case("threshold") {
+                return Err(format!(
+                    "expected `damage threshold <n> ...`, got `{value}`"
+                ));
+            }
+            let threshold = number(arg(&words, 2, value)?)?;
+            if threshold <= 0 {
+                return Err(format!("`{value}`: a damage threshold is at least 1"));
+            }
+            let mut at = 3;
+            let cracks = words
+                .get(at)
+                .is_some_and(|w| w.eq_ignore_ascii_case("cracks"));
+            if cracks {
+                at += 1;
+            }
+            let mut weak_spot_resists = Vec::new();
+            if at < words.len() {
+                let lead: Vec<String> = words[at..]
+                    .iter()
+                    .take(3)
+                    .map(|w| w.to_ascii_lowercase())
+                    .collect();
+                if lead[..] != ["weak", "spot", "resists"] && lead[..] != ["weak", "spot", "resist"]
+                {
+                    return Err(format!(
+                        "expected `[cracks] [weak spot resists <types>]` after the threshold in `{value}`"
+                    ));
+                }
+                weak_spot_resists = parse_damage_kinds(&words[at + 3..].join(" "), value)?;
+                if weak_spot_resists.is_empty() {
+                    return Err(format!("`{value}` names no damage type for the weak spot"));
+                }
+            }
+            Ok(TraitEffect::Rider(Rider::DamageThreshold {
+                threshold,
+                cracks,
+                weak_spot_resists,
+            }))
+        }
+        // `digest 8d6 acid, 4d6 cold` - what each swallowed creature takes at
+        // the start of this creature's turns.
+        "digest" | "digestion" => {
+            let rest = value.trim_start()[words[0].len()..].trim();
+            let damage = parse_damage(rest)?;
+            Ok(TraitEffect::Rider(Rider::Digestion { damage }))
+        }
+        // `regurgitate 60 con dc 22` - enough damage from inside in one turn
+        // forces a save to keep everything it swallowed down.
+        "regurgitate" => {
+            let threshold = number(arg(&words, 1, value)?)?;
+            let ability = Ability::parse(arg(&words, 2, value)?)
+                .ok_or_else(|| format!("unknown ability in `{value}`"))?;
+            if !arg(&words, 3, value)?.eq_ignore_ascii_case("dc") {
+                return Err(format!(
+                    "expected `regurgitate <damage> <ability> dc <n>`, got `{value}`"
+                ));
+            }
+            let dc = number(arg(&words, 4, value)?)?;
+            if words.len() > 5 {
+                return Err(format!("unexpected words at the end of `{value}`"));
+            }
+            Ok(TraitEffect::Rider(Rider::Regurgitate {
+                threshold,
+                ability,
+                dc,
             }))
         }
         other => Err(format!("unknown trait `{other}`")),
@@ -709,5 +783,69 @@ condition immune: poisoned, prone
         assert!(parse_trait("extra damage everywhere").is_err());
         assert!(parse_trait("reaction ac 5 vs sword").is_err());
         assert!(parse_trait("reaction speed 5").is_err());
+    }
+
+    #[test]
+    fn a_damage_threshold_parses_with_and_without_its_crack_and_weak_spot() {
+        let rider = |text: &str| match parse_trait(text).unwrap() {
+            TraitEffect::Rider(r) => r,
+            other => panic!("expected a rider, got {other:?}"),
+        };
+        assert_eq!(
+            rider("damage threshold 15"),
+            Rider::DamageThreshold {
+                threshold: 15,
+                cracks: false,
+                weak_spot_resists: vec![],
+            }
+        );
+        assert_eq!(
+            rider("damage threshold 51 cracks weak spot resists bludgeoning, piercing, slashing"),
+            Rider::DamageThreshold {
+                threshold: 51,
+                cracks: true,
+                weak_spot_resists: vec![
+                    DamageKind::Bludgeoning,
+                    DamageKind::Piercing,
+                    DamageKind::Slashing
+                ],
+            }
+        );
+        assert_eq!(
+            rider("damage threshold 30 weak spot resist fire"),
+            Rider::DamageThreshold {
+                threshold: 30,
+                cracks: false,
+                weak_spot_resists: vec![DamageKind::Fire],
+            }
+        );
+        assert!(parse_trait("damage threshold 0").is_err());
+        assert!(parse_trait("damage threshold 20 shatters").is_err());
+        assert!(parse_trait("damage threshold 20 weak spot resists").is_err());
+        assert!(parse_trait("damage 20").is_err());
+    }
+
+    #[test]
+    fn a_gullet_parses_what_it_digests_and_when_it_gives_up() {
+        assert_eq!(
+            parse_trait("digest 8d6 acid, 4d6 cold").unwrap(),
+            TraitEffect::Rider(Rider::Digestion {
+                damage: vec![
+                    DamageRoll::new(8, 6, 0, DamageKind::Acid),
+                    DamageRoll::new(4, 6, 0, DamageKind::Cold)
+                ],
+            })
+        );
+        assert_eq!(
+            parse_trait("regurgitate 60 con dc 22").unwrap(),
+            TraitEffect::Rider(Rider::Regurgitate {
+                threshold: 60,
+                ability: Ability::Con,
+                dc: 22,
+            })
+        );
+        assert!(parse_trait("digest lots").is_err());
+        assert!(parse_trait("regurgitate 60 con 22").is_err());
+        assert!(parse_trait("regurgitate 60 con dc 22 prone").is_err());
     }
 }

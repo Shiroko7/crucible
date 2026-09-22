@@ -76,6 +76,12 @@ impl<'a> Fight<'a> {
                         }
                     }
                 }
+                Rider::Swallow { max_size } => {
+                    let swallowed = self.swallow(me, target, *max_size);
+                    if swallowed && record {
+                        notes.push(format!("{} swallowed", self.fighters[target].creature.name));
+                    }
+                }
                 _ => {}
             }
         }

@@ -20,10 +20,16 @@ impl<'a> Fight<'a> {
     ///   enemies and nobody dies.
     /// - everything else attacks the first living enemy in roster order, which is
     ///   neither coordinated nor deliberately spread.
+    ///
+    /// Only an enemy it can reach counts: nothing outside a swallowed
+    /// creature, and nothing but its swallower from inside one - see
+    /// [`Fight::reaches`].
     pub(super) fn pick_target(&self, me: usize) -> Option<usize> {
         let side = self.fighters[me].side;
         let enemies: Vec<usize> = (0..self.fighters.len())
-            .filter(|&i| self.fighters[i].side != side && self.fighters[i].alive())
+            .filter(|&i| {
+                self.fighters[i].side != side && self.fighters[i].alive() && self.reaches(me, i)
+            })
             .collect();
         if enemies.is_empty() {
             return None;
@@ -35,6 +41,18 @@ impl<'a> Fight<'a> {
                 .expect("non-empty"),
             Policy::Scattered => enemies[self.fighters[me].seat % enemies.len()],
             _ => enemies[0],
+        })
+    }
+
+    /// Who `me` plans its turn against: [`Fight::pick_target`] - or, when
+    /// every enemy left is out of its reach because it has swallowed them
+    /// all, the first of them anyway. Nothing it aims at them will land, but
+    /// a squeeze of its gullet or a stance still needs a turn to be planned.
+    pub(super) fn aim(&self, me: usize) -> Option<usize> {
+        let side = self.fighters[me].side;
+        self.pick_target(me).or_else(|| {
+            (0..self.fighters.len())
+                .find(|&i| self.fighters[i].side != side && self.fighters[i].alive())
         })
     }
 
@@ -130,10 +148,14 @@ impl<'a> Fight<'a> {
 
     /// Who on `me`'s side a heal goes to: a downed ally that can still be
     /// brought back first, otherwise whoever alive is missing the most hit
-    /// points - `me` itself when nobody is hurt.
+    /// points - `me` itself when nobody is hurt. Only an ally it can reach:
+    /// not one swallowed, and none at all from inside a swallower.
     pub(super) fn heal_target(&self, me: usize) -> usize {
         let side = self.fighters[me].side;
-        let allies = || (0..self.fighters.len()).filter(move |&i| self.fighters[i].side == side);
+        let allies = || {
+            (0..self.fighters.len())
+                .filter(move |&i| self.fighters[i].side == side && self.reaches(me, i))
+        };
         if let Some(i) = allies().find(|&i| self.fighters[i].can_revive()) {
             return i;
         }

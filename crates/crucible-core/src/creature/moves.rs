@@ -112,6 +112,10 @@ pub struct Move {
     /// [`Uses::Limited`] for the charge budget rather than inventing a
     /// parallel resource mechanism.
     pub bypasses_casting_restrictions: bool,
+    /// How many of the creature's legendary actions this takes, as a
+    /// legendary action - "Costs 2 Actions", "(2 Points)". Read only there;
+    /// 1 for every ordinary move.
+    pub legendary_cost: u32,
 }
 
 impl Move {
@@ -127,6 +131,7 @@ impl Move {
             kind: MoveKind::Standard,
             before_action: false,
             bypasses_casting_restrictions: false,
+            legendary_cost: 1,
         }
     }
 
@@ -177,6 +182,13 @@ impl Move {
         self
     }
 
+    /// Take `n` legendary actions when used as one - see
+    /// [`Move::legendary_cost`].
+    pub fn with_legendary_cost(mut self, n: u32) -> Self {
+        self.legendary_cost = n;
+        self
+    }
+
     /// A move that spends nothing is one a hoarding policy will still take.
     pub fn is_free(&self) -> bool {
         matches!(self.uses, Uses::Unlimited)
@@ -194,6 +206,33 @@ impl Move {
             Some(level) => caster.cast_spell(level),
         }
     }
+}
+
+/// What sets off a [`Reaction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReactionTrigger {
+    /// This creature has just given an enemy this condition, by any means -
+    /// a whirlpool snapping at whoever it drags in
+    /// ([`crate::rules::Condition::Pulled`]), a pounce on whoever it knocks
+    /// down. The reaction answers that enemy.
+    EnemyGains(crate::rules::Condition),
+    /// Damage has just broken through this creature's damage threshold - see
+    /// [`crate::creature::Rider::DamageThreshold`]. The reaction answers
+    /// whoever dealt it.
+    Breached,
+}
+
+/// A reaction that is a move of its own - an attack, a burst forcing a save
+/// - taken when its trigger happens, against the creature that set it off.
+///
+/// The reactions that only change numbers on an attack already in flight - a
+/// raised AC, a cut to a hit's damage - are [`crate::creature::Rider`]s;
+/// this is the kind that does something. All of them share the creature's
+/// one reaction a round, and none can be taken while it is Incapacitated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reaction {
+    pub trigger: ReactionTrigger,
+    pub action: Move,
 }
 
 #[cfg(test)]
