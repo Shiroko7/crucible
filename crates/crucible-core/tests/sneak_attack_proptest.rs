@@ -1,36 +1,39 @@
 //! Property tests for Sneak Attack.
 //!
-//! `rogue.rs`'s own unit tests fix a handful of representative cases by hand:
-//! advantage triggers it, an adjacent ally triggers it without advantage,
-//! disadvantage cancels it outright, and a crit doubles its dice like any
-//! other rider. This file asks the same question `invariants.rs` and
-//! `exact_vs_sampled.rs` ask of the rest of combat - not "does this one case
-//! agree" but "is there any input in the space of dice pools, to-hit bonuses,
-//! ACs and trigger flags where the exact convolution and the sampled roll
-//! disagree." `proptest` searches that space and shrinks whatever it finds.
+//! `features/classes/rogue/sneak_attack.rs`'s own unit tests fix a handful of
+//! representative cases by hand: advantage triggers it, an adjacent ally
+//! triggers it without advantage, disadvantage cancels it outright, and a crit
+//! doubles its dice like any other rider. This file asks the same question
+//! `invariants.rs` and `exact_vs_sampled.rs` ask of the rest of combat - not
+//! "does this one case agree" but "is there any input in the space of dice
+//! pools, to-hit bonuses, ACs and trigger flags where the exact convolution
+//! and the sampled roll disagree." `proptest` searches that space and shrinks
+//! whatever it finds.
 //!
 //! Sneak Attack is [`Rider::ConditionalExtraDamage`], gated on flags read
-//! straight off the [`Attack`] being resolved (see `rogue.rs` for the gate
-//! itself, and `DESIGN.md` for why positioning is a flag rather than
-//! geometry). Three of its four trigger conditions get their own property
-//! test here, fixing the roll mode and letting dice pools, to-hit, AC,
-//! weapon-qualification and ally-adjacency vary freely: normal (only an
-//! adjacent ally can open the gate), advantage (the gate is open regardless
-//! of an ally), and disadvantage (the gate never opens, even with a
-//! qualifying weapon and an ally in place). The fourth trigger condition -
-//! critical-hit doubling of the *rider's own* dice, not just the weapon's -
-//! gets a dedicated property test, because "matches the exact PMF" and
-//! "matches what un-doubled rider dice would produce" are numerically close
-//! enough that a coarse check (comparing means, say) could pass on a subtly
-//! broken implementation that only doubles the weapon's pool.
+//! straight off the [`Attack`] being resolved (see
+//! `features/classes/rogue/sneak_attack.rs` for the gate itself, and
+//! `DESIGN.md` for why positioning is a flag rather than geometry). Three of
+//! its four trigger conditions get their own property test here, fixing the
+//! roll mode and letting dice pools, to-hit, AC, weapon-qualification and
+//! ally-adjacency vary freely: normal (only an adjacent ally can open the
+//! gate), advantage (the gate is open regardless of an ally), and disadvantage
+//! (the gate never opens, even with a qualifying weapon and an ally in place).
+//! The fourth trigger condition - critical-hit doubling of the *rider's own*
+//! dice, not just the weapon's - gets a dedicated property test, because
+//! "matches the exact PMF" and "matches what un-doubled rider dice would
+//! produce" are numerically close enough that a coarse check (comparing means,
+//! say) could pass on a subtly broken implementation that only doubles the
+//! weapon's pool.
 //!
 //! Tolerances are the same derived formula as everywhere else in this
 //! project: five standard errors of the estimate, plus a floor so a
 //! probability-zero outcome is not held to a tolerance of exactly zero.
 
-use crucible_core::{damage_pmf, sample_damage, Attack, Defense, Rider, Rng, RollMode};
+use crucible_core::creature::Rider;
+use crucible_core::prob::Rng;
+use crucible_core::rules::{damage_pmf, sample_damage, Attack, Defense, RollMode};
 use proptest::prelude::*;
-
 /// Matches the sample counts `exact_vs_sampled.rs` and `duel_agreement.rs`
 /// use for a single attack, scaled down a little because `proptest` repeats
 /// this over many generated cases rather than a fixed handful.
@@ -43,7 +46,8 @@ fn tolerance(p: f64, n: usize) -> f64 {
 }
 
 /// Sneak Attack as a bare `Rider`, before the gate decides whether it applies
-/// to a given attack - mirrors `rogue.rs`'s own `rider()` test helper.
+/// to a given attack - mirrors `features/classes/rogue/sneak_attack.rs`'s own
+/// `rider()` test helper.
 fn sneak_attack(dice_count: u32, dice_sides: u32) -> Rider {
     Rider::ConditionalExtraDamage {
         dice_count,
@@ -52,11 +56,11 @@ fn sneak_attack(dice_count: u32, dice_sides: u32) -> Rider {
     }
 }
 
-/// Applies Sneak Attack's rider to `attack` if its gate holds, exactly the
-/// way a real attack resolution would - see `Rider::extra_damage_for`. A
-/// fresh once-per-turn budget (`used_this_turn: false`) throughout: that
-/// budget is a gate-state concern `rogue.rs` already covers, not an
-/// exact-vs-sampled one.
+/// Applies Sneak Attack's rider to `attack` if its gate holds, exactly the way
+/// a real attack resolution would - see `Rider::extra_damage_for`. A fresh
+/// once-per-turn budget (`used_this_turn: false`) throughout: that budget is a
+/// gate-state concern `features/classes/rogue/sneak_attack.rs` already covers,
+/// not an exact-vs-sampled one.
 fn with_sneak_attack(attack: Attack, dice_count: u32, dice_sides: u32) -> Attack {
     match sneak_attack(dice_count, dice_sides).extra_damage_for(&attack, false) {
         Some(rider) => attack.with_damage_rider(rider),

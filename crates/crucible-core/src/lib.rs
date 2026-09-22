@@ -6,46 +6,21 @@
 //! to check against itself: a rollout engine with a biased d20 or a mishandled
 //! critical hit produces perfectly plausible numbers.
 //!
-//! Subsystems:
+//! Subsystems, in dependency order - each uses only the ones before it:
 //! - [`prob`]: Probability mass functions, dice convolution, exact curves, and deterministic PRNG.
-//! - [`rules`]: 5e combat rules, damage reduction, attack resolution, and combatant models.
-//! - [`sim`]: Simulation loop, AI policies, MCTS solver, and statistical CVaR analysis.
-//! - [`dsl`]: Data-driven configurations, Monad Plugin Architecture, PC/Monster abstractions, and scenario parsing.
+//! - [`rules`]: Core 5e rules - conditions, damage, saves, checks, spellcasting, attack resolution.
+//! - [`creature`]: The combatant model - moves, what they do, and the riders hanging off them.
+//! - [`sim`]: The fight engine, playstyle policies, the solver, and CVaR analysis.
+//! - [`dsl`]: The move and trait grammar ([`dsl::grammar`]), `.crucible` scenarios, and TOML configs.
+//! - [`features`]: The ruleset as plugins, one file per class feature, spell, monster trait or item.
+//!
+//! One exception: the file formats ([`dsl::scenario`], [`dsl::config`]) build
+//! creatures through [`features`], which comes after them. [`features`] itself
+//! only ever reaches back into [`dsl::grammar`], never a file format.
 
+pub mod creature;
 pub mod dsl;
+pub mod features;
 pub mod prob;
 pub mod rules;
 pub mod sim;
-
-// Subsystem aliases for backward-compatibility
-pub use dsl::scenario;
-pub use prob::dice;
-pub use prob::exact;
-pub use prob::rng;
-pub use rules::combat;
-pub use rules::creature;
-pub use sim::analysis;
-pub use sim::duel;
-
-// Top-level re-exports (backward compatibility)
-pub use analysis::{evaluate, sustained_rounds_to_kill, Summary};
-pub use combat::{
-    damage_pmf, hit_outcomes, hit_outcomes_with, hit_outcomes_with_reaction, outcomes,
-    resolve_mode, sample_attacks_to_kill, sample_damage, sample_hit, sample_hit_with,
-    sample_hit_with_reaction, sample_save_with, save_success_chance, Attack, AttackModifier,
-    DamageRider, Defense, Landed, Outcomes, Reduction, RollMode, SaveModifier,
-};
-pub use creature::{
-    Ability, AttackTrigger, Condition, Cost, Creature, CreatureType, DamageKind, DamageRoll,
-    Duration, Effect, HealRoll, Move, Resource, Rider, SaveEffect, Size, Strike, Uses,
-};
-pub use dice::Pmf;
-pub use duel::{run, Outcome, Policy, Side};
-pub use exact::{expected_attacks_to_kill, kill_curve};
-pub use rng::Rng;
-
-// Monad Plugin and PC / Monster abstractions
-pub use dsl::{
-    load_creature_from_file, load_creature_from_str, CreatureBuilder, FeatureError, FeaturePlugin,
-    FeatureRegistry, FeatureResult, MonsterDefinition, PlayerCharacter,
-};

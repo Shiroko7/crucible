@@ -1,12 +1,9 @@
 //! Formats and prints the minimax party size sweep table.
 
-use crucible_core::analysis::{evaluate_teams, Summary};
-use crucible_core::creature::Creature;
-use crucible_core::duel::Policy;
-
 use crate::args::{Args, MONSTER_STYLES, PARTY_STYLES};
 use crate::report::sheet::strip_number;
-
+use crucible_core::creature::Creature;
+use crucible_core::sim::{evaluate_teams, Policy, Summary};
 /// Rebuild the roster with `copies` of each creature on the first side, or leave
 /// it alone when `copies` is zero.
 pub fn resize(parsed: &[Creature], copies: usize) -> Vec<Creature> {

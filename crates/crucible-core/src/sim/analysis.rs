@@ -14,11 +14,11 @@
 //! to drop the other and the other needs two, no amount of sampling should
 //! report a close fight.
 
+use crate::creature::{Creature, Move};
 use crate::prob::dice::Pmf;
 use crate::prob::exact::expected_attacks_to_kill;
 use crate::prob::rng::Rng;
-use crate::rules::creature::{Creature, Move};
-use crate::sim::duel::{run_teams, run_with, Budget, Outcome, Policy, Side};
+use crate::sim::{run_teams, run_with, Budget, Outcome, Policy, Side};
 
 /// The fraction of outcomes CVaR averages over.
 const TAIL: f64 = 0.10;
@@ -348,7 +348,8 @@ impl Summary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::creature::{DamageKind, DamageRoll, Effect, Strike};
+    use crate::creature::{Effect, Strike};
+    use crate::rules::{DamageKind, DamageRoll};
 
     fn puncher(name: &str, ac: i32, hp: i32, to_hit: i32, bonus: i32) -> Creature {
         Creature::new(name, ac, hp).with_action(Move::new(

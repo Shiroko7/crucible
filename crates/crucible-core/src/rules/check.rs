@@ -1,32 +1,31 @@
 //! Ability and skill checks: 5e's third kind of d20 roll, after attack rolls
-//! ([`crate::rules::combat`]) and saving throws
-//! ([`crate::rules::creature::SaveEffect`]).
+//! ([`crate::rules::Attack`]) and saving throws
+//! ([`crate::creature::SaveEffect`]).
 //!
 //! Nothing here rolled one before this module existed - `Condition::Poisoned`'s
 //! disadvantage on its own ability checks and `Condition::Blinded`'s
 //! auto-failed sight-based checks both cite this exact gap in their doc
-//! comments (see [`crate::rules::creature::Condition`]). Rather than build the
+//! comments (see [`crate::rules::Condition`]). Rather than build the
 //! full subsystem those conditions would eventually want - skills, tools,
 //! contested checks, a positioning-dependent DC - this is the minimal
 //! mechanism Reliable Talent actually needs: a d20 roll, under a
 //! [`RollMode`], with an optional floor under the raw roll.
 //!
 //! Like a saving throw and unlike an attack roll, a check has no natural-1 or
-//! natural-20 rule - as [`crate::rules::creature::SaveEffect::failure_chance`]
+//! natural-20 rule - as [`crate::creature::SaveEffect::failure_chance`]
 //! already notes for saves, this is a flat count of faces, not three special
 //! cases.
 
 use crate::prob::dice::Pmf;
 use crate::prob::rng::Rng;
-
-use super::combat::RollMode;
+use crate::rules::RollMode;
 
 /// One ability, skill or tool check against a DC.
 ///
 /// `floor` is Reliable Talent's whole mechanism: a raw roll below it is
 /// treated as it instead - a floor, not a reroll, so it can only ever raise
 /// what was rolled, never lower it. Set it from
-/// [`crate::rules::creature::Creature::check_floor`] when the check being
+/// [`crate::creature::Creature::check_floor`] when the check being
 /// made is one the creature is proficient in; leave it `None` otherwise,
 /// including for a creature that has no such feature at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

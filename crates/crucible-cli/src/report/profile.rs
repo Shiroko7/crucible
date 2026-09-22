@@ -1,11 +1,8 @@
 //! Formats and prints the playstyle profile and monster sweep tables.
 
-use crucible_core::analysis::{evaluate_teams, Summary};
-use crucible_core::creature::Creature;
-use crucible_core::duel::Policy;
-
 use crate::args::Args;
-
+use crucible_core::creature::Creature;
+use crucible_core::sim::{evaluate_teams, Policy, Summary};
 pub fn print_profile(args: &Args, roster: &[&Creature]) {
     let monster = Policy::Greedy;
     let names = side_names(args, roster);

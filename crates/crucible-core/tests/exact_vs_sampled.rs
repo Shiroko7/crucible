@@ -19,11 +19,11 @@
 //! The seeds are fixed, so a failure here is reproducible rather than a flake
 //! to be re-run until it goes away.
 
-use crucible_core::{
-    damage_pmf, expected_attacks_to_kill, kill_curve, sample_attacks_to_kill, sample_damage,
-    Attack, AttackModifier, DamageRider, Defense, Reduction, Rng, RollMode,
+use crucible_core::prob::{expected_attacks_to_kill, kill_curve, Rng};
+use crucible_core::rules::{
+    damage_pmf, sample_attacks_to_kill, sample_damage, Attack, AttackModifier, DamageRider,
+    Defense, Reduction, RollMode,
 };
-
 const DAMAGE_SAMPLES: usize = 200_000;
 const KILL_SAMPLES: usize = 100_000;
 

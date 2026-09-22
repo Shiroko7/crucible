@@ -18,12 +18,9 @@
 //! reason as in the original: a number picked because it passed would test
 //! nothing. Seeds are fixed so a failure is reproducible.
 
-use crucible_core::creature::Rider;
-use crucible_core::creature::{
-    Ability, Creature, DamageKind, DamageRoll, Effect, SaveEffect, Strike,
-};
-use crucible_core::{AttackModifier, Reduction, Rng, RollMode};
-
+use crucible_core::creature::{Creature, Effect, Rider, SaveEffect, Strike};
+use crucible_core::prob::Rng;
+use crucible_core::rules::{Ability, AttackModifier, DamageKind, DamageRoll, Reduction, RollMode};
 const SAMPLES: usize = 200_000;
 
 fn tolerance(p: f64, n: usize) -> f64 {
@@ -40,7 +37,12 @@ fn target(ac: i32, save: i32, reductions: &[(DamageKind, Reduction)]) -> Creatur
 /// Compares a sampled histogram against an exact PMF, outcome by outcome.
 /// Stronger than comparing means, which a distribution with the right average
 /// in the wrong places would pass.
-fn agree(name: &str, seed: u64, exact: &crucible_core::Pmf, mut draw: impl FnMut(&mut Rng) -> i32) {
+fn agree(
+    name: &str,
+    seed: u64,
+    exact: &crucible_core::prob::Pmf,
+    mut draw: impl FnMut(&mut Rng) -> i32,
+) {
     let mut rng = Rng::new(seed);
     let (lo, hi) = (exact.min(), exact.max());
     assert!(lo >= 0, "{name}: damage should never be negative");
@@ -250,9 +252,9 @@ fn mean_damage_matches_a_hand_calculation() {
 }
 
 /// The same `AttackModifier`/damage-rider hook `exact_vs_sampled.rs` checks
-/// against the single-pool [`crucible_core::Attack`], checked again here
+/// against the single-pool [`crucible_core::rules::Attack`], checked again here
 /// against a multi-type [`Strike`] - Bless on the roll, Sneak Attack's dice on
-/// the damage - since that is the type `sim::duel` actually resolves against,
+/// the damage - since that is the type `sim::fight` actually resolves against,
 /// and a hook that only worked on the standalone test fixture would not be a
 /// hook at all.
 #[test]
@@ -307,7 +309,7 @@ fn attack_modifiers_and_damage_riders_agree_on_a_multi_type_strike() {
 /// finalized rather than a modifier folded into the roll like
 /// [`AttackModifier`] or a rider appended to the damage like the sneak
 /// attack case above, so it gets its own agreement check - on the same
-/// multi-type [`Strike`] `sim::duel` actually resolves against, the same way
+/// multi-type [`Strike`] `sim::fight` actually resolves against, the same way
 /// the case above does for `AttackModifier`/`DamageRider`.
 #[test]
 fn a_reactive_ac_boost_agrees_with_the_exact_path_on_a_multi_type_strike() {
@@ -370,7 +372,7 @@ fn a_reactive_ac_boost_agrees_with_the_exact_path_on_a_multi_type_strike() {
 /// check the exact and sampled paths still agree on the AC that comes out.
 #[test]
 fn an_item_ac_bonus_trait_composes_into_ac_and_still_agrees_with_the_exact_path() {
-    let boosted = crucible_core::scenario::parse(
+    let boosted = crucible_core::dsl::scenario::parse(
         "creature: x\nac: 14\nhp: 1000\ntrait: ac 2\ntrait: ac bonus 2\n",
     )
     .expect("an ac-boosted creature parses")
@@ -389,14 +391,14 @@ fn an_item_ac_bonus_trait_composes_into_ac_and_still_agrees_with_the_exact_path(
 }
 
 /// The mirror case for the spell attack/DC bonus: it composes additively
-/// into [`crucible_core::creature::SpellCastingProfile::item_bonus`], and the
+/// into [`crucible_core::rules::SpellCastingProfile::item_bonus`], and the
 /// resulting DC is then just an ordinary saving throw DC, so the same
 /// agreement machinery [`a_saving_throw_samples_like_its_exact_distribution`]
 /// uses applies unchanged - the point is that the number the trait produces
 /// is the number both paths already agree on.
 #[test]
 fn an_item_spell_dc_bonus_composes_and_still_agrees_with_the_exact_path() {
-    let registry = crucible_core::FeatureRegistry::new();
+    let registry = crucible_core::features::FeatureRegistry::new();
     let toml = r#"
         [pc]
         name = "Test Caster"
@@ -409,7 +411,7 @@ fn an_item_spell_dc_bonus_composes_and_still_agrees_with_the_exact_path() {
         ability_modifier = 3
         proficiency_bonus = 2
     "#;
-    let caster = crucible_core::load_creature_from_str(toml, &registry)
+    let caster = crucible_core::dsl::config::load_creature_from_str(toml, &registry)
         .expect("a caster with a spell-bonus trait parses");
     // 3 (INT mod) + 2 (proficiency) + 2 (item, from the trait) = 7; DC 15.
     assert_eq!(caster.spell_save_dc(), Some(15));

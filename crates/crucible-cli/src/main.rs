@@ -1,10 +1,9 @@
-//! Read a scenario or formatted creature configuration, fight it many times, and report results.
-
-use std::process::ExitCode;
+//! Read a scenario or formatted creature configuration, fight it many times,
+//! and report results.
 
 use crucible_core::creature::Creature;
-use crucible_core::scenario;
-
+use crucible_core::dsl::scenario;
+use std::process::ExitCode;
 mod args;
 mod report;
 
