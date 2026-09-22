@@ -25,12 +25,27 @@ impl<'a> Fight<'a> {
     /// creature, and nothing but its swallower from inside one - see
     /// [`Fight::reaches`].
     pub(super) fn pick_target(&self, me: usize) -> Option<usize> {
+        self.pick_target_in(me, |f, i| f.reaches(me, i))
+    }
+
+    /// [`Fight::pick_target`] among the living enemies `eligible` allows. A
+    /// creature with a mouth goes after the nearest of them first - see
+    /// [`crate::creature::Zone::distance`] - and applies its rule among
+    /// those.
+    pub(super) fn pick_target_in(
+        &self,
+        me: usize,
+        eligible: impl Fn(&Self, usize) -> bool,
+    ) -> Option<usize> {
         let side = self.fighters[me].side;
-        let enemies: Vec<usize> = (0..self.fighters.len())
-            .filter(|&i| {
-                self.fighters[i].side != side && self.fighters[i].alive() && self.reaches(me, i)
-            })
+        let mut enemies: Vec<usize> = (0..self.fighters.len())
+            .filter(|&i| self.fighters[i].side != side && self.fighters[i].alive())
+            .filter(|&i| eligible(self, i))
             .collect();
+        if self.has_mouth(me) {
+            let nearest = enemies.iter().map(|&i| self.zone(i, me).distance()).min();
+            enemies.retain(|&i| Some(self.zone(i, me).distance()) == nearest);
+        }
         if enemies.is_empty() {
             return None;
         }
@@ -65,16 +80,38 @@ impl<'a> Fight<'a> {
     /// advantage adds to the chosen action, Sneak Attack it unlocks included,
     /// so it competes on the same footing as a bonus action that simply
     /// deals damage.
-    pub(super) fn decide(&self, round: u32, me: usize, target: usize, rng: &mut Rng) -> Plan {
+    ///
+    /// Going after a creature with a mouth, where to stand comes before
+    /// either (see [`Fight::zone_choice`]), and both are chosen as if already
+    /// standing there.
+    pub(super) fn decide(&mut self, round: u32, me: usize, target: usize, rng: &mut Rng) -> Plan {
         if let Some((who, plan)) = self.rollout_plan {
             if who == me {
                 return self.repair(me, target, plan);
             }
         }
-        let f = &self.fighters[me];
-        if f.policy == Policy::Solver {
+        if self.fighters[me].policy == Policy::Solver {
             return self.search(round, me, rng);
         }
+        let zone = self.zone_choice(me, target);
+        let here = zone.map(|_| self.zone(me, target));
+        if let Some(z) = zone {
+            self.set_zone(me, target, z);
+        }
+        let (action, bonus) = self.choose_moves(me, target);
+        if let Some(back) = here {
+            self.set_zone(me, target, back);
+        }
+        Plan {
+            action,
+            bonus,
+            zone,
+        }
+    }
+
+    /// The action, then the bonus action, the policy picks against `target`.
+    fn choose_moves(&self, me: usize, target: usize) -> (Option<usize>, Option<usize>) {
+        let f = &self.fighters[me];
         let action = f
             .policy
             .choose(Slot::Action.moves(f.creature), &f.actions, f, |m| {
@@ -86,7 +123,7 @@ impl<'a> Fight<'a> {
             .choose(Slot::Bonus.moves(f.creature), &f.bonus_actions, f, |m| {
                 self.bonus_value(me, target, m, lead)
             });
-        Plan { action, bonus }
+        (action, bonus)
     }
 
     /// Keep a rollout on the plan under test, falling back slot by slot to greedy
@@ -117,6 +154,8 @@ impl<'a> Fight<'a> {
         Plan {
             action: fix(Slot::Action, plan.action),
             bonus: fix(Slot::Bonus, plan.bonus),
+            // Heads for the same place every turn, as far as it can get.
+            zone: plan.zone,
         }
     }
 

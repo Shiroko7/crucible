@@ -1,7 +1,7 @@
 //! Moves - what a creature spends an action, bonus action or legendary
 //! action on - and the pools and budgets that pay for them.
 
-use crate::creature::{Creature, Effect, Rider};
+use crate::creature::{Creature, Effect, Reach, Rider};
 
 /// A pool several moves draw on: focus points, ki, sorcery points, superiority
 /// dice. Distinct from [`crate::creature::Uses`], which is one move's private
@@ -116,6 +116,10 @@ pub struct Move {
     /// legendary action - "Costs 2 Actions", "(2 Points)". Read only there;
     /// 1 for every ordinary move.
     pub legendary_cost: u32,
+    /// Which zones around a creature with a mouth this reaches - see
+    /// [`crate::creature::Creature::mouth`]. [`Reach::Any`] for every
+    /// ordinary move, and ignored on any creature without a mouth.
+    pub reach: Reach,
 }
 
 impl Move {
@@ -132,6 +136,7 @@ impl Move {
             before_action: false,
             bypasses_casting_restrictions: false,
             legendary_cost: 1,
+            reach: Reach::Any,
         }
     }
 
@@ -186,6 +191,12 @@ impl Move {
     /// [`Move::legendary_cost`].
     pub fn with_legendary_cost(mut self, n: u32) -> Self {
         self.legendary_cost = n;
+        self
+    }
+
+    /// Reach only these zones - see [`Move::reach`].
+    pub fn with_reach(mut self, reach: Reach) -> Self {
+        self.reach = reach;
         self
     }
 

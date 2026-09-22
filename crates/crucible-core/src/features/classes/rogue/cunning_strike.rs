@@ -181,7 +181,7 @@ pub fn cunning_strike_poison(sneak_attack: DamageRider, dc: i32) -> Option<(Dama
     let effect = Rider::SaveOrCondition {
         ability: Ability::Con,
         dc,
-        condition: Condition::Poisoned,
+        conditions: vec![Condition::Poisoned],
         duration: Duration::SaveEndTurn {
             ability: Ability::Con,
             dc,
@@ -484,7 +484,7 @@ mod tests {
             Rider::SaveOrCondition {
                 ability: Ability::Con,
                 dc,
-                condition: Condition::Poisoned,
+                conditions: vec![Condition::Poisoned],
                 duration: Duration::SaveEndTurn {
                     ability: Ability::Con,
                     dc,
@@ -586,13 +586,14 @@ mod tests {
         let Rider::SaveOrCondition {
             ability,
             dc,
-            condition,
+            conditions,
             ..
         } = effect
         else {
             panic!("cunning_strike_poison must build a SaveOrCondition effect");
         };
-        assert_eq!(condition, Condition::Poisoned);
+        assert_eq!(conditions, vec![Condition::Poisoned]);
+        let condition = conditions[0];
 
         // Without the downgrade trait: the zombie's immunity is untouched,
         // so it is unaffected outright, however the dice would have landed.

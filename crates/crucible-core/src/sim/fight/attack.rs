@@ -191,6 +191,8 @@ impl<'a> Fight<'a> {
                 && !f.incapacitated()
                 && f.melee
                 && self.pick_target(i) == Some(target)
+                // Around a creature with a mouth, only one standing beside it.
+                && (!self.has_mouth(target) || self.zone(i, target).in_melee())
         })
     }
 }

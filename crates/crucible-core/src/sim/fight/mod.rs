@@ -46,14 +46,20 @@
 //! modify another rider. Getting from this to the real pipeline is a refactor of
 //! this file, not of the data.
 //!
-//! **Positioning is still absent**, and with more than one creature a side that
-//! costs more than it used to. There is no movement, reach or flight, so an area
-//! effect is assumed to catch every enemy - the pessimistic reading, since a
-//! party that spread out would not all be in one cone. `max_targets` on a saving
-//! throw is the only control over that. "An ally within 5 feet of the target",
-//! which Sneak Attack asks about, is read off who is fighting what instead: see
-//! [`Fight::ally_adjacent`]. The one kind of reach there is comes from being
-//! swallowed - see [`Fight::reaches`].
+//! **Positioning is mostly absent**, and with more than one creature a side that
+//! costs more than it used to. There is no map, so an area effect is assumed to
+//! catch every enemy - the pessimistic reading, since a party that spread out
+//! would not all be in one cone. `max_targets` on a saving throw is the only
+//! control over that. "An ally within 5 feet of the target", which Sneak Attack
+//! asks about, is read off who is fighting what instead: see
+//! [`Fight::ally_adjacent`].
+//!
+//! Two kinds of reach do exist. A swallowed creature is cut off from everything
+//! but its swallower's insides - see [`Fight::reaches`]. And around a creature
+//! with a mouth, every enemy stands in one of four zones, which decide what
+//! reaches what, move with pulls, pushes and each side's movement, and are
+//! chosen like any other part of a turn - see `zones` and
+//! [`crate::creature::Zone`].
 //!
 //! [`Rider::ReactionOnTargeted`]: crate::creature::Rider::ReactionOnTargeted
 //! [`Rider::ReduceDamage`]: crate::creature::Rider::ReduceDamage
@@ -86,8 +92,9 @@ mod test_support;
 mod threshold;
 mod turn;
 mod value;
+mod zones;
 
-use crate::creature::Creature;
+use crate::creature::{Creature, Zone};
 use crate::prob::Rng;
 use crate::rules::{Ability, AttackModifier, Condition, DamageRoll, SaveModifier, SpellSlots};
 use crate::sim::Policy;
@@ -202,6 +209,12 @@ struct Fighter<'a> {
     /// one has swallowed, which is what
     /// [`crate::creature::Rider::Regurgitate`] measures.
     inside_damage: i32,
+    /// Where this creature stands around each creature with a mouth, indexed
+    /// by that creature's roster seat - see [`crate::creature::Zone`]. Read
+    /// only for a seat that has one.
+    zones: Vec<Zone>,
+    /// Stood up from Prone as this turn began, which costs a move.
+    stood_up: bool,
     dealt: i64,
     /// Resource points and limited uses burnt. This is the second column of the
     /// table `DESIGN.md` wants, because a win probability means nothing without
@@ -311,6 +324,9 @@ pub struct Outcome {
 pub struct Plan {
     pub action: Option<usize>,
     pub bonus: Option<usize>,
+    /// Where to stand around the target before acting, when the target is a
+    /// creature with a mouth - see [`crate::creature::Zone`].
+    pub zone: Option<Zone>,
 }
 
 /// What [`Policy::Solver`] is allowed to spend thinking.
@@ -407,7 +423,7 @@ impl<'a> Fight<'a> {
             l.push(format!("initiative: {}", line.join(", ")));
         }
 
-        Self {
+        let mut fight = Self {
             order: rolled.into_iter().map(|(_, _, i)| i).collect(),
             fighters,
             turns_lost: [0; 2],
@@ -416,7 +432,10 @@ impl<'a> Fight<'a> {
             rollout_plan: None,
             acting: None,
             sole_target: None,
-        }
+        };
+        // Out in front of anything with a mouth, one move from closing in.
+        fight.place_everyone(Zone::Range);
+        fight
     }
 
     fn phases(&self) -> usize {

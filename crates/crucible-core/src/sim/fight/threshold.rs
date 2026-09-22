@@ -3,7 +3,7 @@
 //! in full - and may crack the shell and set off a reaction - and a weak spot
 //! skips the threshold for a resistance of its own.
 
-use crate::creature::{Creature, ReactionTrigger};
+use crate::creature::{AttackKind, Creature, ReactionTrigger, Zone};
 use crate::prob::{Pmf, Rng};
 use crate::rules::{Condition, DamageKind, Reduction};
 use crate::sim::fight::conditions::halve_if_suppressed;
@@ -25,12 +25,22 @@ impl<'a> Fight<'a> {
     /// threshold?
     ///
     /// From inside - `from` is swallowed by `to` - always. From outside only
-    /// an attack roll does, and only while the weak spot is open:
-    /// [`Condition::Exposed`] and not [`Condition::Sealed`], or
-    /// [`Condition::Cracked`], which sealing does not close. An area or a
-    /// dart is aimed at the creature, not at a spot on it. A creature
-    /// without a damage threshold has no weak spot to reach.
-    pub(super) fn through_weak_spot(&self, from: usize, to: usize, attack_roll: bool) -> bool {
+    /// an attack roll does (an area or a dart is aimed at the creature, not a
+    /// spot on it), and only through an open one:
+    ///
+    /// - [`Condition::Cracked`], which nothing closes;
+    /// - a mouth (see [`crate::creature::Creature::mouth`]), open unless
+    ///   [`Condition::Sealed`], reached by a melee attack at the mouth or a
+    ///   ranged one from anywhere in front of it;
+    /// - otherwise, a weak spot [`Condition::Exposed`] and not sealed.
+    ///
+    /// A creature without a damage threshold has no weak spot to reach.
+    pub(super) fn through_weak_spot(
+        &self,
+        from: usize,
+        to: usize,
+        attack: Option<AttackKind>,
+    ) -> bool {
         let target = &self.fighters[to];
         if target.creature.damage_threshold().is_none() {
             return false;
@@ -38,10 +48,22 @@ impl<'a> Fight<'a> {
         if self.fighters[from].swallowed_by() == Some(to) {
             return true;
         }
-        attack_roll
-            && (target.has(|c| c == Condition::Cracked)
-                || (target.has(|c| c == Condition::Exposed)
-                    && !target.has(|c| c == Condition::Sealed)))
+        let Some(kind) = attack else {
+            return false;
+        };
+        if target.has(|c| c == Condition::Cracked) {
+            return true;
+        }
+        let open = if target.creature.mouth {
+            let zone = self.zone(from, to);
+            match kind.ranged {
+                true => zone.in_front(),
+                false => zone == Zone::Mouth,
+            }
+        } else {
+            target.has(|c| c == Condition::Exposed)
+        };
+        open && !target.has(|c| c == Condition::Sealed)
     }
 
     /// Land `raw` damage from `me` on `target`: halved if `me` is
@@ -137,6 +159,8 @@ mod tests {
     use crate::sim::fight::test_support::{fight_of, strike_once};
     use crate::sim::Side;
 
+    const MELEE: Option<AttackKind> = Some(AttackKind::MELEE_WEAPON);
+
     fn shell(threshold: i32, cracks: bool) -> Creature {
         Creature::new("shell", 15, 10_000_000).with_rider(Rider::DamageThreshold {
             threshold,
@@ -191,16 +215,16 @@ mod tests {
         let target = shell(20, true);
         let (mut fight, mut rng) = fight_of(&[(&attacker, Side::A), (&target, Side::B)], 1);
 
-        assert!(!fight.through_weak_spot(0, 1, true));
+        assert!(!fight.through_weak_spot(0, 1, MELEE));
         fight.deal(&mut rng, 0, 1, 25, false);
         assert!(
-            fight.through_weak_spot(0, 1, true),
+            fight.through_weak_spot(0, 1, MELEE),
             "an attack roll finds the crack"
         );
-        assert!(!fight.through_weak_spot(0, 1, false), "an area does not");
+        assert!(!fight.through_weak_spot(0, 1, None), "an area does not");
         fight.end_of_round();
         assert!(
-            !fight.through_weak_spot(0, 1, true),
+            !fight.through_weak_spot(0, 1, MELEE),
             "it closes with the round"
         );
     }
@@ -212,12 +236,12 @@ mod tests {
         let (mut fight, _) = fight_of(&[(&attacker, Side::A), (&target, Side::B)], 1);
 
         fight.apply_condition(1, Condition::Exposed, Expiry::TurnStart(1));
-        assert!(fight.through_weak_spot(0, 1, true));
+        assert!(fight.through_weak_spot(0, 1, MELEE));
         fight.apply_condition(1, Condition::Sealed, Expiry::TurnStart(1));
-        assert!(!fight.through_weak_spot(0, 1, true), "sealed shut");
+        assert!(!fight.through_weak_spot(0, 1, MELEE), "sealed shut");
         fight.apply_condition(1, Condition::Cracked, Expiry::RoundEnd);
         assert!(
-            fight.through_weak_spot(0, 1, true),
+            fight.through_weak_spot(0, 1, MELEE),
             "a crack is not a mouth"
         );
     }
@@ -231,8 +255,8 @@ mod tests {
         let (mut fight, _) = fight_of(&[(&prey, Side::A), (&target, Side::B)], 1);
         assert!(fight.swallow(1, 0, Size::Huge));
         fight.apply_condition(1, Condition::Sealed, Expiry::TurnStart(1));
-        assert!(fight.through_weak_spot(0, 1, true));
-        assert!(fight.through_weak_spot(0, 1, false));
+        assert!(fight.through_weak_spot(0, 1, MELEE));
+        assert!(fight.through_weak_spot(0, 1, None));
     }
 
     /// The exact value of a hit against a shell - its whole distribution cut

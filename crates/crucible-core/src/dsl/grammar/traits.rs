@@ -34,6 +34,12 @@ pub enum TraitEffect {
     SpellBonus(i32),
     /// Resistance to one or more damage types.
     Resistance(Vec<DamageKind>),
+    /// Enemies stand around this creature - see
+    /// [`crate::creature::Creature::mouth`].
+    Mouth,
+    /// Around it, enemies move one zone a turn - see
+    /// [`crate::creature::Creature::difficult_terrain`].
+    DifficultTerrain,
 }
 
 impl TraitEffect {
@@ -67,6 +73,8 @@ impl TraitEffect {
                     creature.reductions.push((kind, Reduction::Resistant));
                 }
             }
+            Self::Mouth => creature.mouth = true,
+            Self::DifficultTerrain => creature.difficult_terrain = true,
         }
         Ok(())
     }
@@ -361,6 +369,13 @@ pub(crate) fn parse_trait(value: &str) -> Result<TraitEffect, String> {
                 cracks,
                 weak_spot_resists,
             }))
+        }
+        // `mouth` - enemies stand around it: at its mouth, beside its body,
+        // or out in front.
+        "mouth" if words.len() == 1 => Ok(TraitEffect::Mouth),
+        // `difficult terrain` - around it, enemies move one zone a turn.
+        "difficult" if words.len() == 2 && words[1].eq_ignore_ascii_case("terrain") => {
+            Ok(TraitEffect::DifficultTerrain)
         }
         // `digest 8d6 acid, 4d6 cold` - what each swallowed creature takes at
         // the start of this creature's turns.

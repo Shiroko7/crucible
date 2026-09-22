@@ -1,7 +1,7 @@
 //! What a move is worth right now, in expected damage or healing - the
 //! number every ranking policy compares.
 
-use crate::creature::{Creature, Effect, Move, Rider, Strike};
+use crate::creature::{Creature, Effect, Move, Reach, Rider, Strike, Zone};
 use crate::prob::Pmf;
 use crate::rules::{
     hit_outcomes_with, AttackModifier, Condition, DamageKind, DamageRoll, HealRoll, Reduction,
@@ -19,8 +19,14 @@ impl<'a> Fight<'a> {
     /// count towards choosing the move that earns them - or, for a heal, the
     /// downed ally it would bring back. `steady` scores an attack as though
     /// the attacker had advantage on it.
+    ///
+    /// A move none of which can land on `target` from here - out of reach
+    /// around a creature with a mouth, or swallowed - is not a choice at all.
     pub(super) fn move_value(&self, me: usize, target: usize, m: &Move, steady: bool) -> f64 {
-        self.effect_value(me, target, &m.effect, &m.riders, steady)
+        if !self.move_lands(me, target, m) {
+            return f64::NEG_INFINITY;
+        }
+        self.effect_value(me, target, &m.effect, &m.riders, m.reach, steady)
     }
 
     fn effect_value(
@@ -29,16 +35,20 @@ impl<'a> Fight<'a> {
         target: usize,
         effect: &Effect,
         riders: &[Rider],
+        reach: Reach,
         steady: bool,
     ) -> f64 {
         let attacker = self.fighters[me].creature;
         let victim = self.fighters[target].creature;
         match effect {
-            // Anything aimed at a creature out of reach - swallowed, or
-            // outside the one that swallowed `me` - lands nowhere.
-            Effect::Strikes { .. } | Effect::Save(_) | Effect::AutoHit { .. }
-                if !self.reaches(me, target) =>
+            // A part aimed at a creature out of its reach - swallowed, out of
+            // a bite's reach, behind a cone - lands nowhere.
+            Effect::Strikes { strike, .. }
+                if !self.in_reach(me, target, reach, Some(strike.kind)) =>
             {
+                0.0
+            }
+            Effect::Save(_) | Effect::AutoHit { .. } if !self.in_reach(me, target, reach, None) => {
                 0.0
             }
             Effect::Strikes { strike, count } => {
@@ -47,14 +57,15 @@ impl<'a> Fight<'a> {
             Effect::Heal(roll) => self.heal_value(me, roll),
             Effect::Sequence(parts) => parts
                 .iter()
-                .map(|p| self.effect_value(me, target, p, riders, steady))
+                .map(|p| self.effect_value(me, target, p, riders, reach, steady))
                 .sum(),
-            Effect::WithRiders {
+            Effect::Part {
                 effect,
                 riders: own,
+                reach: own_reach,
             } => {
                 let riders: Vec<Rider> = riders.iter().chain(own).cloned().collect();
-                self.effect_value(me, target, effect, &riders, steady)
+                self.effect_value(me, target, effect, &riders, own_reach.within(reach), steady)
             }
             // A save only some creature types are subject to, against a
             // target that is not one: it catches nobody.
@@ -67,12 +78,12 @@ impl<'a> Fight<'a> {
                 f64::NEG_INFINITY
             }
             Effect::Save(save) => {
-                let weak = self.through_weak_spot(me, target, false);
+                let weak = self.through_weak_spot(me, target, None);
                 let pmf = save.damage_pmf_by(victim, &reducer(attacker, victim, weak));
                 self.past_threshold(target, weak, pmf).mean()
             }
             Effect::AutoHit { damage } => {
-                let weak = self.through_weak_spot(me, target, false);
+                let weak = self.through_weak_spot(me, target, None);
                 let reduce = reducer(attacker, victim, weak);
                 damage
                     .iter()
@@ -200,7 +211,7 @@ impl<'a> Fight<'a> {
                 extra,
             )
         };
-        if !self.through_weak_spot(me, target, true) {
+        if !self.through_weak_spot(me, target, Some(strike.kind)) {
             return (hit(false), false);
         }
         if attacker.swallowed_by() == Some(target) {
@@ -232,7 +243,7 @@ pub(super) fn first_strike(effect: &Effect) -> Option<&Strike> {
     match effect {
         Effect::Strikes { strike, .. } => Some(strike),
         Effect::Sequence(parts) => parts.iter().find_map(first_strike),
-        Effect::WithRiders { effect, .. } => first_strike(effect),
+        Effect::Part { effect, .. } => first_strike(effect),
         _ => None,
     }
 }
@@ -281,9 +292,11 @@ fn expected_hit(
 /// fight, in expected damage - the number the ranking policies compare, with
 /// every rider that would apply to the attack included (a slaying weapon's
 /// dice, say) and none that needs a situation the fight has not produced yet
-/// (Sneak Attack without advantage or an ally beside the target).
+/// (Sneak Attack without advantage or an ally beside the target). Around a
+/// creature with a mouth, the two are face to face at its mouth, where
+/// everything reaches.
 pub fn expected_damage(attacker: &Creature, m: &Move, target: &Creature) -> f64 {
-    let fight = Fight {
+    let mut fight = Fight {
         fighters: vec![
             Fighter::new(attacker, Side::A, Policy::Greedy, 0),
             Fighter::new(target, Side::B, Policy::Greedy, 1),
@@ -296,6 +309,7 @@ pub fn expected_damage(attacker: &Creature, m: &Move, target: &Creature) -> f64 
         acting: None,
         sole_target: None,
     };
+    fight.place_everyone(Zone::Mouth);
     fight.move_value(0, 1, m, false)
 }
 

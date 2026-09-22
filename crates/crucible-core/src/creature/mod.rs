@@ -9,6 +9,7 @@ mod combatant;
 mod effect;
 mod moves;
 mod rider;
+mod zone;
 
 pub use combatant::Creature;
 pub use effect::{AttackKind, Effect, SaveEffect, Strike};
@@ -17,3 +18,4 @@ pub use rider::{
     injury_poison_forcing_save, save_success_probability, saving_throw_against_condition,
     AttackTrigger, Rider,
 };
+pub use zone::{Reach, Tactic, Zone};

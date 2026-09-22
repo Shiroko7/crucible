@@ -3,7 +3,7 @@
 //! Represents a monster or NPC combatant defined by its statblock, challenge rating (CR),
 //! traits, actions, and legendary actions.
 
-use crate::creature::Creature;
+use crate::creature::{Creature, Tactic};
 use crate::features::{CreatureBuilder, FeatureError, FeatureRegistry, FeatureResult};
 use crate::rules::{Ability, Condition, CreatureType, DamageKind, Reduction, Size};
 use serde::Deserialize;
@@ -55,6 +55,10 @@ pub struct MonsterDefinition {
     /// See [`crate::creature::Creature::auras`].
     #[serde(default)]
     pub auras: Vec<super::MoveEntry>,
+    /// How it moves, for a creature with a `mouth` trait: `hold`, `charge`
+    /// or `hit and run` - see [`crate::creature::Tactic`].
+    #[serde(default)]
+    pub tactic: Option<String>,
 }
 
 impl MonsterDefinition {
@@ -163,6 +167,14 @@ impl MonsterDefinition {
         for entry in &self.auras {
             let m = super::parse_move_entry(entry, &builder.creature)?;
             builder.creature.auras.push(m);
+        }
+
+        if let Some(name) = &self.tactic {
+            builder.creature.tactic = Tactic::parse(name).ok_or_else(|| {
+                FeatureError::InvalidConfiguration(format!(
+                    "`{name}` is not a tactic - use hold, charge or hit and run"
+                ))
+            })?;
         }
 
         builder.build()

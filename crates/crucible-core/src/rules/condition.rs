@@ -126,9 +126,9 @@ pub enum Condition {
     /// block's condition immunities need, and nothing more.
     Exhaustion,
     /// Dragged toward whoever applied it - a whirlpool's pull, a tentacle
-    /// reeling a creature in. There are no positions for the pull to change
-    /// (see `DESIGN.md`'s "Positioning is the gap that matters"), so on its
-    /// own it does nothing; it exists because being pulled in is what a
+    /// reeling a creature in. On its own it does nothing: around a creature
+    /// with a mouth it moves its victim one zone closer to the mouth (see
+    /// [`crate::creature::Zone::pulled`]), and being pulled in is what a
     /// reaction can wait for - see
     /// [`crate::creature::ReactionTrigger::EnemyGains`].
     Pulled,
@@ -149,10 +149,21 @@ pub enum Condition {
     /// puts this on its user as a stance.
     Exposed,
     /// Its weak spot is shut against attacks from outside, whatever opened it:
-    /// [`Condition::Exposed`] no longer lets anything through. A crack in its
-    /// shell ([`Condition::Cracked`]) is not a weak spot it can close, and a
-    /// creature it has swallowed is already inside.
+    /// [`Condition::Exposed`] no longer lets anything through, and neither
+    /// does a mouth. A crack in its shell ([`Condition::Cracked`]) is not a
+    /// weak spot it can close, and a creature it has swallowed is already
+    /// inside. It opens again the moment its holder attacks or takes a
+    /// legendary action - see [`Condition::lapses_on_attack`].
     Sealed,
+    /// Shoved away from whoever applied it - a slam, a blast of water. Like
+    /// [`Condition::Pulled`], it does nothing on its own; around a creature
+    /// with a mouth it moves its victim one zone further out (see
+    /// [`crate::creature::Zone::pushed`]).
+    Pushed,
+    /// Its speed is halved. Around a creature with a mouth it makes half its
+    /// usual moves a turn, rounded down - none at all through difficult
+    /// terrain. Nowhere else is there movement for it to slow.
+    Slowed,
     /// Its damage threshold has been breached: attack rolls aimed at the
     /// crack bypass the threshold until the end of the round. Put there by
     /// `sim::fight` when a breach happens, for a threshold that
@@ -180,6 +191,8 @@ impl Condition {
             "petrified" => Self::Petrified,
             "exhaustion" | "exhausted" => Self::Exhaustion,
             "pulled" => Self::Pulled,
+            "pushed" => Self::Pushed,
+            "slowed" => Self::Slowed,
             "swallowed" => Self::Swallowed,
             "exposed" => Self::Exposed,
             "sealed" => Self::Sealed,
@@ -213,6 +226,8 @@ impl Condition {
             Self::Petrified => "petrified",
             Self::Exhaustion => "exhaustion",
             Self::Pulled => "pulled",
+            Self::Pushed => "pushed",
+            Self::Slowed => "slowed",
             Self::Swallowed => "swallowed",
             Self::Exposed => "exposed",
             Self::Sealed => "sealed",
@@ -277,6 +292,12 @@ impl Condition {
     /// rather than leaving Steady Aim's speed clause unmodelled entirely.
     pub fn zeroes_speed(self) -> bool {
         matches!(self, Self::SteadyAim)
+    }
+
+    /// Ends the moment its holder makes an attack or takes a legendary
+    /// action: a mouth clamped shut has to open to bite.
+    pub fn lapses_on_attack(self) -> bool {
+        matches!(self, Self::Sealed)
     }
 
     pub fn auto_fails(self, ability: Ability) -> bool {
@@ -510,6 +531,8 @@ mod tests {
             Condition::Exposed,
             Condition::Sealed,
             Condition::Cracked,
+            Condition::Pushed,
+            Condition::Slowed,
         ] {
             assert_eq!(Condition::parse(c.name()), Some(c));
         }
@@ -625,6 +648,8 @@ mod tests {
             Condition::Exposed,
             Condition::Sealed,
             Condition::Cracked,
+            Condition::Pushed,
+            Condition::Slowed,
         ] {
             assert!(!c.incapacitated(), "{c:?}");
             assert!(!c.advantage_to_attackers(), "{c:?}");

@@ -48,7 +48,7 @@ times, reported.
 | grammar | `dsl::grammar` | the phrase grammar moves and traits are written in, shared by every creature format and by features that take a move as a parameter |
 | `scenario` | `dsl::scenario` | scenario parser supporting both external creature configs (`source:`) and inline declarations |
 | configs | `dsl::config` | TOML PC and Monster loaders |
-| fight | `sim::fight` | team combat rounds, one file per stage of a turn: initiative, action economy, auras, reactions, condition lifetimes, concentration, a damage threshold, swallowing, legendary actions of any cost between turns |
+| fight | `sim::fight` | team combat rounds, one file per stage of a turn: initiative, action economy, auras, reactions, condition lifetimes, concentration, a damage threshold, swallowing, where enemies stand around a creature with a mouth, legendary actions of any cost between turns |
 | `analysis` | `sim::analysis` | win and death probability, CVaR of the bad tail, exact pacing check |
 | policies | `sim::policy` | eight of the nine from `DESIGN.md`: `solver`, `nova`, `greedy`, `focus-fire`, `scattered`, `in-order`, `defensive`, `attrition`, `thrifty` |
 | search | `sim::fight` | flat Monte Carlo over one turn, to a depth budget |
@@ -75,6 +75,7 @@ lot:
 | `DamageThreshold` | an armoured shell or hull; a mouth or a crack as its weak spot |
 | `Swallow`, `Digestion`, `Regurgitate` | a purple worm's, a behir's or a tarrasque's gullet |
 | a `Reaction` move with a trigger | a snap at whoever is dragged into reach, a spray from a breached shell |
+| `mouth`, `reach`, `tactic` | a whirlpool, a kraken or a dragon turtle its enemies circle, and how it swims at them |
 
 A creature has one reaction a round, shared by every reaction it knows, and
 none while Incapacitated. An aura is a move every enemy meets at the start of
@@ -83,20 +84,42 @@ character first - and a player character dropped by less than massive damage
 is down, not dead, until healed or the fight ends. Under the 2024 rules at most
 one spell slot is spent per turn.
 
-**Positioning is the gap that matters.** There is no movement, reach, or flight,
-so a dragon with an 80-foot fly speed stands still and trades hits. Anything
-whose point is where the combatants are - Wings Unfurled, a 60-foot cone, Shell
-Defense as a way to survive a round - is therefore out of scope until there is a
-movement model. So is everything non-combat: languages, tool proficiencies,
-Hold Breath. A push changes nothing, and a pull is a condition only so that a
-reaction can wait for it. The one kind of reach there is comes from being
-swallowed: a swallowed creature can reach nothing but its swallower's insides,
-and nothing outside can reach it - not an attack, an area, or a heal.
+**Positioning is the gap that matters.** There is no map, so for most creatures
+there is no movement, reach, or flight: a dragon with an 80-foot fly speed
+stands still and trades hits. Anything whose point is where the combatants are -
+Wings Unfurled, a 60-foot cone, Shell Defense as a way to survive a round - is
+out of scope for them. So is everything non-combat: languages, tool
+proficiencies, Hold Breath.
+
+The exception is a creature with a `mouth`. Its enemies stand in one of four
+places around it: at its mouth, beside its body, at range in front of it, or far
+off in front. That is not a map, but it is enough for what such a creature is
+about:
+
+- Its moves reach only where they say (`reach mouth`, `near`, `front`): a bite
+  reaches the mouth, a slam anywhere beside it, a breath the whole front.
+- A melee attack reaches it only from beside it. Its mouth - its weak spot -
+  takes a melee attack at the mouth or a ranged one from in front, unless it has
+  sealed it.
+- An enemy moves one place a turn, or two outside difficult terrain, and loses a
+  move to standing up. A pull drags it a place closer, a push throws it a place
+  out.
+- The creature swims by its `tactic`: `charge` brings the nearest enemy to its
+  mouth every turn, `hit and run` does that and then withdraws everyone far off,
+  and `hold` stays put. The report adds a row for each.
+- Each character stands wherever its best action is worth the most, and of
+  equally good places the one furthest from the mouth. The solver searches
+  where to stand along with what to do.
+
+The other kind of reach comes from being swallowed: a swallowed creature can
+reach nothing but its swallower's insides, and nothing outside can reach it - not
+an attack, an area, or a heal.
 
 A damage threshold ignores any single hit, save or dart below it. An attack
-roll can go through an open weak spot instead - a mouth left gaping, a crack a
-breach leaves until the round ends - trading the threshold for the weak spot's
-resistances. An attacker takes whichever it expects to do more against, so a
+roll can go through an open weak spot instead - a mouth, a crack a breach leaves
+until the round ends - trading the threshold for the weak spot's resistances. A
+sealed mouth opens again the moment its owner attacks or takes a legendary
+action. An attacker takes whichever it expects to do more against, so a
 hit big enough to breach goes to the shell, where it lands whole. From inside,
 everything reaches the weak spot.
 
@@ -227,4 +250,6 @@ multiclass build written that way - a rogue with a secondary spellcasting grant,
 weapons, items used through Fast Hands and reactions - with every plugin and trait keyword
 it needs, and fights proving each one is live. `tests/swallowing_titan.rs` does the same for
 a monster: a shell, a gullet, an aura, reactions and legendary actions of several costs.
-`dsl::scenario`'s module docs list the move and trait syntax.
+`tests/positions_around_a_maw.rs` does it for a creature with a mouth and the places its
+enemies stand around it, under each tactic. `dsl::scenario`'s module docs list the move and
+trait syntax.

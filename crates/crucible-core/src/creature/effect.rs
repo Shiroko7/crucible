@@ -636,13 +636,16 @@ pub enum Effect {
     /// Several effects in one move. A Multiattack of two claws and a bite, or
     /// a monk replacing one of its attacks with a breath weapon.
     Sequence(Vec<Effect>),
-    /// One part of a [`Effect::Sequence`] with on-hit riders of its own, on
-    /// top of the move's: a bite that swallows alongside slams that knock
-    /// prone, in one Multiattack, where neither rider belongs on the other
-    /// attack.
-    WithRiders {
+    /// One part of a [`Effect::Sequence`] with on-hit riders and a reach of
+    /// its own, on top of the move's: a bite that swallows alongside slams
+    /// that knock prone, in one Multiattack, where neither rider belongs on
+    /// the other attack - and the bite reaches only the creature at its
+    /// mouth while the slams reach anyone beside it. See
+    /// [`crate::creature::Reach::within`] for how the two reaches combine.
+    Part {
         effect: Box<Effect>,
         riders: Vec<crate::creature::Rider>,
+        reach: crate::creature::Reach,
     },
     /// An unconditional buff to some of the user's own side: each of up to
     /// `max_targets` allies - the user included - gains `attack_modifier` on
@@ -702,7 +705,7 @@ impl Effect {
             | Effect::SaveOrModifier { .. }
             | Effect::HarmSwallowed { .. } => 0.0,
             Effect::Sequence(parts) => parts.iter().map(|p| p.mean_damage(target)).sum(),
-            Effect::WithRiders { effect, .. } => effect.mean_damage(target),
+            Effect::Part { effect, .. } => effect.mean_damage(target),
         }
     }
 
@@ -729,7 +732,7 @@ impl Effect {
             Effect::Sequence(parts) => parts.iter().fold(Pmf::constant(0), |acc, p| {
                 acc.convolve(&p.damage_pmf(target))
             }),
-            Effect::WithRiders { effect, .. } => effect.damage_pmf(target),
+            Effect::Part { effect, .. } => effect.damage_pmf(target),
         }
     }
 
@@ -742,7 +745,7 @@ impl Effect {
             Effect::Sequence(parts) => parts
                 .iter()
                 .fold(Pmf::constant(0), |acc, p| acc.convolve(&p.heal_pmf())),
-            Effect::WithRiders { effect, .. } => effect.heal_pmf(),
+            Effect::Part { effect, .. } => effect.heal_pmf(),
             _ => Pmf::constant(0),
         }
     }
@@ -756,7 +759,7 @@ impl Effect {
         match self {
             Effect::Stance { condition } => Some(*condition),
             Effect::Sequence(parts) => parts.iter().find_map(|p| p.stance()),
-            Effect::WithRiders { effect, .. } => effect.stance(),
+            Effect::Part { effect, .. } => effect.stance(),
             _ => None,
         }
     }

@@ -2,6 +2,7 @@
 //! costs them - digestion every turn, a squeeze on demand - and how they get
 //! out: regurgitated, or freed when the swallower drops.
 
+use crate::creature::Zone;
 use crate::prob::Rng;
 use crate::rules::{Condition, DamageRoll, Duration, Size};
 use crate::sim::fight::saves::saving_throw;
@@ -50,7 +51,8 @@ impl<'a> Fight<'a> {
     }
 
     /// Let go of everything `holder` has swallowed, each landing Prone if
-    /// `prone` - until it stands up on its own turn.
+    /// `prone` - until it stands up on its own turn - and at its mouth, if it
+    /// has one.
     pub(super) fn release_all(&mut self, holder: usize, prone: bool) -> Vec<usize> {
         let freed: Vec<usize> = (0..self.fighters.len())
             .filter(|&i| self.fighters[i].swallowed_by() == Some(holder))
@@ -59,6 +61,9 @@ impl<'a> Fight<'a> {
             self.fighters[i]
                 .conditions
                 .retain(|&(_, expiry)| expiry != Expiry::HeldBy(holder));
+            if self.has_mouth(holder) {
+                self.set_zone(i, holder, Zone::Mouth);
+            }
             if prone {
                 let (conditions, _) =
                     self.conditions_against(holder, i, &[(Condition::Prone, Duration::VictimTurn)]);
@@ -220,7 +225,11 @@ mod tests {
         );
         assert_eq!(fight.heal_target(2), 2, "no healing reaches inside");
         assert_eq!(fight.heal_target(1), 1, "but the hero can heal itself");
-        assert_eq!(fight.caught(0), vec![2], "an area catches nobody inside");
+        assert_eq!(
+            fight.caught(0, crate::creature::Reach::Any),
+            vec![2],
+            "an area catches nobody inside"
+        );
     }
 
     #[test]

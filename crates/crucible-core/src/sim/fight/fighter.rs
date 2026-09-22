@@ -88,6 +88,8 @@ impl<'a> Fighter<'a> {
             dead: false,
             slot_spent_this_turn: false,
             inside_damage: 0,
+            zones: Vec::new(),
+            stood_up: false,
             dealt: 0,
             spent: 0,
         }
