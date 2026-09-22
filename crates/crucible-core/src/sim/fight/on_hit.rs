@@ -24,7 +24,7 @@ impl<'a> Fight<'a> {
                 Rider::SaveOrCondition {
                     ability,
                     dc,
-                    condition,
+                    conditions,
                     duration,
                     cost,
                     once_per_turn,
@@ -32,8 +32,9 @@ impl<'a> Fight<'a> {
                     if *once_per_turn && self.fighters[me].once_per_turn_spent {
                         continue;
                     }
-                    let (conditions, advantage) =
-                        self.conditions_against(me, target, &[(*condition, *duration)]);
+                    let wanted: Vec<(Condition, Duration)> =
+                        conditions.iter().map(|&c| (c, *duration)).collect();
+                    let (conditions, advantage) = self.conditions_against(me, target, &wanted);
                     if conditions.is_empty() {
                         // Immune: nothing to spend the rider on.
                         continue;
@@ -49,12 +50,15 @@ impl<'a> Fight<'a> {
                     let (saved, resisted) =
                         saving_throw(&mut self.fighters, rng, target, *ability, *dc, advantage);
                     if !saved {
-                        self.land_condition(me, target, *condition, *duration, landed_conditions);
+                        for &(condition, duration) in &conditions {
+                            self.land_condition(me, target, condition, duration, landed_conditions);
+                        }
                     }
                     if record {
+                        let names: Vec<&str> = conditions.iter().map(|&(c, _)| c.name()).collect();
                         notes.push(format!(
                             "{} {}",
-                            condition.name(),
+                            names.join(" and "),
                             match (saved, resisted) {
                                 (true, true) => "shrugged off (legendary resistance)",
                                 (true, false) => "saved",

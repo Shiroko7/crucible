@@ -1,7 +1,7 @@
 //! Formats and prints the parsed creature sheet.
 
 use crucible_core::creature::{
-    AttackTrigger, Creature, Effect, Move, MoveKind, ReactionTrigger, Rider, Uses,
+    AttackTrigger, Creature, Effect, Move, MoveKind, Reach, ReactionTrigger, Rider, Uses,
 };
 use crucible_core::rules::DamageRoll;
 /// Strip copy numbers like "Hero 3" back to "Hero", so resizing does not stack
@@ -91,6 +91,18 @@ pub fn print_sheet(roster: &[&Creature]) {
             let names: Vec<&str> = c.condition_immunities.iter().map(|c| c.name()).collect();
             println!("    {:<10} {}", "immune", names.join(", "));
         }
+        if c.mouth {
+            println!(
+                "    {:<10} enemies stand at its mouth, beside its body or out in front; it moves by {}{}",
+                "mouth",
+                c.tactic.name(),
+                if c.difficult_terrain {
+                    ", and they move one place a turn"
+                } else {
+                    ""
+                }
+            );
+        }
         println!();
     }
 }
@@ -111,6 +123,9 @@ pub fn describe(owner: &Creature, m: &Move) -> String {
     }
     if m.legendary_cost > 1 {
         bits.push(format!("{} legendary actions", m.legendary_cost));
+    }
+    if m.reach != Reach::Any {
+        bits.push(format!("reach {}", m.reach.name()));
     }
     match m.uses {
         Uses::Unlimited => {}
@@ -144,11 +159,16 @@ fn on_hit(owner: &Creature, riders: &[Rider]) -> Vec<String> {
         if let Rider::SaveOrCondition {
             ability,
             dc,
-            condition,
+            conditions,
             cost,
             ..
         } = rider
         {
+            let condition = conditions
+                .iter()
+                .map(|c| c.name())
+                .collect::<Vec<_>>()
+                .join(" and ");
             let paid = cost.map_or(String::new(), |c| {
                 format!(
                     ", {} {}",
@@ -159,11 +179,7 @@ fn on_hit(owner: &Creature, riders: &[Rider]) -> Vec<String> {
                         .map_or("?", |r| r.name.as_str())
                 )
             });
-            bits.push(format!(
-                "{} on {} dc {dc}{paid}",
-                condition.name(),
-                ability.name()
-            ));
+            bits.push(format!("{condition} on {} dc {dc}{paid}", ability.name()));
         }
     }
     bits
@@ -220,11 +236,17 @@ pub fn body(owner: &Creature, effect: &Effect) -> String {
             .map(|p| body(owner, p))
             .collect::<Vec<_>>()
             .join(" + "),
-        Effect::WithRiders { effect, riders } => format!(
-            "{} ({})",
-            body(owner, effect),
-            on_hit(owner, riders).join(", ")
-        ),
+        Effect::Part {
+            effect,
+            riders,
+            reach,
+        } => {
+            let mut notes = on_hit(owner, riders);
+            if *reach != Reach::Any {
+                notes.insert(0, format!("reach {}", reach.name()));
+            }
+            format!("{} ({})", body(owner, effect), notes.join(", "))
+        }
     }
 }
 
@@ -245,11 +267,15 @@ pub fn describe_trait(rider: &Rider) -> String {
         Rider::SaveOrCondition {
             ability,
             dc,
-            condition,
+            conditions,
             ..
         } => format!(
             "{} on a failed {} dc {dc}",
-            condition.name(),
+            conditions
+                .iter()
+                .map(|c| c.name())
+                .collect::<Vec<_>>()
+                .join(" and "),
             ability.name()
         ),
         Rider::ConditionalExtraDamage {

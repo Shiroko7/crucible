@@ -43,14 +43,15 @@ impl AttackTrigger {
 /// its weight: a variant only one ability can use is a branch in disguise.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Rider {
-    /// On a hit, the target saves or takes a condition.
+    /// On a hit, the target saves or takes a condition - or several, all off
+    /// the one save: a slam that knocks its target prone and pushes it away.
     ///
     /// Stunning Strike. Also every knockdown, every on-hit poison, and the
     /// secondary effect on most breath weapons.
     SaveOrCondition {
         ability: Ability,
         dc: i32,
-        condition: Condition,
+        conditions: Vec<Condition>,
         duration: Duration,
         cost: Option<Cost>,
         /// Stunning Strike is once per turn however many times you hit.

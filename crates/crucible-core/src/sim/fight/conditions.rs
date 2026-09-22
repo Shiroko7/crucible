@@ -40,9 +40,10 @@ impl<'a> Fight<'a> {
         (kept, advantage)
     }
 
-    /// Give `victim` a condition `applier` inflicted, and arm any of
-    /// `applier`'s weapon buffs that wait for exactly that condition to land
-    /// on an enemy - see [`crate::creature::Rider::arms_on_condition`].
+    /// Give `victim` a condition `applier` inflicted, move it if that was a
+    /// pull or a push (see [`Fight::shift`]), and arm any of `applier`'s
+    /// weapon buffs that wait for exactly that condition to land on an enemy -
+    /// see [`crate::creature::Rider::arms_on_condition`].
     pub(super) fn land_condition(
         &mut self,
         applier: usize,
@@ -53,6 +54,7 @@ impl<'a> Fight<'a> {
     ) {
         let expiry = self.expiry(applier, victim, duration);
         self.apply_condition(victim, condition, expiry);
+        self.shift(applier, victim, condition);
         landed_conditions.push((victim, condition));
         if self.fighters[applier].side != self.fighters[victim].side {
             let creature = self.fighters[applier].creature;

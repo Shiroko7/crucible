@@ -1,7 +1,7 @@
 //! Resolving a move: each of its effects - strikes, saves, heals, stances,
 //! buffs - applied to its targets, and the damage that results.
 
-use crate::creature::{Effect, Move, Rider};
+use crate::creature::{Effect, Move, Reach, Rider};
 use crate::prob::Rng;
 use crate::rules::{apply_healing, Condition, Landed};
 use crate::sim::fight::reactions::{ac_boost_reaction, react_to_hit};
@@ -37,6 +37,7 @@ impl<'a> Fight<'a> {
             me,
             target,
             &m.riders,
+            m.reach,
             record,
             &mut notes,
             &mut landed,
@@ -78,6 +79,7 @@ impl<'a> Fight<'a> {
         me: usize,
         target: usize,
         move_riders: &[Rider],
+        reach: Reach,
         record: bool,
         notes: &mut Vec<String>,
         landed_conditions: &mut Vec<(usize, Condition)>,
@@ -92,14 +94,19 @@ impl<'a> Fight<'a> {
                 // mutable borrows the loop below takes for `current_target`.
                 let modifiers = self.fighters[me].attack_modifiers.clone();
                 let attacker = self.fighters[me].creature;
+                self.lapse_on_attack(me);
                 for _ in 0..*count {
-                    if !self.fighters[current_target].alive() || !self.reaches(me, current_target) {
+                    if !self.fighters[current_target].alive()
+                        || !self.in_reach(me, current_target, reach, Some(strike.kind))
+                    {
                         // An aura's or a reaction's strike answers one
                         // creature; it is not redirected at another.
                         if self.sole_target.is_some() {
                             break;
                         }
-                        let Some(new_target) = self.pick_target(me) else {
+                        let Some(new_target) = self
+                            .pick_target_in(me, |f, i| f.in_reach(me, i, reach, Some(strike.kind)))
+                        else {
                             break;
                         };
                         current_target = new_target;
@@ -116,7 +123,7 @@ impl<'a> Fight<'a> {
                         self.extra_damage_plan(me, current_target, strike, move_riders, mode, true);
                     // Aimed at an open weak spot when that is worth more than
                     // the shell - see `Fight::aimed_hit`.
-                    let weak = self.through_weak_spot(me, current_target, true)
+                    let weak = self.through_weak_spot(me, current_target, Some(strike.kind))
                         && self
                             .aimed_hit(me, current_target, strike, mode, force_crit, &plan.rolls)
                             .1;
@@ -200,10 +207,11 @@ impl<'a> Fight<'a> {
                 }
             }
             Effect::Save(save) => {
-                // No positioning, so an area effect catches every enemy up to its
+                // Outside the zones around a creature with a mouth there is no
+                // positioning, so an area effect catches every enemy up to its
                 // target cap. Pessimistic, and stated as such.
                 let mut caught: Vec<usize> = self
-                    .caught(me)
+                    .caught(me, reach)
                     .into_iter()
                     // A type-restricted save (Hold Person's "humanoid") never
                     // catches anything else at all - not even a rolled save
@@ -237,7 +245,7 @@ impl<'a> Fight<'a> {
                     // Evasion is explicitly unavailable while Incapacitated.
                     let evasion = against.has_evasion(save.ability)
                         && !self.fighters[i].has(Condition::blocks_riders);
-                    let weak = self.through_weak_spot(me, i, false);
+                    let weak = self.through_weak_spot(me, i, None);
                     let raw = save.sample_known_by(
                         rng,
                         &reducer(attacker, against, weak),
@@ -313,11 +321,15 @@ impl<'a> Fight<'a> {
                 let attacker = self.fighters[me].creature;
                 let mut current_target = target;
                 for roll in damage {
-                    if !self.fighters[current_target].alive() || !self.reaches(me, current_target) {
+                    if !self.fighters[current_target].alive()
+                        || !self.in_reach(me, current_target, reach, None)
+                    {
                         if self.sole_target.is_some() {
                             break;
                         }
-                        let Some(new_target) = self.pick_target(me) else {
+                        let Some(new_target) =
+                            self.pick_target_in(me, |f, i| f.in_reach(me, i, reach, None))
+                        else {
                             break;
                         };
                         current_target = new_target;
@@ -325,7 +337,7 @@ impl<'a> Fight<'a> {
                     let against = self.fighters[current_target].creature;
                     // A dart hits the creature, not a spot on it - unless it
                     // was loosed from inside.
-                    let weak = self.through_weak_spot(me, current_target, false);
+                    let weak = self.through_weak_spot(me, current_target, None);
                     let raw = roll.sample(rng, false, reducer(attacker, against, weak)(roll.kind));
                     let (dealt, shell) = self.deal(rng, me, current_target, raw, weak);
                     if record {
@@ -384,7 +396,7 @@ impl<'a> Fight<'a> {
             } => {
                 // Same pessimistic "every enemy up to the cap" reading as
                 // Effect::Save - no positioning to choose among them.
-                let mut caught = self.caught(me);
+                let mut caught = self.caught(me, reach);
                 if let Some(max) = max_targets {
                     caught.truncate(*max as usize);
                 }
@@ -426,6 +438,7 @@ impl<'a> Fight<'a> {
                         me,
                         target,
                         move_riders,
+                        reach,
                         record,
                         notes,
                         landed_conditions,
@@ -433,7 +446,11 @@ impl<'a> Fight<'a> {
                     );
                 }
             }
-            Effect::WithRiders { effect, riders } => {
+            Effect::Part {
+                effect,
+                riders,
+                reach: own,
+            } => {
                 let riders: Vec<Rider> = move_riders.iter().chain(riders).cloned().collect();
                 self.resolve(
                     effect,
@@ -441,6 +458,7 @@ impl<'a> Fight<'a> {
                     me,
                     target,
                     &riders,
+                    own.within(reach),
                     record,
                     notes,
                     landed_conditions,
@@ -479,7 +497,7 @@ impl<'a> Fight<'a> {
 
     /// Every enemy an area effect from `me` catches: all of them it can reach
     /// - or, while an aura or a reaction resolves, the one it answers.
-    pub(super) fn caught(&self, me: usize) -> Vec<usize> {
+    pub(super) fn caught(&self, me: usize, reach: Reach) -> Vec<usize> {
         let side = self.fighters[me].side;
         let candidates: Vec<usize> = match self.sole_target {
             Some(t) => vec![t],
@@ -489,8 +507,16 @@ impl<'a> Fight<'a> {
         };
         candidates
             .into_iter()
-            .filter(|&i| self.fighters[i].alive() && self.reaches(me, i))
+            .filter(|&i| self.fighters[i].alive() && self.in_reach(me, i, reach, None))
             .collect()
+    }
+
+    /// A clamped-shut mouth opens to bite: whatever `me` is holding that
+    /// lapses on an attack ends now. See [`Condition::lapses_on_attack`].
+    pub(super) fn lapse_on_attack(&mut self, me: usize) {
+        self.fighters[me]
+            .conditions
+            .retain(|&(c, _)| !c.lapses_on_attack());
     }
 }
 
@@ -513,7 +539,7 @@ mod tests {
         paralyzer.actions[0].riders.push(Rider::SaveOrCondition {
             ability: Ability::Con,
             dc: 99, // never saved, so the first hit always paralyzes
-            condition: Condition::Paralyzed,
+            conditions: vec![Condition::Paralyzed],
             duration: Duration::ApplierTurn,
             cost: None,
             once_per_turn: false,
@@ -671,6 +697,7 @@ mod tests {
             0,
             2,
             &[],
+            crate::creature::Reach::Any,
             true,
             &mut notes,
             &mut Vec::new(),
@@ -725,6 +752,7 @@ mod tests {
             0,
             3,
             &[],
+            crate::creature::Reach::Any,
             false,
             &mut Vec::new(),
             &mut Vec::new(),
@@ -761,6 +789,7 @@ mod tests {
             0,
             2,
             &[],
+            crate::creature::Reach::Any,
             true,
             &mut notes,
             &mut Vec::new(),

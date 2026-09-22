@@ -51,6 +51,7 @@ pub(super) fn strike_once(
         me,
         target,
         &m.riders,
+        m.reach,
         false,
         &mut Vec::new(),
         &mut Vec::new(),

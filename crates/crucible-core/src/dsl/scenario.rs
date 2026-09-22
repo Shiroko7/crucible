@@ -57,6 +57,14 @@
 //! reaction: Snap | when enemy pulled | hit +9 | 3d8+5 piercing
 //! reaction: Spray | when breached | save dex dc 18 | 4d10 piercing | half on success
 //! aura: Undertow | save str dc 15 | on fail pulled
+//! trait: mouth
+//! trait: difficult terrain
+//! tactic: hit and run
+//! action: Maw | reach mouth | hit +9 | 3d8+5 piercing
+//!             && reach near | strikes 2 | hit +9 | 2d8+5 bludgeoning
+//!             | on hit save str dc 17 prone and pushed until victim
+//! action: Gush | recharge 5 | reach front | save con dc 17 | 8d8 cold | on fail pushed
+//! legendary: Chill | reach near | save con dc 17 | 4d6 cold | on fail slowed for 1 round
 //! ```
 //!
 //! `&&` joins a move out of several effects, for a Multiattack that is not all
@@ -83,8 +91,18 @@
 //! `when enemy <condition>` or `when breached` clause, aimed at whoever set it
 //! off; an `aura:` is a move every enemy is subject to at the start of its
 //! turns, aimed at that enemy alone.
+//!
+//! A creature with a `mouth` has its enemies stand around it - at its mouth,
+//! beside its body, at range or far off in front (see
+//! [`crate::creature::Zone`]). Its moves reach only what `reach mouth`,
+//! `reach near` or `reach front` names (anywhere, without one), its mouth is
+//! its weak spot, open unless `sealed`, and it swims by its `tactic` - `hold`,
+//! `charge` or `hit and run`. `difficult terrain` slows its enemies to one
+//! place a turn; `pulled` and `pushed` move them a place in or out, and
+//! `slowed` halves their moves. An on-hit save can land several conditions:
+//! `prone and pushed`.
 
-use crate::creature::{Creature, Resource};
+use crate::creature::{Creature, Resource, Tactic};
 use crate::dsl::grammar::{count, number, parse_move, parse_reaction, parse_trait};
 use crate::rules::{Ability, Condition, DamageKind, Reduction};
 use std::fmt;
@@ -244,6 +262,13 @@ pub fn parse(text: &str) -> Result<Vec<Creature>, ParseError> {
             "reaction" => {
                 let r = parse_reaction(&value, current).map_err(fail)?;
                 current.reactions.push(r);
+            }
+            "tactic" => {
+                current.tactic = Tactic::parse(&value).ok_or_else(|| {
+                    fail(format!(
+                        "`{value}` is not a tactic - use hold, charge or hit and run"
+                    ))
+                })?;
             }
             other => return Err(fail(format!("unknown key `{other}`"))),
         }

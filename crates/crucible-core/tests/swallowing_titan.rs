@@ -130,7 +130,7 @@ fn the_titan_compiles_to_what_it_declares() {
         panic!("the multiattack is a sequence");
     };
     let riders = |i: usize| match &parts[i] {
-        Effect::WithRiders { riders, .. } => riders.clone(),
+        Effect::Part { riders, .. } => riders.clone(),
         other => panic!("part {i} carries no riders: {other:?}"),
     };
     assert!(matches!(riders(0)[..], [Rider::Swallow { .. }]));

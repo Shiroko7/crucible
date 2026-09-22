@@ -1,6 +1,7 @@
 //! The solver: a plan found by playing the fight forward from here, rather
 //! than ranked by a heuristic.
 
+use crate::creature::Zone;
 use crate::prob::Rng;
 use crate::sim::fight::{Fight, Slot};
 use crate::sim::{Outcome, Plan, Policy, Side};
@@ -33,34 +34,49 @@ impl<'a> Fight<'a> {
         let resume = seat * 2 + 1;
         let depth_limit = self.max_rounds.min(round + self.budget.depth);
 
+        // Around a creature with a mouth, where to stand is part of the plan:
+        // whether the mouth is worth the risk is exactly what rollouts weigh.
+        let zones: Vec<Option<Zone>> = match self.aim(me) {
+            Some(t) if self.zone_choice_applies(me, t) => {
+                self.zone_options(me, t).into_iter().map(Some).collect()
+            }
+            _ => vec![None],
+        };
+
         let mut best = (Plan::default(), f64::NEG_INFINITY);
-        for action in self.legal(me, Slot::Action) {
-            for bonus in self.legal(me, Slot::Bonus) {
-                let plan = Plan { action, bonus };
-                let mut total = 0.0;
-                for _ in 0..self.budget.rollouts {
-                    let mut trial = self.clone();
-                    trial.max_rounds = depth_limit;
-                    // The rollout repeats the plan under test, and greedy play is
-                    // only its fallback - so a search can never recurse into
-                    // another search, even with multiple searchers on the team.
-                    for f in &mut trial.fighters {
-                        if f.policy == Policy::Solver {
-                            f.policy = Policy::Greedy;
-                        }
-                    }
-                    trial.rollout_plan = Some((me, plan));
-                    let mut quiet = None;
-                    trial.take_turn(round, me, rng, &mut quiet, Some(plan));
-                    let outcome = match trial.finished(round) {
-                        Some(o) => o,
-                        None => trial.play(rng, round, resume, &mut quiet),
+        for zone in zones {
+            for action in self.legal(me, Slot::Action) {
+                for bonus in self.legal(me, Slot::Bonus) {
+                    let plan = Plan {
+                        action,
+                        bonus,
+                        zone,
                     };
-                    total += value(&outcome, side, max_hp);
-                }
-                let score = total / f64::from(self.budget.rollouts.max(1));
-                if score > best.1 {
-                    best = (plan, score);
+                    let mut total = 0.0;
+                    for _ in 0..self.budget.rollouts {
+                        let mut trial = self.clone();
+                        trial.max_rounds = depth_limit;
+                        // The rollout repeats the plan under test, and greedy play is
+                        // only its fallback - so a search can never recurse into
+                        // another search, even with multiple searchers on the team.
+                        for f in &mut trial.fighters {
+                            if f.policy == Policy::Solver {
+                                f.policy = Policy::Greedy;
+                            }
+                        }
+                        trial.rollout_plan = Some((me, plan));
+                        let mut quiet = None;
+                        trial.take_turn(round, me, rng, &mut quiet, Some(plan));
+                        let outcome = match trial.finished(round) {
+                            Some(o) => o,
+                            None => trial.play(rng, round, resume, &mut quiet),
+                        };
+                        total += value(&outcome, side, max_hp);
+                    }
+                    let score = total / f64::from(self.budget.rollouts.max(1));
+                    if score > best.1 {
+                        best = (plan, score);
+                    }
                 }
             }
         }
@@ -139,7 +155,7 @@ mod tests {
             .with_rider(Rider::SaveOrCondition {
                 ability: Ability::Con,
                 dc: 99,
-                condition: Condition::Stunned,
+                conditions: vec![Condition::Stunned],
                 duration: Duration::ApplierTurn,
                 cost: None,
                 once_per_turn: true,

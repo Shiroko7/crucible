@@ -2,6 +2,7 @@
 //! action and bonus action, repeated saves at the end of a turn, and
 //! legendary actions between turns.
 
+use crate::creature::Tactic;
 use crate::prob::Rng;
 use crate::rules::{Ability, Condition};
 use crate::sim::fight::fighter::refresh;
@@ -107,6 +108,7 @@ impl<'a> Fight<'a> {
     /// comes off anything timed in `who`'s rounds, and every creature's
     /// once-per-turn Sneak Attack budget comes back.
     pub(super) fn start_of_turn(&mut self, who: usize) {
+        let was_prone = self.fighters[who].has(|c| c == Condition::Prone);
         for f in self.fighters.iter_mut() {
             f.sneak_attack_spent = false;
             f.inside_damage = 0;
@@ -119,6 +121,9 @@ impl<'a> Fight<'a> {
                 _ => true,
             });
         }
+        // Getting up is what ended it, and getting up costs a move.
+        let f = &mut self.fighters[who];
+        f.stood_up = was_prone && !f.has(|c| c == Condition::Prone);
     }
 
     /// Conditions lasting until the end of `who`'s turn, counted down.
@@ -164,14 +169,47 @@ impl<'a> Fight<'a> {
             return false;
         }
 
+        let record = log.is_some();
+        let mut line = String::new();
+
+        // A creature with a mouth swims first, by its tactic.
+        if let Some((prey, from)) = self.close_in(me) {
+            if record {
+                line.push_str(&format!(
+                    "closes on {} from {}",
+                    self.fighters[prey].creature.name,
+                    from.name()
+                ));
+            }
+        }
+
         let Some(mut target) = self.aim(me) else {
             return true; // nothing left to hit
         };
 
-        let plan = match plan {
+        let mut plan = match plan {
             Some(p) => p,
             None => self.decide(round, me, target, rng),
         };
+
+        // Around a creature with a mouth, its enemies move before acting.
+        if let Some(zone) = plan.zone.filter(|_| self.zone_choice_applies(me, target)) {
+            if let Some((_, to)) = self.step_to(me, target, zone) {
+                if record {
+                    if !line.is_empty() {
+                        line.push_str(" | ");
+                    }
+                    line.push_str(&format!("moves to {}", to.name()));
+                }
+            }
+        }
+
+        // Withdrawing takes the bonus action: getting clear without being hit
+        // on the way out is what Primordial-Surge-style movement buys.
+        let withdrawing = self.has_mouth(me) && creature.tactic == Tactic::HitAndRun;
+        if withdrawing {
+            plan.bonus = None;
+        }
 
         // Almost every bonus action follows the action; one that sets the
         // action up - Steady Aim - has to come first.
@@ -185,8 +223,6 @@ impl<'a> Fight<'a> {
             [(Slot::Action, plan.action), (Slot::Bonus, plan.bonus)]
         };
 
-        let record = log.is_some();
-        let mut line = String::new();
         for (slot, pick) in order {
             let Some(pick) = pick else { continue };
             if !self.fighters[target].alive() || !self.reaches(me, target) {
@@ -214,6 +250,13 @@ impl<'a> Fight<'a> {
             self.fighters[me].cast_spell_slot(chosen.spell_slot_level);
             self.fighters[me].spend_move(slot, pick, chosen.uses);
             self.apply(chosen, rng, me, target, record, &mut line);
+        }
+
+        if withdrawing && self.withdraw(me) && record {
+            if !line.is_empty() {
+                line.push_str(" | ");
+            }
+            line.push_str("withdraws");
         }
 
         if let Some(l) = log.as_mut() {
@@ -320,6 +363,8 @@ impl<'a> Fight<'a> {
         self.fighters[me].pay(chosen.cost);
         self.fighters[me].cast_spell_slot(chosen.spell_slot_level);
         self.fighters[me].spend_move(Slot::Legendary, pick, chosen.uses);
+        // Any legendary action opens a sealed mouth, attack or not.
+        self.lapse_on_attack(me);
         self.apply(chosen, rng, me, target, record, &mut line);
 
         if let Some(l) = log.as_mut() {
@@ -361,7 +406,7 @@ mod tests {
         monk.actions[0].riders.push(Rider::SaveOrCondition {
             ability: Ability::Con,
             dc: 99, // never saved, so the only defence is Legendary Resistance
-            condition: Condition::Stunned,
+            conditions: vec![Condition::Stunned],
             duration: Duration::ApplierTurn,
             cost: Some(cost),
             once_per_turn: true,
@@ -445,7 +490,7 @@ mod tests {
             c.actions[0].riders.push(Rider::SaveOrCondition {
                 ability: Ability::Con,
                 dc: 99, // the one hit always lands the condition
-                condition: Condition::Paralyzed,
+                conditions: vec![Condition::Paralyzed],
                 duration: Duration::SaveEndTurn { ability, dc },
                 cost: Some(cost),
                 once_per_turn: true,
@@ -516,7 +561,7 @@ mod tests {
             c.actions[0].riders.push(Rider::SaveOrCondition {
                 ability: Ability::Con,
                 dc: 99, // the one hit always lands Poisoned
-                condition: Condition::Poisoned,
+                conditions: vec![Condition::Poisoned],
                 duration: Duration::SaveEndTurn { ability, dc },
                 cost: Some(cost),
                 once_per_turn: true,
@@ -666,7 +711,8 @@ mod tests {
             plan,
             Plan {
                 action: Some(0),
-                bonus: Some(0)
+                bonus: Some(0),
+                zone: None,
             }
         );
 

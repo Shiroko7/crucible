@@ -1,6 +1,6 @@
 //! The Creature combatant model.
 
-use crate::creature::{Move, Reaction, Resource, Rider};
+use crate::creature::{Move, Reaction, Resource, Rider, Tactic};
 use crate::rules::{
     Ability, Condition, CreatureType, DamageKind, DamageRoll, Reduction, Size, SpellCastingProfile,
     SpellSlots,
@@ -77,6 +77,19 @@ pub struct Creature {
     /// a whirlpool's drag, a stench - resolved against that enemy alone.
     /// Taking one costs nothing: an aura is always on.
     pub auras: Vec<Move>,
+    /// Enemies stand somewhere around this creature - at its mouth, beside
+    /// its body, or out in front of it (see [`crate::creature::Zone`]) - rather than
+    /// everywhere at once, which is what every other creature gets. Its
+    /// moves reach only the zones their [`Move::reach`] names, a melee
+    /// attack reaches it only from beside it, and its weak spot is its mouth:
+    /// open unless it is [`Condition::Sealed`], and reached by a melee attack
+    /// at the mouth or a ranged one from in front.
+    pub mouth: bool,
+    /// Around a creature with a mouth, its enemies move one zone a turn
+    /// rather than two - the whole area is difficult terrain for them.
+    pub difficult_terrain: bool,
+    /// How a creature with a mouth moves on its turn.
+    pub tactic: Tactic,
     /// Reliable Talent (2024 Rogue 7): a floor under a d20 roll for a check
     /// the creature is proficient in - `Some(10)` for the standard feature,
     /// `None` for a creature without it. Plain field rather than a
@@ -116,6 +129,9 @@ impl Creature {
             legendary_uses: 0,
             reactions: Vec::new(),
             auras: Vec::new(),
+            mouth: false,
+            difficult_terrain: false,
+            tactic: Tactic::default(),
             reliable_talent_floor: None,
             player_character: false,
         }

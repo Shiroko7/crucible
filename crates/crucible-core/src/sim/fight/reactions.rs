@@ -31,12 +31,15 @@ impl<'a> Fight<'a> {
             return;
         }
         let creature = f.creature;
+        // Only one that can land on `at` from where it stands: a bite waits
+        // for a pull that brings its prey all the way to the mouth.
         let Some(i) = creature.reactions.iter().enumerate().position(|(i, r)| {
             r.trigger == trigger
                 && f.reactions[i].available()
                 && f.can_pay(r.action.cost)
                 && f.can_cast(r.action.spell_slot_level)
                 && f.move_allowed(&r.action)
+                && self.move_lands(me, at, &r.action)
         }) else {
             return;
         };

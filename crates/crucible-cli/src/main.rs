@@ -9,7 +9,8 @@ mod report;
 
 use args::{parse_args, USAGE};
 use report::{
-    print_fights, print_monster_sweep, print_party_sweep, print_profile, print_sheet, resize,
+    print_fights, print_monster_sweep, print_party_sweep, print_profile, print_sheet,
+    print_tactic_sweep, resize,
 };
 
 fn main() -> ExitCode {
@@ -56,6 +57,7 @@ fn main() -> ExitCode {
     print_sheet(&roster);
     print_profile(&args, &roster);
     print_monster_sweep(&args, &roster);
+    print_tactic_sweep(&args, &roster);
     print_fights(&args, &roster);
     ExitCode::SUCCESS
 }

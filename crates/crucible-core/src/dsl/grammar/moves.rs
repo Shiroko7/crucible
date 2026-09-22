@@ -2,7 +2,7 @@
 //! it costs, joined with `&&` for a move made of several effects.
 
 use crate::creature::{
-    AttackKind, Cost, Creature, Effect, Move, MoveKind, Reaction, ReactionTrigger, Rider,
+    AttackKind, Cost, Creature, Effect, Move, MoveKind, Reach, Reaction, ReactionTrigger, Rider,
     SaveEffect, Strike, Uses,
 };
 use crate::dsl::grammar::lex::{arg, parse_damage, parse_dice};
@@ -35,13 +35,14 @@ pub(crate) fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> 
         .effect
         .take()
         .ok_or_else(|| format!("`{name}` does nothing - give it damage, a save, or a stance"))?;
-    let mut parts = vec![(head_effect, std::mem::take(&mut built.riders))];
+    let mut parts = vec![(head_effect, std::mem::take(&mut built.riders), built.reach)];
     for segment in segments {
         let tail = parse_body(segment.split('|'), owner)?;
         parts.push((
             tail.effect
                 .ok_or_else(|| format!("the `&&` part of `{name}` does nothing"))?,
             tail.riders,
+            tail.reach,
         ));
         built.kind = built.kind.or(tail.kind);
         built.spell_slot_level = built.spell_slot_level.or(tail.spell_slot_level);
@@ -49,22 +50,27 @@ pub(crate) fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> 
         built.legendary_cost = built.legendary_cost.or(tail.legendary_cost);
     }
 
-    // One part keeps its riders on the move. Several keep each part's riders
-    // on that part: a bite's swallow is not the slam's knockdown.
-    let (effect, riders) = if parts.len() == 1 {
+    // One part keeps its riders and reach on the move. Several keep each
+    // part's on that part: a bite's swallow is not the slam's knockdown, and
+    // the slam reaches further than the bite.
+    let (effect, riders, reach) = if parts.len() == 1 {
         parts.pop().unwrap()
     } else {
         let parts = parts
             .into_iter()
-            .map(|(effect, riders)| match riders.is_empty() {
-                true => effect,
-                false => Effect::WithRiders {
-                    effect: Box::new(effect),
-                    riders,
-                },
+            .map(|(effect, riders, reach)| {
+                if riders.is_empty() && reach == Reach::Any {
+                    effect
+                } else {
+                    Effect::Part {
+                        effect: Box::new(effect),
+                        riders,
+                        reach,
+                    }
+                }
             })
             .collect();
-        (Effect::Sequence(parts), Vec::new())
+        (Effect::Sequence(parts), Vec::new(), Reach::Any)
     };
 
     Ok(Move {
@@ -79,6 +85,7 @@ pub(crate) fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> 
         before_action: false,
         bypasses_casting_restrictions: false,
         legendary_cost: built.legendary_cost.unwrap_or(1),
+        reach,
     })
 }
 
@@ -145,6 +152,7 @@ struct Body {
     spell_slot_level: Option<u32>,
     concentration: bool,
     legendary_cost: Option<u32>,
+    reach: Reach,
 }
 
 fn parse_body<'a>(
@@ -199,6 +207,12 @@ fn parse_body<'a>(
                 out.legendary_cost = Some(n);
             }
             "swallowed" => to_swallowed = true,
+            "reach" => {
+                let word = arg(&words, 1, clause)?;
+                out.reach = Reach::parse(word).ok_or_else(|| {
+                    format!("`{word}` is not a reach - use mouth, near, front or any")
+                })?;
+            }
             "ranged" => attack.ranged = true,
             "melee" => attack.ranged = false,
             "finesse" => attack.finesse = true,
@@ -299,8 +313,9 @@ fn parse_on_fail(words: &[&str], clause: &str) -> Result<(Condition, DurationSpe
     Ok((condition, duration))
 }
 
-/// `on hit save con dc 16 stunned [once] [cost focus 1] [duration]`, or
-/// `on hit swallow <size>` - swallow a target of that size or smaller.
+/// `on hit save con dc 16 stunned [and <condition>]... [once] [cost focus 1]
+/// [duration]`, or `on hit swallow <size>` - swallow a target of that size or
+/// smaller.
 fn parse_on_hit(words: &[&str], clause: &str, owner: &Creature) -> Result<Rider, String> {
     if !arg(words, 1, clause)?.eq_ignore_ascii_case("hit") {
         return Err(format!("expected `on hit ...`, got `{clause}`"));
@@ -324,8 +339,11 @@ fn parse_on_hit(words: &[&str], clause: &str, owner: &Creature) -> Result<Rider,
         return Err(format!("expected `save <ability> dc <n>` in `{clause}`"));
     }
     let dc = number(arg(words, 5, clause)?)?;
-    let name = arg(words, 6, clause)?;
-    let condition = Condition::parse(name).ok_or_else(|| format!("unknown condition `{name}`"))?;
+    let condition_at = |at: usize| -> Result<Condition, String> {
+        let name = arg(words, at, clause)?;
+        Condition::parse(name).ok_or_else(|| format!("unknown condition `{name}`"))
+    };
+    let mut conditions = vec![condition_at(6)?];
 
     let mut once_per_turn = false;
     let mut cost = None;
@@ -333,6 +351,11 @@ fn parse_on_hit(words: &[&str], clause: &str, owner: &Creature) -> Result<Rider,
     let mut i = 7;
     while i < words.len() {
         match words[i].to_ascii_lowercase().as_str() {
+            // `prone and pushed`: more off the same failed save.
+            "and" => {
+                conditions.push(condition_at(i + 1)?);
+                i += 1;
+            }
             "once" => once_per_turn = true,
             "cost" => {
                 cost = Some(parse_cost(words, i + 1, clause, owner)?);
@@ -354,7 +377,7 @@ fn parse_on_hit(words: &[&str], clause: &str, owner: &Creature) -> Result<Rider,
     Ok(Rider::SaveOrCondition {
         ability,
         dc,
-        condition,
+        conditions,
         duration,
         cost,
         once_per_turn,
@@ -435,13 +458,13 @@ bonus: Patient Defense | cost focus 1 | stance dodging
             Rider::SaveOrCondition {
                 ability,
                 dc,
-                condition,
+                conditions,
                 duration,
                 cost,
                 once_per_turn,
             } => {
                 assert_eq!((*ability, *dc), (Ability::Con, 16));
-                assert_eq!(*condition, Condition::Stunned);
+                assert_eq!(*conditions, vec![Condition::Stunned]);
                 assert_eq!(*duration, Duration::ApplierTurn);
                 assert_eq!(
                     *cost,
@@ -556,7 +579,7 @@ action: Multiattack | hit +9 | 2d10+5 piercing | on hit swallow large
             panic!("expected a sequence, got {:?}", m.effect)
         };
         let riders_of = |p: &Effect| match p {
-            Effect::WithRiders { riders, .. } => riders.clone(),
+            Effect::Part { riders, .. } => riders.clone(),
             _ => Vec::new(),
         };
         assert_eq!(
@@ -567,10 +590,7 @@ action: Multiattack | hit +9 | 2d10+5 piercing | on hit swallow large
         );
         assert!(matches!(
             riders_of(&parts[1])[..],
-            [Rider::SaveOrCondition {
-                condition: Condition::Prone,
-                ..
-            }]
+            [Rider::SaveOrCondition { ref conditions, .. }] if conditions == &[Condition::Prone]
         ));
         assert_eq!(
             parts[2],
@@ -578,6 +598,53 @@ action: Multiattack | hit +9 | 2d10+5 piercing | on hit swallow large
                 condition: Condition::Exposed
             }
         );
+    }
+
+    /// Around a creature with a mouth, each part of a move reaches only where
+    /// it says - and one save can knock prone and push at once.
+    #[test]
+    fn a_reach_rides_its_own_part_and_one_save_can_land_two_conditions() {
+        let text = "
+creature: x
+hp: 10
+trait: mouth
+trait: difficult terrain
+tactic: hit and run
+action: Bite | reach mouth | hit +9 | 2d10 piercing
+action: Maul | reach mouth | hit +9 | 2d10 piercing
+            && reach near | hit +9 | 2d8 bludgeoning | on hit save str dc 17 prone and pushed until victim
+";
+        let c = &parse(text).unwrap()[0];
+        assert!(c.mouth && c.difficult_terrain);
+        assert_eq!(c.tactic, crate::creature::Tactic::HitAndRun);
+        assert_eq!(c.actions[0].reach, Reach::Mouth);
+
+        let maul = &c.actions[1];
+        assert_eq!(maul.reach, Reach::Any, "each part keeps its own");
+        let Effect::Sequence(parts) = &maul.effect else {
+            panic!("expected a sequence, got {:?}", maul.effect)
+        };
+        let reach_of = |p: &Effect| match p {
+            Effect::Part { reach, .. } => *reach,
+            _ => Reach::Any,
+        };
+        assert_eq!(reach_of(&parts[0]), Reach::Mouth);
+        assert_eq!(reach_of(&parts[1]), Reach::Near);
+        let Effect::Part { riders, .. } = &parts[1] else {
+            panic!("the slam carries its rider")
+        };
+        assert!(matches!(
+            &riders[..],
+            [Rider::SaveOrCondition { conditions, duration: Duration::VictimTurn, .. }]
+                if conditions == &[Condition::Prone, Condition::Pushed]
+        ));
+
+        let far =
+            parse("creature: x\nhp: 1\naction: Bite | reach yonder | hit +9 | 1d4 piercing\n")
+                .unwrap_err();
+        assert!(far.message.contains("not a reach"), "{far}");
+        let lost = parse("creature: x\nhp: 1\ntactic: dance\n").unwrap_err();
+        assert!(lost.message.contains("not a tactic"), "{lost}");
     }
 
     #[test]
