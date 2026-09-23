@@ -51,6 +51,11 @@ pub struct PlayerCharacter {
     pub actions: Vec<super::MoveEntry>,
     #[serde(default)]
     pub bonus: Vec<super::MoveEntry>,
+    /// Reactions - a move with a `when ...` clause saying what sets it off:
+    /// a storm answering whoever hits its priest, a shield raised at an
+    /// arrow. See [`crate::dsl::grammar`] for the trigger phrases.
+    #[serde(default)]
+    pub reactions: Vec<super::MoveEntry>,
     /// Always-on auras - a paladin's, a cleric's Spirit Guardians once it is
     /// already up. See [`crate::creature::Creature::auras`]; one that has to
     /// be cast first is the `lasting_aura` feature instead.
@@ -139,6 +144,12 @@ impl PlayerCharacter {
         for entry in &self.bonus {
             let m = super::parse_move_entry(entry, &builder.creature)?;
             builder.add_bonus_action(m);
+        }
+
+        // Apply reactions
+        for entry in &self.reactions {
+            let r = super::parse_reaction_entry(entry, &builder.creature)?;
+            builder.creature.reactions.push(r);
         }
 
         // Apply always-on auras

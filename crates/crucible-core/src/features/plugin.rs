@@ -167,6 +167,35 @@ impl CreatureBuilder {
         self.creature.spellcasting = Some(profile);
     }
 
+    /// This creature's save DC, or a configuration error naming the feature
+    /// that wanted one.
+    ///
+    /// Every feature that forces a save reads it from here rather than
+    /// carrying a number of its own, so a build whose casting stat changes
+    /// never leaves a stale DC written into one of its features.
+    pub fn save_dc(&self, feature: &str) -> FeatureResult<i32> {
+        self.creature.spell_save_dc().ok_or_else(|| {
+            FeatureError::InvalidConfiguration(format!(
+                "{feature} needs a `[*.spellcasting]` profile to compute its save DC"
+            ))
+        })
+    }
+
+    /// The ability modifier this creature casts with - what a feature that
+    /// reads "add your Wisdom modifier" adds. Same contract as
+    /// [`CreatureBuilder::save_dc`]: read from the profile, never written
+    /// down twice.
+    pub fn casting_modifier(&self, feature: &str) -> FeatureResult<i32> {
+        self.creature
+            .spellcasting
+            .map(|profile| profile.ability_modifier)
+            .ok_or_else(|| {
+                FeatureError::InvalidConfiguration(format!(
+                    "{feature} needs a `[*.spellcasting]` profile to read its ability modifier"
+                ))
+            })
+    }
+
     /// Finalize and validate the combatant.
     pub fn build(self) -> FeatureResult<Creature> {
         if self.creature.hp <= 0 {

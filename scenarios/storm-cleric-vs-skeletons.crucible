@@ -1,0 +1,9 @@
+# A storm cleric against four skeletons: the fight Turn Undead exists for,
+# and the one where a burst is worth more than a single blow.
+
+team: a
+source: content/characters/storm-cleric.toml
+
+team: b
+source: content/monsters/skeleton.toml
+count: 4

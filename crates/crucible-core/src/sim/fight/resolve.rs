@@ -3,7 +3,7 @@
 
 use crate::creature::{Effect, Move, Reach, Rider};
 use crate::prob::Rng;
-use crate::rules::{apply_healing, Condition, Landed};
+use crate::rules::{apply_healing, Condition, DamageRoll, Duration, Landed};
 use crate::sim::fight::reactions::{ac_boost_reaction, react_to_hit, standing_ac_boost};
 use crate::sim::fight::saves::saving_throw;
 use crate::sim::fight::threshold::{reducer, Shell};
@@ -230,6 +230,25 @@ impl<'a> Fight<'a> {
                             notes,
                             landed_conditions,
                         );
+                        // Damage of a type that also shoves - see
+                        // `Rider::PushOnDamage` - and then whatever the
+                        // creature just hit answers a blow with.
+                        self.shove_on_damage(
+                            me,
+                            current_target,
+                            dealt,
+                            &strike.damage,
+                            record,
+                            notes,
+                        );
+                        self.react_to_being_hit(
+                            rng,
+                            current_target,
+                            me,
+                            strike.kind,
+                            record,
+                            notes,
+                        );
                     }
                 }
             }
@@ -309,6 +328,7 @@ impl<'a> Fight<'a> {
                             self.fighters[i].creature.name
                         ));
                     }
+                    self.shove_on_damage(me, i, dealt, &save.damage, record, notes);
                     self.answer_breach(rng, me, i, shell, record, notes);
                 }
             }
@@ -389,6 +409,14 @@ impl<'a> Fight<'a> {
                             _ => dealt.to_string(),
                         });
                     }
+                    self.shove_on_damage(
+                        me,
+                        current_target,
+                        dealt,
+                        std::slice::from_ref(roll),
+                        record,
+                        notes,
+                    );
                     self.answer_breach(rng, me, current_target, shell, record, notes);
                 }
             }
@@ -588,6 +616,13 @@ impl<'a> Fight<'a> {
     /// A swallower that drops lets go of everything it holds.
     pub(super) fn apply_damage(&mut self, rng: &mut Rng, target: usize, dealt: i32) {
         let f = &mut self.fighters[target];
+        // "For 1 minute, or until it takes any damage": a blow snaps a turned
+        // Undead out of it, whatever the blow was and whoever landed it. A
+        // ward soaking the whole hit is still damage taken.
+        if dealt > 0 {
+            f.conditions
+                .retain(|&(_, expiry)| !matches!(expiry, Expiry::RoundsOrDamaged { .. }));
+        }
         // A ward takes the blow first, and what it cannot hold passes through.
         let soaked = dealt.min(f.temp_hp).max(0);
         f.temp_hp -= soaked;
@@ -604,6 +639,48 @@ impl<'a> Fight<'a> {
             self.release_summons(target);
         } else if dealt > 0 {
             self.concentration_check(rng, target, dealt);
+        }
+    }
+
+    /// Shove `victim` if `me` carries a [`Rider::PushOnDamage`] naming a
+    /// damage type `rolls` just dealt it, and it is small enough to move.
+    ///
+    /// Called wherever damage lands, whatever rolled it - an attack, a save,
+    /// a dart - because the text it serves asks only what type the damage
+    /// was. `dealt` is what actually got through: nothing is shoved by a blow
+    /// its target ignored entirely.
+    pub(super) fn shove_on_damage(
+        &mut self,
+        me: usize,
+        victim: usize,
+        dealt: i32,
+        rolls: &[DamageRoll],
+        record: bool,
+        notes: &mut Vec<String>,
+    ) {
+        if dealt <= 0 || !self.fighters[victim].alive() {
+            return;
+        }
+        let size = self.fighters[victim].creature.size;
+        let shoves = self.fighters[me].creature.riders.iter().any(|r| match r {
+            Rider::PushOnDamage { kinds, max_size } => {
+                size <= *max_size && rolls.iter().any(|roll| kinds.contains(&roll.kind))
+            }
+            _ => false,
+        });
+        if !shoves {
+            return;
+        }
+        let mut landed = Vec::new();
+        self.land_condition(
+            me,
+            victim,
+            Condition::Pushed,
+            Duration::ApplierTurn,
+            &mut landed,
+        );
+        if record {
+            notes.push(format!("pushed {}", self.fighters[victim].creature.name));
         }
     }
 
@@ -635,10 +712,164 @@ impl<'a> Fight<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::creature::{Creature, SaveEffect, Strike};
-    use crate::rules::{Ability, DamageKind, DamageRoll, Duration, HealRoll, Reduction};
+    use crate::creature::{Creature, Move, SaveEffect, Strike};
+    use crate::rules::{Ability, DamageKind, DamageRoll, Duration, HealRoll, Reduction, Size};
     use crate::sim::fight::test_support::{fight_of, no_log, puncher, strike_once};
     use crate::sim::{run, run_teams, Budget, Policy, Side};
+
+    /// Damage of a type that shoves: the blow lands, and so does the push -
+    /// but only on something small enough, and only from damage of a type
+    /// the rider names.
+    #[test]
+    fn damage_of_a_named_type_shoves_a_small_enough_victim() {
+        let storm = Creature::new("storm", 15, 60).with_rider(Rider::PushOnDamage {
+            kinds: vec![DamageKind::Lightning],
+            max_size: Size::Large,
+        });
+        let bolt = Move::new(
+            "Bolt",
+            Effect::Strikes {
+                strike: Strike::new(30, vec![DamageRoll::new(0, 1, 10, DamageKind::Lightning)]),
+                count: 1,
+            },
+        );
+        let cold = Move::new(
+            "Frost",
+            Effect::Strikes {
+                strike: Strike::new(30, vec![DamageRoll::new(0, 1, 10, DamageKind::Cold)]),
+                count: 1,
+            },
+        );
+
+        let pushed_by = |m: &Move, size: Size| {
+            let victim = Creature::new("victim", 1, 1_000).with_size(size);
+            let roster = [(&storm, Side::A), (&victim, Side::B)];
+            let (mut fight, mut rng) = fight_of(&roster, 31);
+            strike_once(&mut fight, &mut rng, 0, 1, m);
+            fight.fighters[1].has(|c| c == Condition::Pushed)
+        };
+
+        assert!(pushed_by(&bolt, Size::Medium));
+        assert!(
+            !pushed_by(&bolt, Size::Huge),
+            "a Large or smaller creature, says the rider"
+        );
+        assert!(
+            !pushed_by(&cold, Size::Medium),
+            "and only the damage type it names"
+        );
+    }
+
+    /// It answers damage dealt, not damage rolled: a target immune to the
+    /// type takes nothing and is not shoved.
+    #[test]
+    fn damage_that_never_lands_shoves_nobody() {
+        let storm = Creature::new("storm", 15, 60).with_rider(Rider::PushOnDamage {
+            kinds: vec![DamageKind::Lightning],
+            max_size: Size::Gargantuan,
+        });
+        let mut immune = Creature::new("immune", 1, 1_000);
+        immune
+            .reductions
+            .push((DamageKind::Lightning, Reduction::Immune));
+        let roster = [(&storm, Side::A), (&immune, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 32);
+        let bolt = Move::new(
+            "Bolt",
+            Effect::Strikes {
+                strike: Strike::new(30, vec![DamageRoll::new(0, 1, 10, DamageKind::Lightning)]),
+                count: 1,
+            },
+        );
+        assert_eq!(strike_once(&mut fight, &mut rng, 0, 1, &bolt), 0);
+        assert!(!fight.fighters[1].has(|c| c == Condition::Pushed));
+    }
+
+    /// A saving throw shoves exactly as an attack roll does - the rider asks
+    /// what type the damage was, not what rolled it.
+    #[test]
+    fn a_saving_throw_shoves_too() {
+        let storm = Creature::new("storm", 15, 60).with_rider(Rider::PushOnDamage {
+            kinds: vec![DamageKind::Lightning],
+            max_size: Size::Gargantuan,
+        });
+        let victim = Creature::new("victim", 1, 1_000);
+        let roster = [(&storm, Side::A), (&victim, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 33);
+        let burst = Move::new(
+            "Burst",
+            Effect::Save(SaveEffect {
+                ability: Ability::Dex,
+                dc: 99,
+                damage: vec![DamageRoll::new(0, 1, 10, DamageKind::Lightning)],
+                half_on_success: true,
+                on_failure: Vec::new(),
+                max_targets: None,
+                requires_type: None,
+            }),
+        );
+        strike_once(&mut fight, &mut rng, 0, 1, &burst);
+        assert!(fight.fighters[1].has(|c| c == Condition::Pushed));
+    }
+
+    /// "For a minute, or until it takes any damage": the clock runs, and any
+    /// blow at all ends it early - whoever lands it.
+    #[test]
+    fn a_condition_that_ends_on_damage_is_cleared_by_the_first_blow() {
+        let a = Creature::new("a", 10, 40);
+        let b = Creature::new("b", 10, 40);
+        let roster = [(&a, Side::A), (&b, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 34);
+        let mut landed = Vec::new();
+        fight.land_condition(
+            0,
+            1,
+            Condition::Frightened,
+            Duration::RoundsOrDamaged(10),
+            &mut landed,
+        );
+        assert!(fight.fighters[1].has(|c| c == Condition::Frightened));
+
+        // A turn passing does not end it - it has ten rounds on the clock.
+        fight.start_of_turn(0);
+        assert!(fight.fighters[1].has(|c| c == Condition::Frightened));
+
+        // Any damage does.
+        fight.apply_damage(&mut rng, 1, 3);
+        assert!(!fight.fighters[1].has(|c| c == Condition::Frightened));
+    }
+
+    /// A blow a ward soaks whole is still damage taken, and still ends it -
+    /// and a blow that lands nothing at all does not.
+    #[test]
+    fn only_damage_that_actually_arrives_ends_it() {
+        let a = Creature::new("a", 10, 40);
+        let b = Creature::new("b", 10, 40);
+        let roster = [(&a, Side::A), (&b, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 35);
+        let mut landed = Vec::new();
+        fight.land_condition(
+            0,
+            1,
+            Condition::Incapacitated,
+            Duration::RoundsOrDamaged(10),
+            &mut landed,
+        );
+
+        fight.apply_damage(&mut rng, 1, 0);
+        assert!(
+            fight.fighters[1].has(|c| c == Condition::Incapacitated),
+            "a blow that dealt nothing is not damage taken"
+        );
+
+        fight.fighters[1].temp_hp = 20;
+        fight.apply_damage(&mut rng, 1, 5);
+        assert_eq!(fight.fighters[1].hp, 40, "the ward held");
+        assert!(
+            !fight.fighters[1].has(|c| c == Condition::Incapacitated),
+            "but it was still damage taken"
+        );
+    }
 
     /// Paralyzed adds one thing Stunned does not: a hit against it is an
     /// automatic critical. The paralyzer lands the condition with its action,

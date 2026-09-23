@@ -14,6 +14,7 @@ mod moves;
 mod traits;
 
 pub use duration::{parse_duration, DurationSpec};
+pub use lex::parse_damage as parse_damage_external;
 pub use moves::{parse_move_external, parse_reaction_external};
 pub use traits::{parse_trait_external, TraitEffect};
 

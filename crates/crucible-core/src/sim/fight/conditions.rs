@@ -83,6 +83,10 @@ impl<'a> Fight<'a> {
                 who: applier,
                 left: n.max(1),
             },
+            Duration::RoundsOrDamaged(n) => Expiry::RoundsOrDamaged {
+                who: applier,
+                left: n.max(1),
+            },
             Duration::SaveEndTurn { ability, dc } => Expiry::SaveEachTurn {
                 victim,
                 ability,

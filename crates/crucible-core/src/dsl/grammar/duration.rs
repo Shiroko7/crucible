@@ -5,6 +5,10 @@ use crate::dsl::grammar::count;
 use crate::dsl::grammar::lex::arg;
 use crate::rules::{Ability, Duration};
 
+/// How many rounds a minute of game time is, which is the clock every "for 1
+/// minute" effect is written against.
+const A_MINUTE: u32 = 10;
+
 /// A duration as written, before the save it might refer back to is known -
 /// `until save` repeats "the" save, and in a move whose clauses come in any
 /// order that save may not have been read yet.
@@ -35,8 +39,11 @@ impl DurationSpec {
 /// - `until applier|mine|my`: [`Duration::ApplierTurn`];
 /// - `until end`: [`Duration::ApplierNextTurnEnd`];
 /// - `until save`: [`Duration::SaveEndTurn`], against the triggering save;
+/// - `until damaged`: [`Duration::RoundsOrDamaged`] for a minute - a turned
+///   Undead snapping out of it the moment anything hits it;
 /// - `for N round(s)|minute(s)|hour(s)`: [`Duration::Rounds`], a minute being
-///   ten rounds.
+///   ten rounds - followed by `or damaged` for the same clock with the early
+///   exit ([`Duration::RoundsOrDamaged`]).
 ///
 /// Anything else is left for the caller, which is why the word count comes
 /// back rather than the rest being rejected here.
@@ -53,6 +60,9 @@ pub fn parse_duration(
                 "applier" | "mine" | "my" => DurationSpec::Fixed(Duration::ApplierTurn),
                 "end" => DurationSpec::Fixed(Duration::ApplierNextTurnEnd),
                 "save" => DurationSpec::UntilSave,
+                // "for 1 minute, or until it takes any damage", written as
+                // its short half: the minute is implied.
+                "damaged" | "damage" => DurationSpec::Fixed(Duration::RoundsOrDamaged(A_MINUTE)),
                 other => return Err(format!("`until {other}` is not a duration")),
             };
             Ok((spec, 2))
@@ -62,11 +72,29 @@ pub fn parse_duration(
             let unit = arg(words, at + 2, clause)?.to_ascii_lowercase();
             let rounds = match unit.trim_end_matches('s') {
                 "round" => n,
-                "minute" => n * 10,
-                "hour" => n * 600,
+                "minute" => n * A_MINUTE,
+                "hour" => n * 60 * A_MINUTE,
                 other => return Err(format!("`{other}` is not a unit of time in `{clause}`")),
             };
-            Ok((DurationSpec::Fixed(Duration::Rounds(rounds)), 3))
+            // `for 1 minute or damaged` / `... or until damaged`: the same
+            // clock, ended early by any damage its holder takes.
+            let tail: Vec<String> = words[at + 3..]
+                .iter()
+                .take(3)
+                .map(|w| w.to_ascii_lowercase())
+                .collect();
+            let ends_on_damage = match tail.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                ["or", "damaged", ..] | ["or", "damage", ..] => Some(2),
+                ["or", "until", "damaged"] | ["or", "until", "damage"] => Some(3),
+                _ => None,
+            };
+            Ok(match ends_on_damage {
+                Some(used) => (
+                    DurationSpec::Fixed(Duration::RoundsOrDamaged(rounds)),
+                    3 + used,
+                ),
+                None => (DurationSpec::Fixed(Duration::Rounds(rounds)), 3),
+            })
         }
         _ => Ok((DurationSpec::Fixed(Duration::ApplierTurn), 0)),
     }
@@ -77,6 +105,42 @@ mod tests {
     use super::*;
     use crate::creature::{Effect, Rider};
     use crate::dsl::scenario::parse;
+
+    /// "For 1 minute, or until it takes any damage" - written either way
+    /// round, and on either kind of clause.
+    #[test]
+    fn a_condition_can_end_on_damage_taken() {
+        let text = "
+creature: x
+hp: 20
+action: A | save wis dc 15 | 0 force | on fail frightened until damaged
+action: B | save wis dc 15 | 0 force | on fail incapacitated for 2 rounds or damaged
+action: C | save wis dc 15 | 0 force | on fail prone for 1 minute or until damaged
+action: D | hit +5 | 1d6 fire | on hit save con dc 12 stunned until damaged
+";
+        let c = &parse(text).unwrap()[0];
+        let fail = |i: usize| match &c.actions[i].effect {
+            Effect::Save(save) => save.on_failure[0].1,
+            other => panic!("expected a save, got {other:?}"),
+        };
+        assert_eq!(fail(0), Duration::RoundsOrDamaged(10));
+        assert_eq!(fail(1), Duration::RoundsOrDamaged(2));
+        assert_eq!(fail(2), Duration::RoundsOrDamaged(10));
+        let Rider::SaveOrCondition { duration, .. } = &c.actions[3].riders[0] else {
+            panic!("expected a save-or-condition rider");
+        };
+        assert_eq!(*duration, Duration::RoundsOrDamaged(10));
+
+        // The plain clock still reads as itself.
+        let plain = &parse(
+            "creature: x\nhp: 4\naction: E | save wis dc 15 | 0 force | on fail prone for 3 rounds\n",
+        )
+        .unwrap()[0];
+        let Effect::Save(save) = &plain.actions[0].effect else {
+            unreachable!()
+        };
+        assert_eq!(save.on_failure[0].1, Duration::Rounds(3));
+    }
 
     /// `until save` refers back to the move's own save wherever the clauses
     /// fall, and every other duration phrase reads as written.

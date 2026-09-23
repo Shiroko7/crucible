@@ -44,7 +44,7 @@ times, reported.
 | attacks | `rules::attack` | attack resolution, both exact and sampled: crits, advantage, resistance, composable `AttackModifier`/`DamageRider` lists (Bless, Bane, extra damage dice) |
 | `creature` | `creature` | modular combatant model: moves and their effects, multi-type damage (either of two types, chosen per target), saves, recharge, resource pools, riders, reactions that are moves of their own, auras, lasting boons, summons |
 | riders | `creature::rider` | Evasion, Legendary Resistance (and a ring that rescues one kind of save for a reaction), Stunning Strike, Sneak Attack and Cunning Strike, bonus dice against a creature type or against a marked quarry, dice on the first hit of each of its turns, weapon buffs armed by a condition, injury poisons, immunity downgrades, a damage threshold with a weak spot, swallowing, and reactions (Deflect Attacks, Uncanny Dodge, a reactive AC boost that can stay up) - as general mechanisms, all applied in live fights |
-| features | `features` | the ruleset as plugins (`FeaturePlugin`, `CreatureBuilder`, `FeatureRegistry`), one file per feature: `classes/` (a folder per class and subclass), `spells/`, `monsters/`, `spellcasting/`, `items/`, `summons/`, and a lasting boon directly under `features/`; each feature registers its own TOML factory |
+| features | `features` | the ruleset as plugins (`FeaturePlugin`, `CreatureBuilder`, `FeatureRegistry`), one file per feature: `classes/` (a folder per class and subclass - Cleric and Rogue so far), `spells/`, `monsters/`, `spellcasting/`, `items/`, `summons/`, and the mechanisms no one class owns directly under `features/` - a lasting boon, a raised aura, a reaction that answers a blow, a cast taken at its maximum; each feature registers its own TOML factory |
 | grammar | `dsl::grammar` | the phrase grammar moves and traits are written in, shared by every creature format and by features that take a move as a parameter |
 | `scenario` | `dsl::scenario` | scenario parser supporting both external creature configs (`source:`) and inline declarations |
 | configs | `dsl::config` | TOML PC and Monster loaders |
@@ -80,6 +80,11 @@ lot:
 | `Banished` | sent elsewhere for the duration: it acts on nothing and nothing reaches it, and it comes back when the spell ends |
 | `Components` | V/S/M on a cast, so Silence stops what has to be spoken rather than every spell |
 | `Aura` raised and held | a ring of spirits, a burning field: a cast that every enemy answers at the start of its turn, for as long as concentration holds it |
+| a reaction `when hit` | a storm answering whoever closes with its priest, a mantle of thorns: it does not stop the blow, it makes landing one cost something |
+| a move taken at its maximum | a charge spent to stop rolling and take what the dice could never beat - a domain's wrath, a metamagic that empowers a blast |
+| `PushOnDamage` | damage of one type also shoves what it lands on: a thunderbolt that throws a Large or smaller creature back |
+| `RoundsOrDamaged` | "for a minute, or until it takes any damage" - a turned Undead snapping out of it the moment anything hits it |
+| a save `only` one type is caught by | turning the Undead, Hold Person's humanoid: anything else is not caught at all rather than saving against it |
 | `Summon` with `Requirement` | a double called up beside its summoner, commanded out of its bonus action and spent in a burst |
 | damage of either type | a blade that can deal cold "instead of the weapon's normal damage type" |
 | `DamageThreshold` | an armoured shell or hull; a mouth or a crack as its weak spot |
@@ -200,6 +205,7 @@ scores the same as the move it is meant to beat.
 ```bash
 cargo run --release -p crucible-cli -- scenarios/gio-vs-adult-red-dragon.crucible
 cargo run --release -p crucible-cli -- scenarios/gio-vs-ogre.crucible
+cargo run --release -p crucible-cli -- scenarios/storm-cleric-vs-skeletons.crucible
 ```
 
 Each prints what it read — including traits and resource pools, since
@@ -283,5 +289,8 @@ a monster: a shell, a gullet, an aura, reactions and legendary actions of severa
 enemies stand around it, under each tactic. `tests/dual_wielding_summoner.rs` does it for a
 two-weapon build: a marked quarry, a swarm joining one blow a turn, an enchantment on one of
 its two blades, a form it puts on for a minute, a parry that stays up, a ring that rescues a
-failed save, and doubles it calls up and commands. `dsl::scenario`'s module docs list the
-move and trait syntax.
+failed save, and doubles it calls up and commands. `tests/storm_priest.rs` does it for a
+divine caster: a pool of charges spent on a burst, on a dying ally or on turning the Undead,
+a storm that answers whoever hits it in melee, a cast taken at its maximum for one of those
+charges, spirits raised in a ring, and lightning that shoves what it hits.
+`dsl::scenario`'s module docs list the move and trait syntax.

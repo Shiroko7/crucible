@@ -386,6 +386,22 @@ pub enum ReactionTrigger {
     /// [`crate::creature::Rider::DamageThreshold`]. The reaction answers
     /// whoever dealt it.
     Breached,
+    /// An attack of this kind has just hit this creature. The reaction
+    /// answers whoever landed it - a storm answering whoever closes with its
+    /// priest, a shell of spikes, a cloak of thorns.
+    ///
+    /// Carries a [`crate::creature::AttackTrigger`] rather than firing on
+    /// anything at all, because every printed version of this says which
+    /// blows it answers: "hits you with a melee attack" is the common one,
+    /// and it is the same question a raised shield already asks of an
+    /// incoming attack ([`crate::creature::Rider::ReactionOnTargeted`]), so
+    /// it asks it with the same type.
+    ///
+    /// The mirror of that rider, and the reason both exist: a reactive Armor
+    /// Class boost answers an attack *before* it is resolved and changes
+    /// whether it lands, while this answers one that already has and does
+    /// something back.
+    Hit(crate::creature::AttackTrigger),
 }
 
 /// A reaction that is a move of its own - an attack, a burst forcing a save

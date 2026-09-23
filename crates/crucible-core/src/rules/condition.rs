@@ -33,6 +33,17 @@ pub enum Condition {
     /// [`Condition::auto_crits`]: a hit landed against it is an automatic
     /// critical.
     Paralyzed,
+    /// Incapacitated and nothing else: no actions, bonus actions, reactions
+    /// or legendary actions, but no auto-failed saves and no advantage to
+    /// whoever attacks it.
+    ///
+    /// The 5e condition on its own, which several others bundle -
+    /// [`Condition::Stunned`], [`Condition::Paralyzed`] and
+    /// [`Condition::Petrified`] all include it and add to it. What reaches
+    /// for it bare is anything that takes a creature's turn away without
+    /// making it easier to hit: an Undead turned by a cleric, a creature
+    /// staring at a hypnotic pattern.
+    Incapacitated,
     /// Can't hear. Carries none of Blinded's combat modifiers - nothing here
     /// rolls a hearing-based check any more than an ability check, so this is
     /// tracked for provenance (Blindness/Deafness names it explicitly as the
@@ -256,6 +267,7 @@ impl Condition {
             "poisoned" => Self::Poisoned,
             "blinded" => Self::Blinded,
             "paralyzed" | "paralysed" => Self::Paralyzed,
+            "incapacitated" => Self::Incapacitated,
             "deafened" | "deafen" => Self::Deafened,
             "compelled" | "compel" => Self::Compelled,
             "steady_aim" | "steady aim" => Self::SteadyAim,
@@ -296,6 +308,7 @@ impl Condition {
             Self::Poisoned => "poisoned",
             Self::Blinded => "blinded",
             Self::Paralyzed => "paralyzed",
+            Self::Incapacitated => "incapacitated",
             Self::Deafened => "deafened",
             Self::Compelled => "compelled",
             Self::SteadyAim => "steady_aim",
@@ -340,7 +353,11 @@ impl Condition {
     pub fn incapacitated(self) -> bool {
         matches!(
             self,
-            Self::Stunned | Self::Paralyzed | Self::Petrified | Self::Banished
+            Self::Stunned
+                | Self::Paralyzed
+                | Self::Petrified
+                | Self::Banished
+                | Self::Incapacitated
         )
     }
 
@@ -490,6 +507,15 @@ pub enum Duration {
     /// A fixed number of rounds, counted down at the start of each of the
     /// applier's turns - "for 1 minute" with no repeated save is `Rounds(10)`.
     Rounds(u32),
+    /// [`Duration::Rounds`], but any damage the victim takes ends it early -
+    /// "for 1 minute or until it takes damage", which is how a turned Undead
+    /// snaps out of it and what every fear effect written that way needs.
+    ///
+    /// A separate variant rather than a flag on `Rounds` because it ends
+    /// somewhere else entirely: the clock still runs on the applier's turns,
+    /// but the early exit happens wherever damage lands (see
+    /// `sim::fight`'s damage application), not at a turn boundary.
+    RoundsOrDamaged(u32),
     /// Repeats `ability` against `dc` at the end of the victim's own turn,
     /// clearing the condition on a success. Kept as data on the duration
     /// rather than a new engine branch, the same way `SaveOrCondition` keeps

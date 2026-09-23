@@ -203,7 +203,9 @@ impl<'a> Fight<'a> {
                     .get(*which)
                     .map_or(0.0, |aura| {
                         let horizon = match duration {
-                            Duration::Rounds(rounds) => (*rounds).min(self.budget.depth.max(1)),
+                            Duration::Rounds(rounds) | Duration::RoundsOrDamaged(rounds) => {
+                                (*rounds).min(self.budget.depth.max(1))
+                            }
                             _ => 1,
                         };
                         f64::from(horizon) * aura.effect.mean_damage(self.fighters[target].creature)
@@ -285,7 +287,9 @@ impl<'a> Fight<'a> {
     /// by the solver, which plays it out and sees the difference.
     fn lasting_value(&self, me: usize, target: usize, duration: Duration, boost: Boost<'_>) -> f64 {
         let horizon = match duration {
-            Duration::Rounds(rounds) => rounds.min(self.budget.depth.max(1)),
+            Duration::Rounds(rounds) | Duration::RoundsOrDamaged(rounds) => {
+                rounds.min(self.budget.depth.max(1))
+            }
             // Anything ending at a turn boundary is one turn of it.
             _ => 1,
         };

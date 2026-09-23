@@ -77,6 +77,14 @@ pub fn print_sheet(roster: &[&Creature]) {
                     format!("when enemy {}: ", condition.name())
                 }
                 ReactionTrigger::Breached => "when breached: ".to_string(),
+                ReactionTrigger::Hit(trigger) => format!(
+                    "when hit{}: ",
+                    match trigger {
+                        AttackTrigger::AnyAttack => "",
+                        AttackTrigger::MeleeAttack => " in melee",
+                        AttackTrigger::RangedWeaponAttack => " by a ranged weapon",
+                    }
+                ),
             };
             print_move("reaction", &r.action, when);
         }
@@ -332,6 +340,9 @@ pub fn describe_boon(boon: &Boon) -> String {
                 .join("/")
         ));
     }
+    if boon.ac != 0 {
+        parts.push(format!("{:+} AC", boon.ac));
+    }
     format!("{}: {}", boon.name, parts.join(", "))
 }
 
@@ -415,9 +426,16 @@ pub fn describe_trait(rider: &Rider) -> String {
             dice_sides,
             bonus,
             damage_kind,
+            weapon_only,
         } => format!(
-            "+{dice_count}d{dice_sides}{bonus:+} {} on its first hit each of its turns",
-            damage_kind.name()
+            "+{dice_count}d{dice_sides}{bonus:+} {} on its first {}hit each of its turns",
+            damage_kind.name(),
+            if *weapon_only { "weapon " } else { "" }
+        ),
+        Rider::PushOnDamage { kinds, max_size } => format!(
+            "its {} damage also pushes a {} or smaller creature",
+            kinds.iter().map(|k| k.name()).collect::<Vec<_>>().join("/"),
+            max_size.name()
         ),
         Rider::BonusDamageVsQuarry {
             dice_count,
