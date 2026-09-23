@@ -1,0 +1,8 @@
+# A level 8 storm cleric against an ordinary ogre, as a control - the same
+# fight `gio-vs-ogre.crucible` runs, with a caster in the monk's place.
+
+team: a
+source: content/characters/storm-cleric.toml
+
+team: b
+source: content/monsters/ogre.toml

@@ -211,6 +211,37 @@ pub enum Rider {
         dice_sides: u32,
         bonus: i32,
         damage_kind: DamageKind,
+        /// Only a weapon attack carries it - "when you hit a creature with an
+        /// attack roll using a weapon", which is how a divine strike and most
+        /// class features of this shape are written. `false` is the kind that
+        /// rides anything at all: a swarm joining whatever its host does.
+        weapon_only: bool,
+    },
+    /// Damage this creature deals of one of these types also shoves whoever
+    /// took it, as long as that creature is `max_size` or smaller: it gains
+    /// [`Condition::Pushed`], which moves it a zone further out around a
+    /// creature with a mouth (see [`crate::creature::Zone::pushed`]).
+    ///
+    /// A storm domain's thunderbolt - "when you deal lightning damage to a
+    /// Large or smaller creature, you can push it" - and anything else whose
+    /// damage type is what does the shoving: a gust, a wave, a shockwave
+    /// hammer. Distinct from an `on fail pushed` clause, which belongs to one
+    /// move: this rides every blow the creature lands of the named types,
+    /// whether it was an attack roll, a saving throw or a dart that simply
+    /// hits, and it asks nothing of the roll - only that the damage landed.
+    ///
+    /// Nothing is pushed by damage that was entirely soaked or ignored, since
+    /// what the text answers is damage actually dealt.
+    ///
+    /// Where the shove actually *moves* anything is the same place every
+    /// other push here does: around a creature with a mouth, whose enemies
+    /// stand somewhere (see `sim::fight`'s zones). Everywhere else there is
+    /// no positioning for it to change, so the condition lands and means
+    /// nothing - the same honest gap an `on fail pushed` clause on a spell
+    /// already has.
+    PushOnDamage {
+        kinds: Vec<DamageKind>,
+        max_size: Size,
     },
     /// Extra damage dice on every hit against the creature this one has
     /// marked as its quarry - the [`Condition::Quarry`] its own

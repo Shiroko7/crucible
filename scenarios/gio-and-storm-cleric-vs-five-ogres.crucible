@@ -1,0 +1,11 @@
+# A monk and a cleric against five ogres: two characters, so the spells that
+# buff or heal somebody else have somebody else to reach, and enough enemies
+# that a burst is worth more than a single blow.
+
+team: a
+source: content/characters/gio.toml
+source: content/characters/storm-cleric.toml
+
+team: b
+source: content/monsters/ogre.toml
+count: 5

@@ -6,7 +6,7 @@ use crate::dsl::grammar::lex::{
     arg, parse_damage, parse_damage_kinds, parse_dice, trailing_number,
 };
 use crate::dsl::grammar::{count, number, parse_duration};
-use crate::rules::{Ability, Condition, CreatureType, DamageKind, DamageRoll, Reduction};
+use crate::rules::{Ability, Condition, CreatureType, DamageKind, DamageRoll, Reduction, Size};
 
 /// The direct effect of one `trait:` line.
 ///
@@ -236,7 +236,8 @@ pub(crate) fn parse_trait(value: &str) -> Result<TraitEffect, String> {
         }
         // `once per turn 1d6 piercing` - extra dice on the first hit this
         // creature lands on each of its own turns, whatever it hits with: a
-        // swarm that joins one blow a turn.
+        // swarm that joins one blow a turn. `... with a weapon` narrows it to
+        // a weapon attack, which is how a divine strike is written.
         "once" => {
             let at = words
                 .iter()
@@ -246,15 +247,56 @@ pub(crate) fn parse_trait(value: &str) -> Result<TraitEffect, String> {
             let kind_word = arg(&words, at + 1, value)?;
             let damage_kind = DamageKind::parse(kind_word)
                 .ok_or_else(|| format!("unknown damage type `{kind_word}` in `{value}`"))?;
-            if at + 2 != words.len() {
-                return Err(format!("unexpected words at the end of `{value}`"));
-            }
+            let tail = words[(at + 2).min(words.len())..]
+                .iter()
+                .map(|w| w.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let weapon_only = match tail.as_str() {
+                "" => false,
+                "with a weapon" | "with weapons" | "on weapon hits" => true,
+                other => {
+                    return Err(format!(
+                        "`{other}` is not part of `once per turn NdM <type> [with a weapon]`"
+                    ))
+                }
+            };
             Ok(TraitEffect::Rider(Rider::OncePerTurnDamage {
                 dice_count: dice,
                 dice_sides: sides,
                 bonus,
                 damage_kind,
+                weapon_only,
             }))
+        }
+        // `push on lightning, thunder [up to large]` - damage of those types
+        // also shoves whoever takes it, if it is that size or smaller.
+        "push" | "shove" => {
+            if !arg(&words, 1, value)?.eq_ignore_ascii_case("on") {
+                return Err(format!(
+                    "expected `push on <damage types> [up to <size>]`, got `{value}`"
+                ));
+            }
+            // `up to <size>`, if it is there at all: what is before it is the
+            // damage type list.
+            let (kinds_words, max_size) = match words
+                .iter()
+                .position(|w| w.eq_ignore_ascii_case("up") || w.eq_ignore_ascii_case("size"))
+            {
+                Some(at) => {
+                    let size_word = words.last().copied().unwrap_or_default();
+                    let size = Size::parse(size_word)
+                        .ok_or_else(|| format!("unknown size `{size_word}` in `{value}`"))?;
+                    (&words[2..at], size)
+                }
+                // Nothing said: this shoves whatever it lands on.
+                None => (&words[2..], Size::Gargantuan),
+            };
+            let kinds = parse_damage_kinds(&kinds_words.join(" "), value)?;
+            if kinds.is_empty() {
+                return Err(format!("`{value}` needs at least one damage type"));
+            }
+            Ok(TraitEffect::Rider(Rider::PushOnDamage { kinds, max_size }))
         }
         // `quarry 1d6 force` - extra dice on every hit against whatever this
         // creature has marked as its quarry and is still concentrating on.
@@ -522,7 +564,60 @@ pub(super) fn parse_bonus_vs(words: &[&str], clause: &str) -> Result<Rider, Stri
 mod tests {
     use super::*;
     use crate::dsl::scenario::parse;
-    use crate::rules::Duration;
+    use crate::rules::{DamageKind, Duration, Size};
+
+    /// `push on <types> [up to <size>]` - damage of those types also shoves
+    /// whoever takes it, if it is small enough.
+    #[test]
+    fn damage_of_a_type_can_shove_what_it_hits() {
+        let text = "
+creature: x
+hp: 10
+trait: push on lightning, thunder up to large
+trait: shove on cold
+";
+        let c = &parse(text).unwrap()[0];
+        assert_eq!(
+            c.riders[0],
+            Rider::PushOnDamage {
+                kinds: vec![DamageKind::Lightning, DamageKind::Thunder],
+                max_size: Size::Large,
+            }
+        );
+        assert_eq!(
+            c.riders[1],
+            Rider::PushOnDamage {
+                kinds: vec![DamageKind::Cold],
+                // Nothing said: it shoves whatever it lands on.
+                max_size: Size::Gargantuan,
+            }
+        );
+
+        // `with a weapon` narrows it to a weapon attack; anything else
+        // after the damage type is a typo rather than a phrase.
+        let narrowed =
+            &parse("creature: x\nhp: 1\ntrait: once per turn 1d8 thunder with a weapon\n").unwrap()
+                [0];
+        assert_eq!(
+            narrowed.riders[0],
+            Rider::OncePerTurnDamage {
+                dice_count: 1,
+                dice_sides: 8,
+                bonus: 0,
+                damage_kind: DamageKind::Thunder,
+                weapon_only: true,
+            }
+        );
+        assert!(parse("creature: x\nhp: 1\ntrait: once per turn 1d8 thunder sideways\n").is_err());
+
+        for bad in [
+            "creature: x\nhp: 1\ntrait: push on sparkly\n",
+            "creature: x\nhp: 1\ntrait: push on lightning up to colossal\n",
+            "creature: x\nhp: 1\ntrait: push lightning\n",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn traits_become_riders() {
@@ -578,6 +673,7 @@ trait: reaction ac 5 vs ranged weapon
                     dice_sides: 6,
                     bonus: 0,
                     damage_kind: DamageKind::Piercing,
+                    weapon_only: false,
                 },
                 Rider::BonusDamageVsQuarry {
                     dice_count: 1,

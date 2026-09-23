@@ -18,10 +18,14 @@ pub mod summons;
 
 mod aura;
 mod boon;
+mod maximised;
 mod plugin;
 mod registry;
+mod retaliation;
 
 pub use aura::LastingAuraPlugin;
 pub use boon::LastingBoonPlugin;
+pub use maximised::MaximisedDamagePlugin;
 pub use plugin::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
 pub use registry::{FeatureRegistry, PluginFactory};
+pub use retaliation::RetaliationPlugin;

@@ -59,7 +59,7 @@ pub(super) fn parse_dice(expr: &str) -> Result<(u32, u32, i32), String> {
 
 /// `1d10+8 slashing, 2d4 fire` - or a flat `5 fire`, or `1d6+7 slashing or
 /// cold` for damage its dealer can choose the type of per attack.
-pub(super) fn parse_damage(clause: &str) -> Result<Vec<DamageRoll>, String> {
+pub fn parse_damage(clause: &str) -> Result<Vec<DamageRoll>, String> {
     let mut out = Vec::new();
     for term in clause.split(',') {
         let mut words = term.split_whitespace();

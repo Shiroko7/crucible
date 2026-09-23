@@ -134,7 +134,9 @@ impl<'a> Fight<'a> {
             f.offer_reaction();
             f.conditions.retain_mut(|(_, expiry)| match expiry {
                 Expiry::TurnStart(x) => *x != who,
-                Expiry::Rounds { who: w, left } if *w == who => {
+                Expiry::Rounds { who: w, left } | Expiry::RoundsOrDamaged { who: w, left }
+                    if *w == who =>
+                {
                     *left = left.saturating_sub(1);
                     *left > 0
                 }

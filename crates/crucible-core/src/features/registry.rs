@@ -1,8 +1,8 @@
 //! Feature registry for looking up and instantiating known feature plugins.
 
 use crate::features::{
-    aura, boon, classes, items, monsters, spellcasting, spells, summons, FeatureError,
-    FeaturePlugin, FeatureResult,
+    aura, boon, classes, items, maximised, monsters, retaliation, spellcasting, spells, summons,
+    FeatureError, FeaturePlugin, FeatureResult,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,7 +53,9 @@ impl FeatureRegistry {
         boon::register(self);
         classes::register(self);
         items::register(self);
+        maximised::register(self);
         monsters::register(self);
+        retaliation::register(self);
         spellcasting::register(self);
         spells::register(self);
         summons::register(self);

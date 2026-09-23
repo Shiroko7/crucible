@@ -10,6 +10,7 @@
 //! `reduce <dice> <types>`, which builds
 //! [`crate::creature::Rider::ReduceDamage`] without naming a class.
 
+pub mod cleric;
 pub mod rogue;
 
 mod evasion;
@@ -18,6 +19,7 @@ use crate::features::FeatureRegistry;
 pub use evasion::EvasionPlugin;
 
 pub(super) fn register(registry: &mut FeatureRegistry) {
+    cleric::register(registry);
     evasion::register(registry);
     rogue::register(registry);
 }

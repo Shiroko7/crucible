@@ -2,8 +2,8 @@
 //! it costs, joined with `&&` for a move made of several effects.
 
 use crate::creature::{
-    AttackKind, Cost, Creature, Effect, Move, MoveKind, Reach, Reaction, ReactionTrigger, Rider,
-    SaveEffect, Strike, Uses,
+    AttackKind, AttackTrigger, Cost, Creature, Effect, Move, MoveKind, Reach, Reaction,
+    ReactionTrigger, Rider, SaveEffect, Strike, Uses,
 };
 use crate::dsl::grammar::lex::{arg, parse_damage, parse_dice};
 use crate::dsl::grammar::traits::parse_bonus_vs;
@@ -104,7 +104,10 @@ pub fn parse_reaction_external(value: &str, owner: &Creature) -> Result<Reaction
 /// - `when enemy <condition>`: this creature has just given an enemy that
 ///   condition ([`ReactionTrigger::EnemyGains`]);
 /// - `when breached`: damage has just broken through its damage threshold
-///   ([`ReactionTrigger::Breached`]).
+///   ([`ReactionTrigger::Breached`]);
+/// - `when hit`, `when hit in melee`, `when hit by a ranged weapon`: an
+///   attack of that kind has just landed on it, and the reaction answers
+///   whoever landed it ([`ReactionTrigger::Hit`]).
 pub(crate) fn parse_reaction(value: &str, owner: &Creature) -> Result<Reaction, String> {
     let mut trigger = None;
     let mut kept: Vec<&str> = Vec::new();
@@ -126,9 +129,12 @@ pub(crate) fn parse_reaction(value: &str, owner: &Creature) -> Result<Reaction, 
             [w, name] if w.eq_ignore_ascii_case("enemy") => ReactionTrigger::EnemyGains(
                 Condition::parse(name).ok_or_else(|| format!("unknown condition `{name}`"))?,
             ),
+            [w, ref rest @ ..] if w.eq_ignore_ascii_case("hit") => {
+                ReactionTrigger::Hit(parse_attack_trigger(rest, clause)?)
+            }
             _ => {
                 return Err(format!(
-                    "expected `when enemy <condition>` or `when breached`, got `{}`",
+                    "expected `when enemy <condition>`, `when breached` or `when hit [in melee]`,                      got `{}`",
                     clause.trim()
                 ))
             }
@@ -143,6 +149,33 @@ pub(crate) fn parse_reaction(value: &str, owner: &Creature) -> Result<Reaction, 
     Ok(Reaction {
         trigger,
         action: parse_move(&kept.join("|"), owner)?,
+    })
+}
+
+/// Which attacks a `when hit` reaction answers: nothing at all for any of
+/// them, `in melee` for a blade, `by a ranged weapon` for an arrow.
+///
+/// The same three an [`crate::creature::AttackTrigger`] names, since it is
+/// the same question a raised shield asks - see [`ReactionTrigger::Hit`].
+fn parse_attack_trigger(words: &[&str], clause: &str) -> Result<AttackTrigger, String> {
+    let phrase = words
+        .iter()
+        .map(|w| w.to_ascii_lowercase())
+        .filter(|w| w != "a" && w != "an" && w != "attack" && w != "attacks")
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(match phrase.as_str() {
+        "" | "by any" | "any" => AttackTrigger::AnyAttack,
+        "in melee" | "by melee" | "melee" => AttackTrigger::MeleeAttack,
+        "by ranged weapon" | "ranged weapon" | "by ranged" | "ranged" => {
+            AttackTrigger::RangedWeaponAttack
+        }
+        other => {
+            return Err(format!(
+                "`hit {other}` is not an attack trigger in `{}` - use `when hit`,                  `when hit in melee` or `when hit by a ranged weapon`",
+                clause.trim()
+            ))
+        }
     })
 }
 
@@ -180,6 +213,7 @@ fn parse_body<'a>(
     let mut weapon_named = false;
     let mut weapon_label: Option<&str> = None;
     let mut to_swallowed = false;
+    let mut requires_type: Option<String> = None;
     let mut out = Body::default();
 
     for clause in clauses {
@@ -206,6 +240,16 @@ fn parse_body<'a>(
                 out.spell_slot_level = Some(level);
             }
             "concentration" => out.concentration = true,
+            // `only undead` - a save nothing else is even caught by, which
+            // is Hold Person's "you can only target a humanoid" and Turn
+            // Undead's "each Undead of your choice".
+            "only" => {
+                let name = arg(&words, 1, clause)?;
+                if crate::rules::CreatureType::parse(name).is_none() {
+                    return Err(format!("unknown creature type `{name}` in `{clause}`"));
+                }
+                requires_type = Some(name.to_string());
+            }
             // `components v`, `components verbal, somatic`, `components none`
             // - which of the three a cast needs, so Silence can stop the ones
             // that speak rather than every spell. See `creature::Components`.
@@ -287,6 +331,12 @@ fn parse_body<'a>(
     attack.spell = spell;
     attack.weapon = !spell || weapon_named;
 
+    if requires_type.is_some() && save.is_none() {
+        return Err(
+            "`only <creature type>` restricts a saving throw: give the move a `save`".into(),
+        );
+    }
+
     let on_failure = on_failure
         .into_iter()
         .map(|(condition, spec)| Ok((condition, spec.resolve(save, "on fail")?)))
@@ -314,9 +364,7 @@ fn parse_body<'a>(
             half_on_success,
             on_failure,
             max_targets,
-            // The DSL has no clause for it yet; a scenario that needs a
-            // type-restricted save waits on that syntax, not on the engine.
-            requires_type: None,
+            requires_type,
         }))
     } else if !damage.is_empty() {
         let to_hit = to_hit.ok_or("a damaging move needs a `hit +N` clause or a `save`")?;
@@ -448,6 +496,64 @@ mod tests {
     use super::*;
     use crate::dsl::scenario::parse;
     use crate::rules::{DamageKind, DamageRoll};
+
+    /// A reaction that answers whoever hits it - the three phrasings, and the
+    /// blows each one waits for.
+    #[test]
+    fn a_reaction_can_wait_for_a_blow_that_lands() {
+        let text = "creature: x\nhp: 30\n\
+             reaction: Wrath | when hit in melee | uses 3 | save dex dc 16 | 2d8 lightning \
+             | half on success\n\
+             reaction: Spite | when hit | 2d6 psychic | hit +0\n\
+             reaction: Bristle | when hit by a ranged weapon | save dex dc 14 | 1d6 piercing\n";
+        let c = &parse(text).unwrap()[0];
+        assert_eq!(
+            c.reactions[0].trigger,
+            ReactionTrigger::Hit(AttackTrigger::MeleeAttack)
+        );
+        assert_eq!(c.reactions[0].action.uses, Uses::Limited(3));
+        assert_eq!(
+            c.reactions[1].trigger,
+            ReactionTrigger::Hit(AttackTrigger::AnyAttack)
+        );
+        assert_eq!(
+            c.reactions[2].trigger,
+            ReactionTrigger::Hit(AttackTrigger::RangedWeaponAttack)
+        );
+
+        let Effect::Save(save) = &c.reactions[0].action.effect else {
+            panic!("expected a saving throw");
+        };
+        assert_eq!(save.dc, 16);
+        assert!(save.half_on_success);
+
+        let bad =
+            parse("creature: x\nhp: 1\nreaction: X | when hit sideways | 1d6 fire | hit +0\n");
+        assert!(bad.is_err(), "`when hit sideways` is not a trigger");
+    }
+
+    /// `only <type>` restricts who a save even catches - and it needs a save
+    /// to restrict.
+    #[test]
+    fn a_save_can_be_restricted_to_one_creature_type() {
+        let text = "creature: x\nhp: 30\n\
+             action: Turn | save wis dc 15 | only undead | on fail frightened until damaged\n";
+        let c = &parse(text).unwrap()[0];
+        let Effect::Save(save) = &c.actions[0].effect else {
+            panic!("expected a saving throw");
+        };
+        assert_eq!(save.requires_type.as_deref(), Some("undead"));
+        assert_eq!(
+            save.on_failure,
+            vec![(Condition::Frightened, Duration::RoundsOrDamaged(10))]
+        );
+
+        let unknown =
+            parse("creature: x\nhp: 1\naction: T | save wis dc 15 | only eldritch | 1d6 fire\n");
+        assert!(unknown.is_err(), "`eldritch` is not a creature type");
+        let no_save = parse("creature: x\nhp: 1\naction: T | only undead | hit +5 | 1d6 fire\n");
+        assert!(no_save.is_err(), "a type restriction needs a save");
+    }
 
     /// A weapon a build swings alongside others: named, so an enchantment
     /// can be laid on that one blade, carrying a mastery that marks on a hit

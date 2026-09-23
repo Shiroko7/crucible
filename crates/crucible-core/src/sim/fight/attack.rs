@@ -146,8 +146,12 @@ impl<'a> Fight<'a> {
                     dice_sides,
                     bonus,
                     damage_kind,
+                    weapon_only,
                 } = rider
                 {
+                    if *weapon_only && !strike.kind.weapon {
+                        continue;
+                    }
                     plan.rolls.push(DamageRoll::new(
                         *dice_count,
                         *dice_sides,
@@ -434,6 +438,7 @@ mod tests {
     fn a_once_a_turn_rider_joins_one_blow_on_its_own_turn() {
         let mut swarmed = puncher("swarmed", 15, 60, 20, 0);
         swarmed.riders.push(Rider::OncePerTurnDamage {
+            weapon_only: false,
             dice_count: 1,
             dice_sides: 6,
             bonus: 0,

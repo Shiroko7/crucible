@@ -21,6 +21,55 @@ impl<'a> Fight<'a> {
         record: bool,
         notes: &mut Vec<String>,
     ) {
+        self.react_matching(rng, me, |t| t == trigger, at, record, notes);
+    }
+
+    /// Answer an attack that has just hit `me`, landed by `attacker`: the
+    /// first [`ReactionTrigger::Hit`] reaction `me` has that answers an
+    /// attack of this `kind`.
+    ///
+    /// Takes the attack's kind rather than an exact trigger because the
+    /// reaction is the side that says which blows it answers - "hits you
+    /// with a melee attack" - exactly as a raised shield does; see
+    /// [`ReactionTrigger::Hit`].
+    pub(super) fn react_to_being_hit(
+        &mut self,
+        rng: &mut Rng,
+        me: usize,
+        attacker: usize,
+        kind: AttackKind,
+        record: bool,
+        notes: &mut Vec<String>,
+    ) {
+        if !self.fighters[me]
+            .creature
+            .reactions
+            .iter()
+            .any(|r| matches!(r.trigger, ReactionTrigger::Hit(_)))
+        {
+            return;
+        }
+        self.react_matching(
+            rng,
+            me,
+            |t| matches!(t, ReactionTrigger::Hit(trigger) if trigger.answers(kind)),
+            attacker,
+            record,
+            notes,
+        );
+    }
+
+    /// The body both of the above share: take `me`'s first reaction whose
+    /// trigger `answers`, aimed at `at` alone.
+    fn react_matching(
+        &mut self,
+        rng: &mut Rng,
+        me: usize,
+        answers: impl Fn(ReactionTrigger) -> bool,
+        at: usize,
+        record: bool,
+        notes: &mut Vec<String>,
+    ) {
         let f = &self.fighters[me];
         if !f.alive()
             || !f.reaction
@@ -34,7 +83,7 @@ impl<'a> Fight<'a> {
         // Only one that can land on `at` from where it stands: a bite waits
         // for a pull that brings its prey all the way to the mouth.
         let Some(i) = creature.reactions.iter().enumerate().position(|(i, r)| {
-            r.trigger == trigger
+            answers(r.trigger)
                 && f.reactions[i].available()
                 && f.can_pay(r.action.cost)
                 && f.can_cast(r.action.spell_slot_level)
@@ -156,7 +205,7 @@ mod tests {
     use crate::creature::{AttackTrigger, Creature, Effect, Move};
     use crate::rules::{Condition, DamageKind, DamageRoll};
     use crate::sim::fight::fighter::refresh;
-    use crate::sim::fight::test_support::{no_log, puncher};
+    use crate::sim::fight::test_support::{fight_of, no_log, puncher};
     use crate::sim::fight::Expiry;
     use crate::sim::{run, Policy, Side};
 
@@ -699,6 +748,133 @@ mod tests {
         let narration = log.unwrap().join("\n");
         assert!(narration.contains("(aura)"), "{narration}");
         assert!(narration.contains("whirlpool reacts: Snap"), "{narration}");
+    }
+
+    /// A storm priest answering whoever hits it: a creature whose reaction
+    /// waits for a melee hit ([`ReactionTrigger::Hit`]).
+    fn storm_priest(uses: crate::creature::Uses) -> Creature {
+        let mut c = Creature::new("priest", 18, 60);
+        c.reactions.push(crate::creature::Reaction {
+            trigger: ReactionTrigger::Hit(AttackTrigger::MeleeAttack),
+            action: Move::new(
+                "Wrath",
+                Effect::Save(crate::creature::SaveEffect {
+                    ability: crate::rules::Ability::Dex,
+                    // Unbeatable, so what the test measures is when the
+                    // reaction fires rather than how a d20 fell.
+                    dc: 99,
+                    damage: vec![DamageRoll::new(0, 1, 10, DamageKind::Lightning)],
+                    half_on_success: true,
+                    on_failure: Vec::new(),
+                    max_targets: Some(1),
+                    requires_type: None,
+                }),
+            )
+            .with_uses(uses),
+        });
+        c
+    }
+
+    /// The whole mechanism, one step at a time: a melee hit sets it off, the
+    /// blow's own damage still lands, the reaction is spent for the round,
+    /// and an arrow never sets it off at all.
+    #[test]
+    fn a_reaction_answers_whoever_hits_it_in_melee_and_ignores_an_arrow() {
+        let priest = storm_priest(crate::creature::Uses::Unlimited);
+        let raider = puncher("raider", 10, 200, 30, 4);
+        let roster = [(&priest, Side::A), (&raider, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 21);
+        let mut notes = Vec::new();
+
+        fight.react_to_being_hit(&mut rng, 0, 1, AttackKind::MELEE_WEAPON, true, &mut notes);
+        assert_eq!(fight.fighters[1].hp, 190, "the storm answers the blade");
+        assert!(
+            !fight.fighters[0].reaction,
+            "and the round's reaction is gone"
+        );
+        assert!(notes.join(" ").contains("Wrath"), "{notes:?}");
+
+        // Spent: a second hit in the same round answers nothing.
+        fight.react_to_being_hit(&mut rng, 0, 1, AttackKind::MELEE_WEAPON, false, &mut notes);
+        assert_eq!(fight.fighters[1].hp, 190);
+
+        // Back on its own turn - but an arrow is not what it answers.
+        refresh(&mut fight.fighters[0], &mut rng);
+        fight.react_to_being_hit(&mut rng, 0, 1, AttackKind::RANGED_WEAPON, false, &mut notes);
+        assert_eq!(fight.fighters[1].hp, 190);
+        assert!(fight.fighters[0].reaction, "nothing was spent on an arrow");
+    }
+
+    /// Its budget is its own: three uses is three answers across the fight,
+    /// however many turns refresh the reaction itself.
+    #[test]
+    fn a_limited_answer_runs_out_even_though_the_reaction_comes_back() {
+        let priest = storm_priest(crate::creature::Uses::Limited(2));
+        let raider = puncher("raider", 10, 200, 30, 4);
+        let roster = [(&priest, Side::A), (&raider, Side::B)];
+        let (mut fight, mut rng) = fight_of(&roster, 22);
+        for expected in [190, 180, 180, 180] {
+            refresh(&mut fight.fighters[0], &mut rng);
+            fight.react_to_being_hit(
+                &mut rng,
+                0,
+                1,
+                AttackKind::MELEE_WEAPON,
+                false,
+                &mut Vec::new(),
+            );
+            assert_eq!(fight.fighters[1].hp, expected);
+        }
+    }
+
+    /// Live, through the fight loop rather than by hand: a defender that
+    /// answers blows costs its attacker hit points, and the answer really is
+    /// capped at one a round - three swings a turn cannot draw three.
+    #[test]
+    fn answering_blows_is_capped_at_one_a_round_in_a_real_fight() {
+        let priest = {
+            let mut c = storm_priest(crate::creature::Uses::Unlimited);
+            c.hp = 10_000;
+            c.initiative = -100;
+            c
+        };
+        let raider = {
+            let mut c = puncher("raider", 10, 10_000, 30, 4);
+            c.actions[0].effect = Effect::Strikes {
+                strike: Strike::new(30, vec![DamageRoll::new(1, 4, 0, DamageKind::Slashing)]),
+                count: 3,
+            };
+            c.initiative = 100;
+            c
+        };
+        let mut rng = Rng::new(23);
+        let mut answered = 0;
+        for _ in 0..50 {
+            let mut log = Some(Vec::new());
+            let outcome = run(
+                &mut rng,
+                [&priest, &raider],
+                [Policy::Greedy; 2],
+                1,
+                &mut log,
+            );
+            let round = log
+                .unwrap()
+                .join(
+                    "
+",
+                )
+                .matches("Wrath")
+                .count();
+            assert!(round <= 1, "one reaction a round, whatever hits it");
+            answered += round;
+            assert_eq!(
+                outcome.damage_dealt[0] % 10,
+                0,
+                "every answer is the same flat 10"
+            );
+        }
+        assert!(answered > 0, "three swings a round should have drawn some");
     }
 
     /// A reaction waits for its own trigger: a breach does not set off one

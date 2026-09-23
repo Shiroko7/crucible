@@ -19,6 +19,8 @@
 //! hp: 68
 //! initiative: -1
 //! saves: str +4, dex -1, con +3, int -3, wis -2, cha -2
+//! type: giant
+//! size: large
 //! immune: fire
 //! resource: focus 8
 //! trait: evasion dex
@@ -36,6 +38,8 @@
 //! trait: empower weapon 2d6 poison on poisoned
 //! trait: injury poison con dc 13 poisoned disadvantage str for 1 hour
 //! trait: once per turn 1d6 piercing
+//! trait: once per turn 1d8 thunder with a weapon
+//! trait: push on lightning, thunder up to large
 //! trait: quarry 1d6 force
 //! trait: always succeed dex 3 reaction
 //! trait: reaction ac 4 vs melee until next turn
@@ -64,6 +68,10 @@
 //! legendary: Squeeze | points 2 | swallowed | 4d10 bludgeoning
 //! reaction: Snap | when enemy pulled | hit +9 | 3d8+5 piercing
 //! reaction: Spray | when breached | save dex dc 18 | 4d10 piercing | half on success
+//! reaction: Wrath | when hit in melee | uses 5 | save dex dc 16 | 2d8 lightning
+//!                 | half on success
+//! action: Turn | save wis dc 16 | only undead | 5d8 radiant
+//!             | on fail frightened and incapacitated until damaged
 //! aura: Undertow | save str dc 15 | on fail pulled
 //! trait: mouth
 //! trait: difficult terrain
@@ -94,7 +102,9 @@
 //! A condition's lifetime, after `on fail` or an `on hit save`, is
 //! `until victim`, `until applier` (the default), `until end` (the end of the
 //! applier's next turn), `until save` (repeat the save at the end of each of
-//! the victim's turns), or `for N rounds|minutes|hours`. `on hit <condition>
+//! the victim's turns), `for N rounds|minutes|hours`, or `until damaged` - a
+//! minute, ended early by any damage its holder takes, which `for N minutes
+//! or damaged` writes out in full. `on hit <condition>
 //! [lifetime]`, with no `save`, lands one with nothing to resist it - what a
 //! weapon mastery like Vex does (`on hit vexed until end`: advantage on that
 //! attacker's own next roll against the target).
@@ -107,8 +117,9 @@
 //! `swallowed` move hurts everything inside on demand, and `regurgitate` is
 //! the damage from inside in one turn that forces a save to keep it down.
 //! `points N` is what a legendary action costs. A `reaction:` is a move with a
-//! `when enemy <condition>` or `when breached` clause, aimed at whoever set it
-//! off; an `aura:` is a move every enemy is subject to at the start of its
+//! `when enemy <condition>`, `when breached` or `when hit` clause, aimed at
+//! whoever set it off - `when hit in melee` and `when hit by a ranged weapon`
+//! narrow it to the blows it answers; an `aura:` is a move every enemy is subject to at the start of its
 //! turns, aimed at that enemy alone. A creature gets one reaction a round
 //! unless `reactions N` says otherwise, and never more than one per turn - so
 //! a bigger budget is what lets it answer several different creatures in the
@@ -122,7 +133,10 @@
 //! `charge` or `hit and run`. `difficult terrain` slows its enemies to one
 //! place a turn; `pulled` and `pushed` move them a place in or out, and
 //! `slowed` halves their moves. An on-hit save can land several conditions:
-//! `prone and pushed`.
+//! `prone and pushed`. A creature says what it is with `type:` and how big it
+//! is with `size:`, which is what a save only one kind of creature is caught
+//! by (`only undead`) and a shove gated on size (`push on lightning up to
+//! large`) read.
 //!
 //! Some mechanisms are only reachable through a feature plugin, because they
 //! need more than a phrase: a mark maintained by concentration that a rider
@@ -131,11 +145,17 @@
 //! for a number of rounds), an aura it raises and then holds up
 //! (`lasting_aura` - an `aura:` that had to be cast and lasts a stated time,
 //! rather than one it simply has), and a double it calls up and then commands
-//! (`commanded_double`). See [`crate::features`].
+//! (`commanded_double`).
+//!
+//! So is anything whose numbers have to come from the caster's own profile
+//! rather than being written down twice: a reaction answering whoever hit it
+//! (`retaliation`), a cast taken at its maximum for a charge
+//! (`maximised_damage`), and every spell and class feature with a save DC in
+//! it. See [`crate::features`].
 
 use crate::creature::{Creature, Resource, Tactic};
 use crate::dsl::grammar::{count, number, parse_move, parse_reaction, parse_trait};
-use crate::rules::{Ability, Condition, DamageKind, Reduction};
+use crate::rules::{Ability, Condition, CreatureType, DamageKind, Reduction, Size};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +237,21 @@ pub fn parse(text: &str) -> Result<Vec<Creature>, ParseError> {
 
         match key.as_str() {
             "ac" => current.ac = number(&value).map_err(fail)?,
+            // What it is, for anything that asks: a save only one kind of
+            // creature is caught by (turning the Undead, Hold Person's
+            // humanoid), bonus damage against a type.
+            "type" | "creature type" => {
+                current.creature_type = Some(
+                    CreatureType::parse(&value)
+                        .ok_or_else(|| fail(format!("`{value}` is not a creature type")))?,
+                );
+            }
+            // How big it is, for anything gated on size: what a shove can
+            // move, what a mouth can swallow.
+            "size" => {
+                current.size =
+                    Size::parse(&value).ok_or_else(|| fail(format!("`{value}` is not a size")))?;
+            }
             "hp" => current.hp = number(&value).map_err(fail)?,
             "initiative" | "init" => current.initiative = number(&value).map_err(fail)?,
             "legendary uses" => current.legendary_uses = count(&value).map_err(fail)?,
@@ -377,6 +412,52 @@ mod tests {
     use super::*;
     use crate::creature::Effect;
     use crate::rules::DamageRoll;
+
+    /// What a creature is and how big it is, both read off a line of their
+    /// own: the two things a type-restricted save and a size-gated shove ask
+    /// about.
+    #[test]
+    fn a_creature_can_say_what_it_is_and_how_big() {
+        let text = "
+creature: Skeleton
+ac: 14
+hp: 13
+type: undead
+size: medium
+";
+        let c = &parse(text).expect("parses")[0];
+        assert!(c.is_creature_type("Undead"));
+        assert!(!c.is_creature_type("Humanoid"));
+        assert_eq!(c.size, Size::Medium);
+
+        // Unsaid, a creature is Medium and matches any type asked about -
+        // see `Creature::is_creature_type`, which keeps a restriction off
+        // creatures nobody labelled rather than excluding them.
+        let plain = &parse(
+            "creature: x
+ac: 1
+hp: 1
+",
+        )
+        .expect("parses")[0];
+        assert_eq!(plain.creature_type, None);
+        assert_eq!(plain.size, Size::Medium);
+
+        assert!(parse(
+            "creature: x
+hp: 1
+type: eldritch
+"
+        )
+        .is_err());
+        assert!(parse(
+            "creature: x
+hp: 1
+size: colossal
+"
+        )
+        .is_err());
+    }
 
     #[test]
     fn a_whole_creature_round_trips_into_the_right_numbers() {

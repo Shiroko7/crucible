@@ -1,0 +1,155 @@
+# A level 8 Cleric of a storm domain, as the worked example of the class.
+#
+# Written as data: every feature below is a plugin already in the registry or
+# a trait phrase the grammar already reads, and the numbers are the ones a
+# sheet states. The class is the 2024 Cleric; the domain is the older storm
+# one, whose features arrive at their own levels (the reaction at 1st, the
+# maximised damage at 2nd, the shove at 6th, the strike at 8th).
+#
+# Where the numbers come from: Wisdom 20 (+5) and a +3 proficiency bonus, so
+# the spell save DC is 16 and the spell attack bonus +8. A save DC written
+# into a move below is that same 16 - the plugins read it off the profile,
+# and only the moves written out by hand have to repeat it.
+#
+# Two choices worth stating, because a table would have to make them:
+#
+# - The domain's own strike (1d8 thunder once a turn on a weapon hit) is
+#   taken instead of the 2024 class's Blessed Strikes at 7th, which is the
+#   same feature twice over; only one of them applies.
+# - The maximised bolt below is a repeat from a cloud that is already up, the
+#   way Call Lightning's own free repeat is - see `call_lightning`'s note on
+#   the gap that leaves.
+
+[pc]
+name = "Storm Cleric"
+class = "Cleric"
+subclass = "Storm Domain"
+level = 8
+ac = 18          # chain mail and a shield
+hp = 59
+initiative = 0
+equipment = [
+    "Chain mail",
+    "Shield",
+    "Warhammer",
+    "Holy symbol",
+]
+traits = [
+    # The domain's shove, at 6th level: its lightning throws a Large or
+    # smaller creature back.
+    "push on lightning up to large",
+    # Its strike, at 8th: once on each of its turns, a weapon hit carries
+    # thunder with it.
+    "once per turn 1d8 thunder with a weapon",
+]
+
+[pc.abilities]
+str = 14
+dex = 10
+con = 14
+int = 10
+wis = 20
+cha = 12
+
+[pc.saves]
+str = 2
+dex = 0
+con = 2
+int = 0
+wis = 8
+cha = 4
+
+[pc.spellcasting]
+ability = "wis"
+ability_modifier = 5
+proficiency_bonus = 3
+
+[pc.resources]
+channel_divinity = 3
+
+[pc.resources.slots]
+1 = 4
+2 = 3
+3 = 3
+4 = 2
+
+# --- Channel Divinity -------------------------------------------------------
+
+[[pc.features]]
+plugin = "divine_spark"
+dice = 2        # 2d8 + Wisdom, from 7th level
+
+[[pc.features]]
+plugin = "turn_undead"
+sear_dice = 5   # Sear Undead, at its Wisdom modifier
+
+# --- The domain's own features ---------------------------------------------
+
+# The reaction at 1st level: whoever hits it in melee answers the storm.
+# Its uses are its Wisdom modifier, and the DC is read off the profile.
+[[pc.features]]
+plugin = "retaliation"
+name = "Wrath of the Storm"
+damage = "2d8 lightning or thunder"
+save = "dex"
+trigger = "melee"
+uses = 5
+
+# The Channel Divinity at 2nd: the same cast, with its thunder or lightning
+# landing at its maximum instead of being rolled.
+[[pc.features]]
+plugin = "maximised_damage"
+name = "Shatter (Destructive Wrath)"
+effect = "spell | slot 2 | save con dc 16 | 3d8 thunder | half on success"
+kinds = ["thunder"]
+resource = "channel_divinity"
+
+# The same Channel Divinity spent on the storm instead: the bolt that comes
+# down as the cloud is raised, at its maximum. Only that first bolt - a
+# maximised *later* bolt would need a move that can say "while the cloud is
+# up", which is the gap `call_lightning` already writes down.
+[[pc.features]]
+plugin = "maximised_damage"
+name = "Call Lightning (Destructive Wrath)"
+effect = "spell | slot 3 | uses 1 | concentration | save dex dc 16 | targets 1 | 3d10 lightning | half on success"
+kinds = ["lightning"]
+resource = "channel_divinity"
+
+# --- Spells -----------------------------------------------------------------
+
+[[pc.features]]
+plugin = "sacred_flame"
+dice = 2        # two d8s, from 5th level
+
+[[pc.features]]
+plugin = "guiding_bolt"
+
+[[pc.features]]
+plugin = "bless"
+
+[[pc.features]]
+plugin = "shield_of_faith"
+
+[[pc.features]]
+plugin = "healing_word"
+
+[[pc.features]]
+plugin = "cure_wounds"
+
+[[pc.features]]
+plugin = "thunderwave"
+
+[[pc.features]]
+plugin = "shatter"
+
+[[pc.features]]
+plugin = "spirit_guardians"
+
+[[pc.features]]
+plugin = "call_lightning"
+
+# --- Weapon -----------------------------------------------------------------
+
+[[pc.actions]]
+name = "Warhammer"
+effect = "weapon warhammer | strikes 1 | hit +5 | 1d8+2 bludgeoning"

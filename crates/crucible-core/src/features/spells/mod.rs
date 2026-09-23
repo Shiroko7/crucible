@@ -44,6 +44,7 @@
 mod bane;
 mod bless;
 mod blindness_deafness;
+mod call_lightning;
 mod command;
 mod cure_wounds;
 mod guiding_bolt;
@@ -51,7 +52,12 @@ mod healing_word;
 mod hold_person;
 mod hunters_mark;
 mod magic_missile;
+mod sacred_flame;
+mod shatter;
+mod shield_of_faith;
+mod spirit_guardians;
 mod spiritual_weapon;
+mod thunderwave;
 mod true_strike;
 
 use crate::creature::{Cost, Move};
@@ -60,6 +66,7 @@ use crate::rules::SPELL_LEVELS;
 pub use bane::BanePlugin;
 pub use bless::BlessPlugin;
 pub use blindness_deafness::BlindnessDeafnessPlugin;
+pub use call_lightning::CallLightningPlugin;
 pub use command::{CommandPlugin, CommandWord};
 pub use cure_wounds::CureWoundsPlugin;
 pub use guiding_bolt::GuidingBoltPlugin;
@@ -67,7 +74,12 @@ pub use healing_word::HealingWordPlugin;
 pub use hold_person::HoldPersonPlugin;
 pub use hunters_mark::HuntersMarkPlugin;
 pub use magic_missile::MagicMissilePlugin;
+pub use sacred_flame::SacredFlamePlugin;
+pub use shatter::ShatterPlugin;
+pub use shield_of_faith::ShieldOfFaithPlugin;
+pub use spirit_guardians::SpiritGuardiansPlugin;
 pub use spiritual_weapon::SpiritualWeaponPlugin;
+pub use thunderwave::ThunderwavePlugin;
 pub use true_strike::TrueStrikePlugin;
 
 /// Both healing spells are cast here at their base, 1st-level, rate. See the
@@ -80,15 +92,7 @@ pub(super) fn spellcasting_ability_modifier(
     builder: &CreatureBuilder,
     spell_name: &str,
 ) -> FeatureResult<i32> {
-    builder
-        .creature
-        .spellcasting
-        .map(|profile| profile.ability_modifier)
-        .ok_or_else(|| {
-            FeatureError::InvalidConfiguration(format!(
-                "{spell_name} needs a [*.spellcasting] profile to compute its healing"
-            ))
-        })
+    builder.casting_modifier(spell_name)
 }
 
 /// How a spell's use is paid for, when a build might power it from more than
@@ -146,11 +150,41 @@ pub(super) fn charge(
 /// A caster's save DC, or a configuration error naming which spell needed
 /// one. Every spell below targets a save, so every one of them calls this.
 pub(super) fn save_dc(builder: &CreatureBuilder, spell_name: &str) -> FeatureResult<i32> {
-    builder.creature.spell_save_dc().ok_or_else(|| {
-        FeatureError::InvalidConfiguration(format!(
-            "{spell_name} needs a `[*.spellcasting]` profile to compute its save DC"
-        ))
-    })
+    builder.save_dc(spell_name)
+}
+
+/// Which slot level a spell plugin spends, defaulting to the level it is
+/// printed at. An upcast is written as a bigger `slot` alongside the extra
+/// dice it buys, since nothing here derives one from the other - see the
+/// module doc on upcasting.
+pub(super) fn slot_level(val: &toml::Value, printed_at: u32) -> FeatureResult<u32> {
+    let Some(level) = val.get("slot").and_then(|v| v.as_integer()) else {
+        return Ok(printed_at);
+    };
+    if !(1..=i64::from(SPELL_LEVELS)).contains(&level) {
+        return Err(FeatureError::InvalidConfiguration(format!(
+            "a spell slot is level 1 to 9, got `slot = {level}`"
+        )));
+    }
+    Ok(level as u32)
+}
+
+/// How many creatures an area spell catches: `targets = N`, or every enemy
+/// in reach when nothing says.
+///
+/// There is no positioning here to work out who is standing in a cube or a
+/// sphere (see the module doc on range), so the shape of an area is one
+/// number, and it is declared rather than guessed at. Left off, an area
+/// catches everything - which `Effect::Save` already does, and which is the
+/// generous reading when the caster is on the party's side.
+pub(super) fn target_cap(val: &toml::Value) -> FeatureResult<Option<u32>> {
+    match val.get("targets").and_then(|v| v.as_integer()) {
+        None => Ok(None),
+        Some(n) if n > 0 => Ok(Some(n as u32)),
+        Some(n) => Err(FeatureError::InvalidConfiguration(format!(
+            "`targets` is at least one creature, got {n}"
+        ))),
+    }
 }
 
 /// Read a spell plugin's optional cost into a [`SpellCost`]: `slot = N`
@@ -181,6 +215,7 @@ pub(super) fn register(registry: &mut FeatureRegistry) {
     bane::register(registry);
     bless::register(registry);
     blindness_deafness::register(registry);
+    call_lightning::register(registry);
     command::register(registry);
     cure_wounds::register(registry);
     guiding_bolt::register(registry);
@@ -188,7 +223,12 @@ pub(super) fn register(registry: &mut FeatureRegistry) {
     hold_person::register(registry);
     hunters_mark::register(registry);
     magic_missile::register(registry);
+    sacred_flame::register(registry);
+    shatter::register(registry);
+    shield_of_faith::register(registry);
+    spirit_guardians::register(registry);
     spiritual_weapon::register(registry);
+    thunderwave::register(registry);
     true_strike::register(registry);
 }
 

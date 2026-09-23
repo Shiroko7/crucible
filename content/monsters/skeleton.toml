@@ -1,0 +1,32 @@
+# Monster configuration for Skeleton (SRD 5.2, CR 1/4).
+#
+# Here so that turning Undead has something to turn: the type restriction on
+# that save is read off `creature_type` below.
+
+[monster]
+name = "Skeleton"
+cr = 0.25
+size = "Medium"
+creature_type = "Undead"
+ac = 14
+hp = 13
+initiative = 3
+vulnerable = ["bludgeoning"]
+immune = ["poison"]
+condition_immune = ["exhaustion", "poisoned"]
+
+[monster.saves]
+str = 0
+dex = 3
+con = 2
+int = -2
+wis = -1
+cha = -3
+
+[[monster.actions]]
+name = "Shortsword"
+effect = "strikes 1 | hit +4 | 1d6+3 piercing"
+
+[[monster.actions]]
+name = "Shortbow"
+effect = "ranged | strikes 1 | hit +4 | 1d6+3 piercing"

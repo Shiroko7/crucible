@@ -157,6 +157,7 @@ fn the_build_compiles_to_the_numbers_it_declares() {
 
     // Three traits, three riders - plus the one the mark's plugin adds.
     assert!(c.riders.contains(&Rider::OncePerTurnDamage {
+        weapon_only: false,
         dice_count: 1,
         dice_sides: 6,
         bonus: 0,

@@ -271,6 +271,11 @@ enum Expiry {
     /// Cleared once `left` of this roster index's turns have started - see
     /// [`crate::rules::Duration::Rounds`].
     Rounds { who: usize, left: u32 },
+    /// [`Expiry::Rounds`], and cleared early by any damage its holder takes -
+    /// see [`crate::rules::Duration::RoundsOrDamaged`]. The clock runs on
+    /// `who`'s turns exactly like `Rounds`; the early exit is in
+    /// [`Fight::apply_damage`].
+    RoundsOrDamaged { who: usize, left: u32 },
     /// A saving throw at the end of the victim's own turn, clearing the
     /// condition on a success. See [`crate::rules::Duration::SaveEndTurn`].
     SaveEachTurn {
