@@ -49,6 +49,7 @@ impl<'a> Fighter<'a> {
             policy,
             seat,
             hp: creature.hp,
+            temp_hp: 0,
             actions: creature
                 .actions
                 .iter()

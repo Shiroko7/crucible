@@ -98,6 +98,7 @@ impl<'a> Fight<'a> {
             Effect::Afflict { .. } => self.in_reach(me, target, reach, None),
             Effect::Stance { .. }
             | Effect::Heal(_)
+            | Effect::TempHp(_)
             | Effect::Buff { .. }
             | Effect::SaveOrModifier { .. }
             | Effect::Boon { .. }

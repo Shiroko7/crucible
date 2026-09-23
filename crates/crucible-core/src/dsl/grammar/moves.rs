@@ -167,6 +167,7 @@ fn parse_body<'a>(
     let mut save: Option<(Ability, i32)> = None;
     let mut half_on_success = false;
     let mut stance: Option<Condition> = None;
+    let mut temp_hp: Option<HealRoll> = None;
     let mut on_failure: Vec<(Condition, DurationSpec)> = Vec::new();
     let mut max_targets: Option<u32> = None;
     let mut damage: Vec<DamageRoll> = Vec::new();
@@ -235,6 +236,12 @@ fn parse_body<'a>(
                 let (dice, sides, bonus) = parse_dice(arg(&words, 1, clause)?)?;
                 heal = Some(HealRoll::new(dice, sides, bonus));
             }
+            // `temp 1d10+2` - temporary hit points for the user, which is a
+            // ward rather than a heal: see `Effect::TempHp`.
+            "temp" => {
+                let (dice, sides, bonus) = parse_dice(arg(&words, 1, clause)?)?;
+                temp_hp = Some(HealRoll::new(dice, sides, bonus));
+            }
             "bonus" => out.riders.push(parse_bonus_vs(&words, clause)?),
             "stance" => {
                 let name = arg(&words, 1, clause)?;
@@ -270,6 +277,8 @@ fn parse_body<'a>(
 
     out.effect = if let Some(condition) = stance {
         Some(Effect::Stance { condition })
+    } else if let Some(roll) = temp_hp {
+        Some(Effect::TempHp(roll))
     } else if let Some(roll) = heal {
         Some(Effect::Heal(roll))
     } else if to_swallowed {

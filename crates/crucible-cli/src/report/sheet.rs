@@ -250,6 +250,7 @@ pub fn body(owner: &Creature, effect: &Effect) -> String {
             .boons
             .get(*which)
             .map_or_else(|| "a boon".to_string(), describe_boon),
+        Effect::TempHp(roll) => format!("{}d{}{:+} temp hp", roll.count, roll.sides, roll.bonus),
         Effect::Summon { which } => owner.summons.get(*which).map_or_else(
             || "a summon".to_string(),
             |summon| {

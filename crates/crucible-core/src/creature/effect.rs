@@ -732,6 +732,16 @@ pub enum Effect {
         which: usize,
         duration: Duration,
     },
+    /// Temporary hit points for the user: a ward that soaks the next blows
+    /// and then is gone.
+    ///
+    /// Not healing, and deliberately a separate effect rather than a flag on
+    /// [`Effect::Heal`]: temporary hit points do not stack with themselves
+    /// (the better pool wins), are not capped by a hit point maximum, and do
+    /// nothing for a creature already down - none of which is true of a heal.
+    /// Self-targeted, which is what every source of them here is: a ward
+    /// hardening its own caster's skin.
+    TempHp(HealRoll),
     /// Calls up one of the user's own [`crate::creature::Creature::summons`]
     /// beside it: a double of running water, a spectral ally.
     ///
@@ -767,6 +777,7 @@ impl Effect {
             | Effect::HarmSwallowed { .. }
             | Effect::Afflict { .. }
             | Effect::Boon { .. }
+            | Effect::TempHp(_)
             | Effect::Summon { .. } => 0.0,
             Effect::Sequence(parts) => parts.iter().map(|p| p.mean_damage(target)).sum(),
             Effect::Part { effect, .. } => effect.mean_damage(target),
@@ -795,6 +806,7 @@ impl Effect {
             | Effect::HarmSwallowed { .. }
             | Effect::Afflict { .. }
             | Effect::Boon { .. }
+            | Effect::TempHp(_)
             | Effect::Summon { .. } => Pmf::constant(0),
             Effect::Sequence(parts) => parts.iter().fold(Pmf::constant(0), |acc, p| {
                 acc.convolve(&p.damage_pmf(target))

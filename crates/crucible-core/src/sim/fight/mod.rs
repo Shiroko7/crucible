@@ -151,6 +151,11 @@ struct Fighter<'a> {
     /// different party members pick different enemies.
     seat: usize,
     hp: i32,
+    /// A ward soaking damage ahead of hit points, from
+    /// [`crate::creature::Effect::TempHp`]. Zero for anything that has never
+    /// been given any; it is spent down rather than healed back, and a
+    /// fresh pool replaces a smaller one rather than adding to it.
+    temp_hp: i32,
     actions: Vec<MoveState>,
     bonus_actions: Vec<MoveState>,
     legendary: Vec<MoveState>,

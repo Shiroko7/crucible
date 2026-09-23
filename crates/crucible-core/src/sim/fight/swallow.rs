@@ -23,6 +23,15 @@ impl<'a> Fight<'a> {
         if from == to {
             return true;
         }
+        // Banished is the stronger version of the same idea: not tucked
+        // inside something reachable, but out of the fight altogether, so it
+        // touches nothing and nothing touches it - not an attack, not an
+        // area, not a heal.
+        if self.fighters[from].has(|c| c == Condition::Banished)
+            || self.fighters[to].has(|c| c == Condition::Banished)
+        {
+            return false;
+        }
         match self.fighters[from].swallowed_by() {
             Some(holder) => to == holder,
             None => self.fighters[to].swallowed_by().is_none(),

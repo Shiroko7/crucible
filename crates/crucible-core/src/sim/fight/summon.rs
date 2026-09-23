@@ -104,6 +104,18 @@ impl<'a> Fight<'a> {
             .collect()
     }
 
+    /// The Armor Class `who`'s active boons are worth, on top of whatever
+    /// its stat block already has.
+    pub(super) fn boon_ac(&self, who: usize) -> i32 {
+        let creature = self.fighters[who].creature;
+        self.fighters[who]
+            .conditions
+            .iter()
+            .filter_map(|&(c, _)| creature.boon(c))
+            .map(|boon| boon.ac)
+            .sum()
+    }
+
     /// The extra damage `me`'s active boons put on `strike` - a form that
     /// makes its bearer's blows land harder, an enchantment on the one blade
     /// this swing is made with.

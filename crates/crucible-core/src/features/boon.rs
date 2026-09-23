@@ -172,9 +172,13 @@ pub(super) fn register(registry: &mut FeatureRegistry) {
             boon.weapon_only = true;
         }
         boon.resist = resistances(val)?;
-        if boon.damage.is_none() && boon.resist.is_empty() {
+        boon.ac = val
+            .get("ac")
+            .and_then(|v| v.as_integer())
+            .map_or(0, |n| n as i32);
+        if boon.damage.is_none() && boon.resist.is_empty() && boon.ac == 0 {
             return Err(FeatureError::InvalidConfiguration(format!(
-                "lasting_boon `{name}` does nothing - give it extra damage, resistances, or both"
+                "lasting_boon `{name}` does nothing - give it extra damage, resistances,                  an Armor Class bonus, or any combination"
             )));
         }
 
