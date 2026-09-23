@@ -135,6 +135,11 @@ pub fn describe(owner: &Creature, m: &Move) -> String {
     if m.concentration {
         bits.push("concentration".to_string());
     }
+    // Only when the stat block said: an undeclared spell is read as speaking,
+    // and printing "V" on every one of them would be inventing detail.
+    if let Some(components) = m.components {
+        bits.push(components.name());
+    }
     if m.legendary_cost > 1 {
         bits.push(format!("{} legendary actions", m.legendary_cost));
     }

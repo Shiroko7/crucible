@@ -85,7 +85,10 @@
 //! `weapon <name>` also names the blade the swing is made with, which is what
 //! an enchantment laid on one weapon rides (see [`crate::creature::Boon`]).
 //! `item` and `object` mark a move as activating a magic item or using an
-//! object. Damage written `1d6+7 slashing or cold` is dealt as whichever of
+//! object. `components v`, `components verbal, somatic` or `components none`
+//! say which of the three a cast needs: a silenced creature can still cast
+//! what it does not have to speak, and a spell that never says is read as
+//! speaking. Damage written `1d6+7 slashing or cold` is dealt as whichever of
 //! the two its target reduces least, chosen per attack.
 //!
 //! A condition's lifetime, after `on fail` or an `on hit save`, is

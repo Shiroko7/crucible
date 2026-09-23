@@ -47,6 +47,7 @@ pub(crate) fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> 
         built.kind = built.kind.or(tail.kind);
         built.spell_slot_level = built.spell_slot_level.or(tail.spell_slot_level);
         built.concentration |= tail.concentration;
+        built.components = built.components.or(tail.components);
         built.legendary_cost = built.legendary_cost.or(tail.legendary_cost);
     }
 
@@ -84,6 +85,7 @@ pub(crate) fn parse_move(value: &str, owner: &Creature) -> Result<Move, String> 
         kind: built.kind.unwrap_or_default(),
         before_action: false,
         bypasses_casting_restrictions: false,
+        components: built.components,
         legendary_cost: built.legendary_cost.unwrap_or(1),
         reach,
         requires: None,
@@ -155,6 +157,7 @@ struct Body {
     concentration: bool,
     legendary_cost: Option<u32>,
     reach: Reach,
+    components: Option<crate::creature::Components>,
 }
 
 fn parse_body<'a>(
@@ -203,6 +206,20 @@ fn parse_body<'a>(
                 out.spell_slot_level = Some(level);
             }
             "concentration" => out.concentration = true,
+            // `components v`, `components verbal, somatic`, `components none`
+            // - which of the three a cast needs, so Silence can stop the ones
+            // that speak rather than every spell. See `creature::Components`.
+            "components" => {
+                let rest = clause
+                    .trim()
+                    .strip_prefix(words[0])
+                    .unwrap_or_default()
+                    .trim();
+                out.components =
+                    Some(crate::creature::Components::parse(rest).ok_or_else(|| {
+                        format!("`{rest}` is not a component list in `{clause}`")
+                    })?);
+            }
             "points" => {
                 let n = count(arg(&words, 1, clause)?)?;
                 if n == 0 {

@@ -153,8 +153,9 @@ impl<'a> Fighter<'a> {
 
     /// Is this creature currently allowed to take `m`? Only
     /// [`MoveKind::Spell`] and [`MoveKind::MagicItem`] are ever blocked - by
-    /// [`Condition::blocks_magic`], and a spell also by
-    /// [`Condition::blocks_casting`] unless it is cast without components
+    /// [`Condition::blocks_magic`], and a spell that *speaks*
+    /// ([`Move::needs_verbal`]) also by [`Condition::blocks_casting`] unless
+    /// it is cast without components
     /// ([`Move::bypasses_casting_restrictions`]) - so an ordinary attack or
     /// stance is unaffected whatever else is active. Checked everywhere a
     /// move's legality is checked: [`Policy::choose`],
@@ -164,8 +165,14 @@ impl<'a> Fighter<'a> {
     pub(super) fn move_allowed(&self, m: &Move) -> bool {
         match m.kind {
             MoveKind::Spell => {
+                // Silence takes away speech, so it stops a cast that speaks -
+                // not every spell. One with no Verbal component goes through
+                // it untouched, as does a charge spent to cast without
+                // components at all.
                 !self.has(Condition::blocks_magic)
-                    && (m.bypasses_casting_restrictions || !self.has(Condition::blocks_casting))
+                    && (m.bypasses_casting_restrictions
+                        || !m.needs_verbal()
+                        || !self.has(Condition::blocks_casting))
             }
             MoveKind::MagicItem => !self.has(Condition::blocks_magic),
             MoveKind::Standard | MoveKind::ObjectUse => true,

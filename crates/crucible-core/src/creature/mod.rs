@@ -16,7 +16,7 @@ pub use boon::Boon;
 pub use combatant::Creature;
 pub use effect::{AttackKind, Effect, SaveEffect, Strike};
 pub use moves::{
-    Cost, Move, MoveKind, Reaction, ReactionTrigger, Requirement, Resource, Spend, Uses,
+    Components, Cost, Move, MoveKind, Reaction, ReactionTrigger, Requirement, Resource, Spend, Uses,
 };
 pub use rider::{
     injury_poison_forcing_save, save_success_probability, saving_throw_against_condition,
