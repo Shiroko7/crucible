@@ -732,6 +732,19 @@ pub enum Effect {
         which: usize,
         duration: Duration,
     },
+    /// Raises one of the user's own
+    /// [`crate::creature::Creature::lasting_auras`] for a while: a ring of
+    /// spirits, a burning field, a wall of blades.
+    ///
+    /// [`Effect::Boon`]'s outward-facing twin. The boon rides its holder's
+    /// blows; this one is met by every enemy at the start of its own turn,
+    /// which is the aura machinery a monster's always-on aura already uses -
+    /// the only thing added here is that it has to be raised first, lasts a
+    /// stated time, and drops when concentration does.
+    Aura {
+        which: usize,
+        duration: Duration,
+    },
     /// Calls up one of the user's own [`crate::creature::Creature::summons`]
     /// beside it: a double of running water, a spectral ally.
     ///
@@ -767,6 +780,7 @@ impl Effect {
             | Effect::HarmSwallowed { .. }
             | Effect::Afflict { .. }
             | Effect::Boon { .. }
+            | Effect::Aura { .. }
             | Effect::Summon { .. } => 0.0,
             Effect::Sequence(parts) => parts.iter().map(|p| p.mean_damage(target)).sum(),
             Effect::Part { effect, .. } => effect.mean_damage(target),
@@ -795,6 +809,7 @@ impl Effect {
             | Effect::HarmSwallowed { .. }
             | Effect::Afflict { .. }
             | Effect::Boon { .. }
+            | Effect::Aura { .. }
             | Effect::Summon { .. } => Pmf::constant(0),
             Effect::Sequence(parts) => parts.iter().fold(Pmf::constant(0), |acc, p| {
                 acc.convolve(&p.damage_pmf(target))

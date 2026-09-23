@@ -125,7 +125,9 @@
 //! need more than a phrase: a mark maintained by concentration that a rider
 //! pays out against (`hunters_mark`), a lasting boon a creature puts on
 //! itself (`lasting_boon` - extra damage on its hits, resistances, or both,
-//! for a number of rounds), and a double it calls up and then commands
+//! for a number of rounds), an aura it raises and then holds up
+//! (`lasting_aura` - an `aura:` that had to be cast and lasts a stated time,
+//! rather than one it simply has), and a double it calls up and then commands
 //! (`commanded_double`). See [`crate::features`].
 
 use crate::creature::{Creature, Resource, Tactic};

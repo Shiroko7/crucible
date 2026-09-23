@@ -92,6 +92,11 @@ impl<'a> Fight<'a> {
         self.fighters[me].has(|c| matches!(c, Condition::Boon(i) if usize::from(i) == which))
     }
 
+    /// Is `me` holding the `which`th of its own raised auras right now?
+    pub(super) fn has_aura(&self, me: usize, which: usize) -> bool {
+        self.fighters[me].has(|c| matches!(c, Condition::Aura(i) if usize::from(i) == which))
+    }
+
     /// Every damage type `who`'s active boons let it resist, on top of
     /// whatever its stat block already does.
     pub(super) fn boon_resistances(&self, who: usize) -> Vec<DamageKind> {
