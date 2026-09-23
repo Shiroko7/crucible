@@ -2,7 +2,7 @@
 //! action and bonus action, repeated saves at the end of a turn, and
 //! legendary actions between turns.
 
-use crate::creature::Tactic;
+use crate::creature::{Move, Tactic};
 use crate::prob::Rng;
 use crate::rules::{Ability, Condition};
 use crate::sim::fight::fighter::refresh;
@@ -77,13 +77,28 @@ impl<'a> Fight<'a> {
         let side = self.fighters[who].side;
         for owner in 0..self.fighters.len() {
             let creature = self.fighters[owner].creature;
-            if creature.auras.is_empty()
+            if (creature.auras.is_empty() && creature.lasting_auras.is_empty())
                 || self.fighters[owner].side == side
                 || !self.fighters[owner].alive()
             {
                 continue;
             }
-            for m in &creature.auras {
+            // Always-on ones, then whichever raised ones are still up. Both
+            // resolve identically from here: the only thing being asked is
+            // whether this one is switched on.
+            let live: Vec<&Move> = creature
+                .auras
+                .iter()
+                .chain(
+                    creature
+                        .lasting_auras
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| self.has_aura(owner, *i))
+                        .map(|(_, m)| m),
+                )
+                .collect();
+            for m in live {
                 if !self.fighters[who].alive() || !self.reaches(owner, who) {
                     break;
                 }

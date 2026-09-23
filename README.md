@@ -75,6 +75,7 @@ lot:
 | `OncePerTurnDamage` | a swarm that joins one blow a turn, a once-a-turn elemental strike |
 | `BonusDamageVsQuarry` with `Afflict` | Hunter's Mark, Hex: a mark the caster concentrates on and pays out against |
 | `Boon` | a card that turns its bearer into something with tougher hide and heavier blows, a spell laid on one blade, a stance of ice |
+| `Aura` raised and held | a ring of spirits, a burning field: a cast that every enemy answers at the start of its turn, for as long as concentration holds it |
 | `Summon` with `Requirement` | a double called up beside its summoner, commanded out of its bonus action and spent in a burst |
 | damage of either type | a blade that can deal cold "instead of the weapon's normal damage type" |
 | `DamageThreshold` | an armoured shell or hull; a mouth or a crack as its weak spot |

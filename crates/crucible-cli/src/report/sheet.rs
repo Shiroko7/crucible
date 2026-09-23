@@ -250,6 +250,12 @@ pub fn body(owner: &Creature, effect: &Effect) -> String {
             .boons
             .get(*which)
             .map_or_else(|| "a boon".to_string(), describe_boon),
+        // Described by what each enemy actually meets, since that - not the
+        // raising - is the whole of what an aura is.
+        Effect::Aura { which, .. } => owner.lasting_auras.get(*which).map_or_else(
+            || "an aura".to_string(),
+            |aura| format!("aura: {}", body(owner, &aura.effect)),
+        ),
         Effect::Summon { which } => owner.summons.get(*which).map_or_else(
             || "a summon".to_string(),
             |summon| {

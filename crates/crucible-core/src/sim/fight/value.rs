@@ -191,6 +191,24 @@ impl<'a> Fight<'a> {
                         self.lasting_value(me, target, *duration, Boost::of(Extra::Boon(boon)))
                     }),
             },
+            // An aura is worth what it collects from whoever has to stand in
+            // it, once per turn for as long as it is up - not what it adds to
+            // this creature's own blow, which is the boon's question. Raising
+            // one already up is no choice at all, exactly as with a boon.
+            Effect::Aura { which, duration } => match self.has_aura(me, *which) {
+                true => f64::NEG_INFINITY,
+                false => self.fighters[me]
+                    .creature
+                    .lasting_auras
+                    .get(*which)
+                    .map_or(0.0, |aura| {
+                        let horizon = match duration {
+                            Duration::Rounds(rounds) => (*rounds).min(self.budget.depth.max(1)),
+                            _ => 1,
+                        };
+                        f64::from(horizon) * aura.effect.mean_damage(self.fighters[target].creature)
+                    }),
+            },
             // A double is worth the blow it will strike once it is standing.
             Effect::Summon { which } => self.summon_value(target, me, *which),
             // Whoever is inside, not `target`, takes it.

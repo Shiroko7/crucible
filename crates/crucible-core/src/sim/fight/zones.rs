@@ -101,6 +101,7 @@ impl<'a> Fight<'a> {
             | Effect::Buff { .. }
             | Effect::SaveOrModifier { .. }
             | Effect::Boon { .. }
+            | Effect::Aura { .. }
             | Effect::Summon { .. } => true,
         }
     }
