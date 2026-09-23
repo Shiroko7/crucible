@@ -120,7 +120,8 @@ impl<'a> Fight<'a> {
                     let force_crit = self.fighters[current_target].has(Condition::auto_crits);
                     // A blade already raised is just a higher AC; a fresh
                     // reaction is a decision, and may leave it raised.
-                    let standing = standing_ac_boost(&self.fighters[current_target], strike.kind);
+                    let standing = standing_ac_boost(&self.fighters[current_target], strike.kind)
+                        + self.boon_ac(current_target);
                     let boost = ac_boost_reaction(&self.fighters[current_target], strike.kind);
                     let plan =
                         self.extra_damage_plan(me, current_target, strike, move_riders, mode, true);
@@ -316,6 +317,19 @@ impl<'a> Fight<'a> {
                 landed_conditions.push((me, *condition));
                 if record {
                     notes.push(condition.name().to_string());
+                }
+            }
+            // A ward on the user itself. Temporary hit points do not stack -
+            // 5e keeps whichever pool is larger rather than adding them - and
+            // they are not healing, so they never bring anything back up.
+            Effect::TempHp(roll) => {
+                let gained = roll.sample(rng);
+                let f = &mut self.fighters[me];
+                if f.hp > 0 && gained > f.temp_hp {
+                    f.temp_hp = gained;
+                    if record {
+                        notes.push(format!("{gained} temp hp"));
+                    }
                 }
             }
             Effect::Heal(roll) => {
@@ -574,6 +588,10 @@ impl<'a> Fight<'a> {
     /// A swallower that drops lets go of everything it holds.
     pub(super) fn apply_damage(&mut self, rng: &mut Rng, target: usize, dealt: i32) {
         let f = &mut self.fighters[target];
+        // A ward takes the blow first, and what it cannot hold passes through.
+        let soaked = dealt.min(f.temp_hp).max(0);
+        f.temp_hp -= soaked;
+        let dealt = dealt - soaked;
         let before = f.hp;
         f.hp -= dealt;
         if f.hp <= 0 {

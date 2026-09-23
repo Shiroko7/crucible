@@ -104,6 +104,76 @@ pub enum Spend {
     Boon(usize),
 }
 
+/// Which of 5e's three spell components a cast needs: spoken words, a
+/// gesture, a physical component.
+///
+/// Declared so that a restriction can name the one it actually stops rather
+/// than stopping "spells". Silence takes away speech, not gesture, so it
+/// blocks a Verbal cast and lets a purely Somatic one through; manacles or a
+/// grapple would be the other way round. Without this the engine could only
+/// say "no spells at all", which is wrong for every spell that has no Verbal
+/// component.
+///
+/// A move that never declares any is read by [`Move::needs_verbal`] as
+/// needing speech if it is a [`MoveKind::Spell`] - which is true of most
+/// spells, and is what this engine did before components existed, so an
+/// undeclared stat block keeps behaving exactly as it did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Components {
+    pub verbal: bool,
+    pub somatic: bool,
+    pub material: bool,
+}
+
+impl Components {
+    /// Parse `v`, `s`, `m` in any order and any separator - `vsm`,
+    /// `verbal, somatic`, `v s` - or `none` for a cast that needs nothing.
+    pub fn parse(text: &str) -> Option<Self> {
+        let lower = text.to_ascii_lowercase();
+        if lower.split_whitespace().eq(["none"]) {
+            return Some(Self::default());
+        }
+        let mut out = Self::default();
+        for word in lower.split([',', ' ']).filter(|w| !w.is_empty()) {
+            match word {
+                "verbal" => out.verbal = true,
+                "somatic" => out.somatic = true,
+                "material" => out.material = true,
+                // A bare run of letters: `vsm`, `vs`, `v`.
+                other if other.chars().all(|c| matches!(c, 'v' | 's' | 'm')) => {
+                    for c in other.chars() {
+                        match c {
+                            'v' => out.verbal = true,
+                            's' => out.somatic = true,
+                            _ => out.material = true,
+                        }
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some(out)
+    }
+
+    /// `V, S, M` in the stat block's own words.
+    pub fn name(self) -> String {
+        let mut bits = Vec::new();
+        if self.verbal {
+            bits.push("V");
+        }
+        if self.somatic {
+            bits.push("S");
+        }
+        if self.material {
+            bits.push("M");
+        }
+        match bits.is_empty() {
+            true => "no components".to_string(),
+            false => bits.join(", "),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Move {
     pub name: String,
@@ -153,6 +223,10 @@ pub struct Move {
     /// [`Uses::Limited`] for the charge budget rather than inventing a
     /// parallel resource mechanism.
     pub bypasses_casting_restrictions: bool,
+    /// Which components this cast needs, when the stat block says. `None`
+    /// means it never said, and [`Move::needs_verbal`] falls back to "a spell
+    /// speaks" - see [`Components`].
+    pub components: Option<Components>,
     /// How many of the creature's legendary actions this takes, as a
     /// legendary action - "Costs 2 Actions", "(2 Points)". Read only there;
     /// 1 for every ordinary move.
@@ -182,6 +256,7 @@ impl Move {
             kind: MoveKind::Standard,
             before_action: false,
             bypasses_casting_restrictions: false,
+            components: None,
             legendary_cost: 1,
             reach: Reach::Any,
             requires: None,
@@ -231,6 +306,25 @@ impl Move {
     /// Marks this specific move-taking as exempt from whatever
     /// casting-restriction mechanism might apply to it - see
     /// [`Move::bypasses_casting_restrictions`].
+    /// Declare which components this cast needs - see [`Components`].
+    pub fn with_components(mut self, components: Components) -> Self {
+        self.components = Some(components);
+        self
+    }
+
+    /// Does taking this move require speaking?
+    ///
+    /// The question Silence actually asks. A move that declared its
+    /// components answers from them; one that never did is read as speaking
+    /// if it is a spell, which is both true of most spells and exactly how
+    /// this engine behaved before components existed.
+    pub fn needs_verbal(&self) -> bool {
+        match self.components {
+            Some(c) => c.verbal,
+            None => self.kind == MoveKind::Spell,
+        }
+    }
+
     pub fn with_bypasses_casting_restrictions(mut self) -> Self {
         self.bypasses_casting_restrictions = true;
         self

@@ -220,6 +220,18 @@ pub enum Condition {
     /// concentration ends it, that it is cleared and counted down like
     /// anything else - is the condition machinery this reuses rather than
     /// duplicates.
+    /// Sent somewhere else for the duration: it acts on nothing and nothing
+    /// acts on it, and it comes back when whoever sent it stops holding it
+    /// there.
+    ///
+    /// Banishment's mechanism. Not a flavour of [`Condition::Stunned`]: a
+    /// stunned creature is still standing in the fight, can still be hit, and
+    /// is still worth attacking. A banished one is *gone* - `Fight::reaches`
+    /// refuses in both directions, which is exactly what
+    /// [`Condition::Swallowed`] already does for a creature inside something,
+    /// so the same chokepoint answers both rather than a second notion of
+    /// who can touch whom.
+    Banished,
     Boon(u8),
     /// An aura its owner raised and is holding up - the `n`th entry of its
     /// own [`crate::creature::Creature::lasting_auras`]: a move every enemy
@@ -250,6 +262,7 @@ impl Condition {
             "suppressed" => Self::Suppressed,
             "marked" => Self::Marked,
             "silenced" => Self::Silenced,
+            "banished" => Self::Banished,
             "charmed" => Self::Charmed,
             "frightened" => Self::Frightened,
             "petrified" => Self::Petrified,
@@ -289,6 +302,7 @@ impl Condition {
             Self::Suppressed => "suppressed",
             Self::Marked => "marked",
             Self::Silenced => "silenced",
+            Self::Banished => "banished",
             Self::Charmed => "charmed",
             Self::Frightened => "frightened",
             Self::Petrified => "petrified",
@@ -324,7 +338,10 @@ impl Condition {
     /// include Incapacitated, which is what takes away legendary actions as
     /// well as the turn.
     pub fn incapacitated(self) -> bool {
-        matches!(self, Self::Stunned | Self::Paralyzed | Self::Petrified)
+        matches!(
+            self,
+            Self::Stunned | Self::Paralyzed | Self::Petrified | Self::Banished
+        )
     }
 
     /// Does an attacker striking this creature get advantage?

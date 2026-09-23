@@ -32,6 +32,12 @@ pub struct Boon {
     pub weapon: Option<String>,
     /// Damage types its holder resists while it lasts.
     pub resist: Vec<DamageKind>,
+    /// Armor Class its holder gains while it lasts - a ward held around it,
+    /// a shield of faith. Distinct from
+    /// [`crate::creature::Rider::ReactionOnTargeted`], which is spent
+    /// against one attack, and from a flat `ac` trait, which is permanent:
+    /// this one is up exactly as long as the boon is.
+    pub ac: i32,
 }
 
 impl Boon {
@@ -42,7 +48,14 @@ impl Boon {
             weapon_only: false,
             weapon: None,
             resist: Vec::new(),
+            ac: 0,
         }
+    }
+
+    /// Armor Class while it lasts.
+    pub fn with_ac(mut self, ac: i32) -> Self {
+        self.ac = ac;
+        self
     }
 
     /// Extra damage on a qualifying hit.

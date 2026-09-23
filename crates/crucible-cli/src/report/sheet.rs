@@ -135,6 +135,11 @@ pub fn describe(owner: &Creature, m: &Move) -> String {
     if m.concentration {
         bits.push("concentration".to_string());
     }
+    // Only when the stat block said: an undeclared spell is read as speaking,
+    // and printing "V" on every one of them would be inventing detail.
+    if let Some(components) = m.components {
+        bits.push(components.name());
+    }
     if m.legendary_cost > 1 {
         bits.push(format!("{} legendary actions", m.legendary_cost));
     }
@@ -250,6 +255,7 @@ pub fn body(owner: &Creature, effect: &Effect) -> String {
             .boons
             .get(*which)
             .map_or_else(|| "a boon".to_string(), describe_boon),
+        Effect::TempHp(roll) => format!("{}d{}{:+} temp hp", roll.count, roll.sides, roll.bonus),
         // Described by what each enemy actually meets, since that - not the
         // raising - is the whole of what an aura is.
         Effect::Aura { which, .. } => owner.lasting_auras.get(*which).map_or_else(
