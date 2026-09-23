@@ -510,6 +510,24 @@ impl<'a> Fight<'a> {
                     notes.push(name);
                 }
             }
+            Effect::Aura { which, duration } => {
+                // On itself, like a boon: what the move's concentration then
+                // maintains. Who pays for it is the only difference, and that
+                // is settled at the start of every enemy's turn, not here.
+                let Some(aura) = self.fighters[me].creature.lasting_auras.get(*which) else {
+                    return;
+                };
+                let name = aura.name.clone();
+                let Ok(index) = u8::try_from(*which) else {
+                    return;
+                };
+                let expiry = self.expiry(me, me, *duration);
+                self.apply_condition(me, Condition::Aura(index), expiry);
+                landed_conditions.push((me, Condition::Aura(index)));
+                if record {
+                    notes.push(name);
+                }
+            }
             Effect::Summon { which } => {
                 let called = self.summon(me, *which);
                 if record {

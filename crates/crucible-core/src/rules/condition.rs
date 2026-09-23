@@ -233,6 +233,18 @@ pub enum Condition {
     /// who can touch whom.
     Banished,
     Boon(u8),
+    /// An aura its owner raised and is holding up - the `n`th entry of its
+    /// own [`crate::creature::Creature::lasting_auras`]: a move every enemy
+    /// meets at the start of its turn, for as long as this condition lasts.
+    ///
+    /// [`Condition::Boon`]'s outward-facing twin, and an index for the same
+    /// reasons. A boon rides its holder's own blows; this one is paid by
+    /// whoever else has to stand in it, which is the only difference that
+    /// matters - a spell like Spirit Guardians is exactly a monster's
+    /// always-on aura with a duration and a concentration check in front
+    /// of it, so it reuses the aura machinery rather than growing a second
+    /// kind of recurring damage.
+    Aura(u8),
 }
 
 impl Condition {
@@ -309,6 +321,8 @@ impl Condition {
             // Never parsed back: which boon it is belongs to the creature
             // that put it on itself, not to a word in a stat block.
             Self::Boon(_) => "boon",
+            // Likewise: which aura it is belongs to whoever raised it.
+            Self::Aura(_) => "aura",
             Self::SaveDisadvantage(ability) => match ability {
                 Ability::Str => "disadvantage_str_saves",
                 Ability::Dex => "disadvantage_dex_saves",

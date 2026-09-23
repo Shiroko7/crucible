@@ -16,10 +16,12 @@ pub mod spellcasting;
 pub mod spells;
 pub mod summons;
 
+mod aura;
 mod boon;
 mod plugin;
 mod registry;
 
+pub use aura::LastingAuraPlugin;
 pub use boon::LastingBoonPlugin;
 pub use plugin::{CreatureBuilder, FeatureError, FeaturePlugin, FeatureResult};
 pub use registry::{FeatureRegistry, PluginFactory};

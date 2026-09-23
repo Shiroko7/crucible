@@ -86,6 +86,14 @@ pub struct Creature {
     /// a whirlpool's drag, a stench - resolved against that enemy alone.
     /// Taking one costs nothing: an aura is always on.
     pub auras: Vec<Move>,
+    /// Auras this creature can *raise* rather than simply have: the `n`th is
+    /// live only while it holds [`Condition::Aura`] naming it, which is what
+    /// a spell like Spirit Guardians is. Resolved exactly like [`auras`] once
+    /// up, so the only difference between the two lists is whether something
+    /// had to be spent to switch it on.
+    ///
+    /// [`auras`]: Creature::auras
+    pub lasting_auras: Vec<Move>,
     /// Enemies stand somewhere around this creature - at its mouth, beside
     /// its body, or out in front of it (see [`crate::creature::Zone`]) - rather than
     /// everywhere at once, which is what every other creature gets. Its
@@ -148,6 +156,7 @@ impl Creature {
             reactions: Vec::new(),
             reactions_per_round: 1,
             auras: Vec::new(),
+            lasting_auras: Vec::new(),
             mouth: false,
             difficult_terrain: false,
             tactic: Tactic::default(),
@@ -371,6 +380,14 @@ impl Creature {
     pub fn add_boon(&mut self, boon: Boon) -> usize {
         self.boons.push(boon);
         self.boons.len() - 1
+    }
+
+    /// Declare an aura this creature can raise, returning the index a
+    /// [`Condition::Aura`] and an [`crate::creature::Effect::Aura`] name it
+    /// by - the mirror of [`Creature::add_boon`].
+    pub fn add_lasting_aura(&mut self, aura: Move) -> usize {
+        self.lasting_auras.push(aura);
+        self.lasting_auras.len() - 1
     }
 
     /// Declare a creature this one can call up beside it, returning the index

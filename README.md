@@ -78,6 +78,7 @@ lot:
 | `Boon` with `ac` | a ward held around somebody: Armor Class and nothing else, for as long as it is up |
 | `TempHp` | a ward that soaks the next blows and is then gone - spent ahead of hit points, and never healing anybody back up |
 | `Banished` | sent elsewhere for the duration: it acts on nothing and nothing reaches it, and it comes back when the spell ends |
+| `Aura` raised and held | a ring of spirits, a burning field: a cast that every enemy answers at the start of its turn, for as long as concentration holds it |
 | `Summon` with `Requirement` | a double called up beside its summoner, commanded out of its bonus action and spent in a burst |
 | damage of either type | a blade that can deal cold "instead of the weapon's normal damage type" |
 | `DamageThreshold` | an armoured shell or hull; a mouth or a crack as its weak spot |

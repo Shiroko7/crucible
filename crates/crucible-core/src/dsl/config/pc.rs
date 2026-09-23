@@ -51,6 +51,11 @@ pub struct PlayerCharacter {
     pub actions: Vec<super::MoveEntry>,
     #[serde(default)]
     pub bonus: Vec<super::MoveEntry>,
+    /// Always-on auras - a paladin's, a cleric's Spirit Guardians once it is
+    /// already up. See [`crate::creature::Creature::auras`]; one that has to
+    /// be cast first is the `lasting_aura` feature instead.
+    #[serde(default)]
+    pub auras: Vec<super::MoveEntry>,
 }
 
 impl PlayerCharacter {
@@ -134,6 +139,12 @@ impl PlayerCharacter {
         for entry in &self.bonus {
             let m = super::parse_move_entry(entry, &builder.creature)?;
             builder.add_bonus_action(m);
+        }
+
+        // Apply always-on auras
+        for entry in &self.auras {
+            let m = super::parse_move_entry(entry, &builder.creature)?;
+            builder.creature.auras.push(m);
         }
 
         builder.build()
