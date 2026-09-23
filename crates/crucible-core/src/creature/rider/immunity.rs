@@ -32,6 +32,16 @@ impl Rider {
             _ => false,
         }
     }
+
+    /// Does this rider ignore a target's resistance to `kind` (Resistant to
+    /// Normal) for damage this creature deals? See
+    /// [`crate::creature::Creature::reduction_from`].
+    pub fn ignores_damage_resistance(&self, kind: DamageKind) -> bool {
+        match self {
+            Rider::IgnoreResistance { kinds } => kinds.contains(&kind),
+            _ => false,
+        }
+    }
 }
 
 /// Roll a saving throw `target` makes against `condition`, which `attacker`
@@ -338,5 +348,59 @@ mod tests {
         );
         assert_eq!(with_trait, without_trait);
         assert_eq!(with_trait, flat_p);
+    }
+
+    #[test]
+    fn ignoring_resistance_turns_resistant_into_normal() {
+        use crate::rules::Reduction;
+
+        let mut resistant_target = Creature::new("fire_elemental", 13, 100);
+        resistant_target
+            .reductions
+            .push((DamageKind::Fire, Reduction::Resistant));
+
+        let plain_attacker = Creature::new("wizard", 12, 30);
+        let mut adept_attacker = Creature::new("elemental_adept", 12, 30);
+        adept_attacker.riders.push(Rider::IgnoreResistance {
+            kinds: vec![DamageKind::Fire],
+        });
+
+        assert_eq!(
+            resistant_target.reduction_from(DamageKind::Fire, &plain_attacker),
+            Reduction::Resistant
+        );
+        assert_eq!(
+            resistant_target.reduction_from(DamageKind::Fire, &adept_attacker),
+            Reduction::Normal
+        );
+
+        // Does not affect other types
+        resistant_target
+            .reductions
+            .push((DamageKind::Cold, Reduction::Resistant));
+        assert_eq!(
+            resistant_target.reduction_from(DamageKind::Cold, &adept_attacker),
+            Reduction::Resistant
+        );
+
+        // Works together with immunity downgrade: Immune -> Resistant -> Normal
+        let mut immune_target = Creature::new("iron_golem", 17, 200);
+        immune_target
+            .reductions
+            .push((DamageKind::Fire, Reduction::Immune));
+
+        let mut piercing_attacker = Creature::new("penetrator", 12, 30);
+        piercing_attacker.riders.push(Rider::DowngradeImmunity {
+            damage: Some(DamageKind::Fire),
+            condition: None,
+        });
+        piercing_attacker.riders.push(Rider::IgnoreResistance {
+            kinds: vec![DamageKind::Fire],
+        });
+
+        assert_eq!(
+            immune_target.reduction_from(DamageKind::Fire, &piercing_attacker),
+            Reduction::Normal
+        );
     }
 }

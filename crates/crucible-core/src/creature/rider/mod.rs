@@ -304,6 +304,11 @@ pub enum Rider {
         damage: Option<DamageKind>,
         condition: Option<Condition>,
     },
+    /// Attacks and spells this creature lands ignore the target's resistance
+    /// to the named damage types: resistance becomes normal damage.
+    ///
+    /// Elemental Adept, Shatter Resistance, Exploit Vulnerability.
+    IgnoreResistance { kinds: Vec<DamageKind> },
     /// On a hit, unconditionally applies a condition to the target - no
     /// saving throw offered, unlike [`Rider::SaveOrCondition`].
     ///

@@ -199,7 +199,7 @@ impl Creature {
     /// very same target, still sees `Immune` from [`Creature::reduction`].
     pub fn reduction_from(&self, kind: DamageKind, attacker: &Creature) -> Reduction {
         let base = self.reduction(kind);
-        if base == Reduction::Immune
+        let downgraded = if base == Reduction::Immune
             && attacker
                 .riders
                 .iter()
@@ -208,6 +208,16 @@ impl Creature {
             Reduction::Resistant
         } else {
             base
+        };
+        if downgraded == Reduction::Resistant
+            && attacker
+                .riders
+                .iter()
+                .any(|r| r.ignores_damage_resistance(kind))
+        {
+            Reduction::Normal
+        } else {
+            downgraded
         }
     }
 

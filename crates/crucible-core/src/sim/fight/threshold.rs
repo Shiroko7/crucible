@@ -153,7 +153,15 @@ pub(super) fn reducer<'c>(
             base = base.with_resistance();
         }
         if weak && target.weak_spot_resists().contains(&kind) {
-            base.with_resistance()
+            base = base.with_resistance();
+        }
+        if base == Reduction::Resistant
+            && attacker
+                .riders
+                .iter()
+                .any(|r| r.ignores_damage_resistance(kind))
+        {
+            Reduction::Normal
         } else {
             base
         }

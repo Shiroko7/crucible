@@ -213,6 +213,7 @@ fn parse_body<'a>(
     let mut weapon_named = false;
     let mut weapon_label: Option<&str> = None;
     let mut to_swallowed = false;
+    let mut autohit = false;
     let mut requires_type: Option<String> = None;
     let mut out = Body::default();
 
@@ -223,6 +224,7 @@ fn parse_body<'a>(
         }
         let words: Vec<&str> = clause.split_whitespace().collect();
         match words[0].to_ascii_lowercase().as_str() {
+            "autohit" => autohit = true,
             "strikes" => strikes = count(arg(&words, 1, clause)?)?,
             "hit" => to_hit = Some(number(arg(&words, 1, clause)?)?),
             "recharge" => out.uses = Uses::Recharge(count(arg(&words, 1, clause)?)?),
@@ -356,6 +358,14 @@ fn parse_body<'a>(
             );
         }
         Some(Effect::HarmSwallowed { damage })
+    } else if autohit {
+        if damage.is_empty() || save.is_some() || to_hit.is_some() {
+            return Err(
+                "`autohit` damage lands without a roll: give it damage and no `hit` or `save`"
+                    .into(),
+            );
+        }
+        Some(Effect::AutoHit { damage })
     } else if let Some((ability, dc)) = save {
         Some(Effect::Save(SaveEffect {
             ability,
@@ -367,7 +377,8 @@ fn parse_body<'a>(
             requires_type,
         }))
     } else if !damage.is_empty() {
-        let to_hit = to_hit.ok_or("a damaging move needs a `hit +N` clause or a `save`")?;
+        let to_hit =
+            to_hit.ok_or("a damaging move needs a `hit +N` clause, a `save`, or `autohit`")?;
         Some(Effect::Strikes {
             strike: Strike {
                 to_hit,
@@ -932,5 +943,39 @@ reaction: Spray | save dex dc 18 | 4d10 piercing | half on success | when breach
         assert_eq!(potion.kind, MoveKind::ObjectUse);
         assert_eq!(potion.effect, Effect::Heal(HealRoll::new(2, 4, 2)));
         assert!(potion.cost.is_some());
+    }
+
+    #[test]
+    fn an_autohit_move_parses() {
+        let text = "creature: x\nhp: 20\naction: Darts | autohit | 3d4+3 force\n";
+        let c = &parse(text).unwrap()[0];
+        let darts = &c.actions[0];
+        assert_eq!(
+            darts.effect,
+            Effect::AutoHit {
+                damage: vec![DamageRoll::new(3, 4, 3, DamageKind::Force)]
+            }
+        );
+
+        // Autohit in reaction
+        let text_reaction =
+            "creature: x\nhp: 20\nreaction: Thorns | when hit in melee | autohit | 4d4 piercing\n";
+        let c_react = &parse(text_reaction).unwrap()[0];
+        let thorns = &c_react.reactions[0];
+        assert_eq!(
+            thorns.trigger,
+            ReactionTrigger::Hit(AttackTrigger::MeleeAttack)
+        );
+        assert_eq!(
+            thorns.action.effect,
+            Effect::AutoHit {
+                damage: vec![DamageRoll::new(4, 4, 0, DamageKind::Piercing)]
+            }
+        );
+
+        // Autohit with hit or save is an error
+        let invalid =
+            parse("creature: x\nhp: 20\naction: Bad | autohit | hit +5 | 1d6 fire\n").unwrap_err();
+        assert!(invalid.message.contains("without a roll"), "{invalid}");
     }
 }
