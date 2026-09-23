@@ -374,6 +374,22 @@ pub(crate) fn parse_trait(value: &str) -> Result<TraitEffect, String> {
                 condition,
             }))
         }
+        // `ignore resistance fire`, or `ignore resistance piercing, slashing` -
+        // attacks and spells ignore resistance to those damage types.
+        "ignore" | "ignores" => {
+            if !arg(&words, 1, value)?.eq_ignore_ascii_case("resistance") {
+                return Err(format!(
+                    "expected `ignore resistance <types>`, got `{value}`"
+                ));
+            }
+            let kinds = parse_damage_kinds(&words[2..].join(" "), value)?;
+            if kinds.is_empty() {
+                return Err(format!(
+                    "`{value}` needs at least one damage type to ignore resistance for"
+                ));
+            }
+            Ok(TraitEffect::Rider(Rider::IgnoreResistance { kinds }))
+        }
         // `empower weapon 2d6 poison on poisoned` - an attacker-side buff,
         // dormant until this creature inflicts the named condition on a
         // target via a weapon attack, after which its weapon attacks carry
@@ -1108,5 +1124,23 @@ condition immune: poisoned, prone
         assert!(parse_trait("digest lots").is_err());
         assert!(parse_trait("regurgitate 60 con 22").is_err());
         assert!(parse_trait("regurgitate 60 con dc 22 prone").is_err());
+    }
+
+    #[test]
+    fn ignore_resistance_parses_damage_types() {
+        assert_eq!(
+            parse_trait("ignore resistance fire").unwrap(),
+            TraitEffect::Rider(Rider::IgnoreResistance {
+                kinds: vec![DamageKind::Fire]
+            })
+        );
+        assert_eq!(
+            parse_trait("ignores resistance piercing, slashing").unwrap(),
+            TraitEffect::Rider(Rider::IgnoreResistance {
+                kinds: vec![DamageKind::Piercing, DamageKind::Slashing]
+            })
+        );
+        assert!(parse_trait("ignore resistance").is_err());
+        assert!(parse_trait("ignore immunity fire").is_err());
     }
 }
