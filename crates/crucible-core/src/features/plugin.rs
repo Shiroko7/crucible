@@ -185,7 +185,7 @@ impl CreatureBuilder {
 /// The agent only creates new `FeaturePlugin` implementations when new mechanics
 /// are encountered.
 pub trait FeaturePlugin: Send + Sync {
-    /// Internal identifier for this feature (e.g., "evasion", "deflect_attacks", "legendary_resistance").
+    /// Internal identifier for this feature (e.g., "evasion", "sneak_attack", "legendary_resistance").
     fn id(&self) -> &'static str;
 
     /// Descriptive name of the specific feature instance (e.g., "Evasion", "Staff x2", "Fire Breath").
