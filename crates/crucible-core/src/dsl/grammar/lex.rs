@@ -57,11 +57,12 @@ pub(super) fn parse_dice(expr: &str) -> Result<(u32, u32, i32), String> {
     }
 }
 
-/// `1d10+8 slashing, 2d4 fire` - or a flat `5 fire`, or `1d6+7 slashing or
-/// cold` for damage its dealer can choose the type of per attack.
+/// `1d10+8 slashing, 2d4 fire` or `1d10+8 slashing + 2d4 fire` - or a flat `5 fire`,
+/// or `1d6+7 slashing or cold` for damage its dealer can choose the type of per attack.
 pub fn parse_damage(clause: &str) -> Result<Vec<DamageRoll>, String> {
     let mut out = Vec::new();
-    for term in clause.split(',') {
+    let normalized = clause.replace(" + ", ", ");
+    for term in normalized.split(',') {
         let mut words = term.split_whitespace();
         let (Some(expr), Some(kind_word)) = (words.next(), words.next()) else {
             return Err(format!("expected `2d6+3 fire`, got `{}`", term.trim()));
@@ -114,4 +115,25 @@ pub(crate) fn count(s: &str) -> Result<u32, String> {
     let s = s.trim();
     s.parse()
         .map_err(|_| format!("`{s}` is not a non-negative number"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_damage_with_commas_and_plus() {
+        let comma = parse_damage("1d8+3 slashing, 2d6 fire").unwrap();
+        assert_eq!(comma.len(), 2);
+        assert_eq!(comma[0], DamageRoll::new(1, 8, 3, DamageKind::Slashing));
+        assert_eq!(comma[1], DamageRoll::new(2, 6, 0, DamageKind::Fire));
+
+        let plus = parse_damage("1d8+3 slashing + 2d6 fire").unwrap();
+        assert_eq!(plus, comma);
+
+        let multi = parse_damage("4d8 radiant + 2d6 poison").unwrap();
+        assert_eq!(multi.len(), 2);
+        assert_eq!(multi[0], DamageRoll::new(4, 8, 0, DamageKind::Radiant));
+        assert_eq!(multi[1], DamageRoll::new(2, 6, 0, DamageKind::Poison));
+    }
 }
