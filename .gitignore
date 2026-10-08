@@ -1,4 +1,15 @@
 /target
 
-# Non-SRD stat blocks: loaded from disk, never committed.
+# Local credentials and private keys.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Your own characters, monsters and scenarios: read from disk, never
+# committed. What is committed beside them is one generic example of each.
+/content/local/
 /scenarios/local/

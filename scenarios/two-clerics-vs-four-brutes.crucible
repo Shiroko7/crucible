@@ -1,0 +1,10 @@
+# An example scenario with several of each: `count:` fields copies of one
+# creature, numbered so they can be told apart.
+
+team: a
+source: content/characters/cleric.toml
+count: 2
+
+team: b
+source: content/monsters/brute.toml
+count: 4

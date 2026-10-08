@@ -1,0 +1,32 @@
+# An example monster: a big thing with a club, here to show how one is
+# written. Copy it to make your own - anything under `content/local/` stays
+# out of git.
+#
+# A move's `effect` is phrases joined by `|`: how many attacks, what they
+# roll to hit, what they deal, and what else a hit does.
+
+[monster]
+name = "Brute"
+cr = 2
+size = "Large"
+creature_type = "Giant"
+ac = 11
+hp = 59
+initiative = -1
+speed = 40
+
+[monster.saves]
+str = 4
+dex = -1
+con = 3
+int = -3
+wis = -2
+cha = -2
+
+[[monster.actions]]
+name = "Greatclub"
+effect = "strikes 1 | hit +6 | 2d8+4 bludgeoning | on hit save str dc 13 prone"
+
+[[monster.actions]]
+name = "Rock"
+effect = "ranged | strikes 1 | hit +6 | 2d6+4 bludgeoning"

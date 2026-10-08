@@ -1,0 +1,7 @@
+# An example scenario: one character against one monster.
+
+team: a
+source: content/characters/cleric.toml
+
+team: b
+source: content/monsters/brute.toml

@@ -1,0 +1,59 @@
+# An example character: a plain level 5 Cleric, here to show how one is
+# written. Copy it to make your own - anything under `content/local/` stays
+# out of git.
+#
+# The numbers are the ones a sheet states: Wisdom 18 (+4) and a +3
+# proficiency bonus, so its spell save DC is 15 and its spell attack +7.
+# Each `[[pc.features]]` names something the engine already knows how to
+# play - here, spells - and each `[[pc.actions]]` is a move written out by
+# hand.
+
+[pc]
+name = "Cleric"
+class = "Cleric"
+level = 5
+ac = 18          # chain mail and a shield
+hp = 38
+initiative = 0
+speed = 30
+
+[pc.saves]
+str = 2
+dex = 0
+con = 2
+int = 0
+wis = 7
+cha = 4
+
+[pc.spellcasting]
+ability = "wis"
+ability_modifier = 4
+proficiency_bonus = 3
+
+[pc.resources.slots]
+1 = 4
+2 = 3
+3 = 2
+
+[[pc.features]]
+plugin = "sacred_flame"
+dice = 2        # two d8s, from 5th level
+
+[[pc.features]]
+plugin = "guiding_bolt"
+
+[[pc.features]]
+plugin = "bless"
+
+[[pc.features]]
+plugin = "healing_word"
+
+[[pc.features]]
+plugin = "cure_wounds"
+
+[[pc.features]]
+plugin = "spirit_guardians"
+
+[[pc.actions]]
+name = "Mace"
+effect = "weapon mace | strikes 1 | hit +5 | 1d6+2 bludgeoning"
