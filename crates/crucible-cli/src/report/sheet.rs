@@ -67,7 +67,11 @@ pub fn print_sheet(roster: &[&Creature]) {
             );
         };
         for (label, moves) in groups {
-            for m in moves.iter() {
+            // What anybody can do is not part of what this creature is.
+            for m in moves
+                .iter()
+                .filter(|m| !m.riders.contains(&Rider::Universal))
+            {
                 print_move(label, m, String::new());
             }
         }
@@ -85,6 +89,11 @@ pub fn print_sheet(roster: &[&Creature]) {
                         AttackTrigger::RangedWeaponAttack => " by a ranged weapon",
                     }
                 ),
+                ReactionTrigger::Cast { aimed: true } => {
+                    "when a spell is aimed at it alone: ".to_string()
+                }
+                ReactionTrigger::Cast { aimed: false } => "when an enemy casts: ".to_string(),
+                ReactionTrigger::Damaged => "when damaged: ".to_string(),
             };
             print_move("reaction", &r.action, when);
         }
@@ -179,9 +188,34 @@ fn on_hit(owner: &Creature, riders: &[Rider]) -> Vec<String> {
     for rider in riders {
         if let Rider::BonusDamageVsCreatureType { .. }
         | Rider::ConditionOnHit { .. }
+        | Rider::BonusDamageWithAdvantage { .. }
+        | Rider::AllHit { .. }
+        | Rider::EachInReach
+        | Rider::Chains { .. }
+        | Rider::HalfOnMiss
+        | Rider::SparesTarget
+        | Rider::TakesBonusAction
+        | Rider::RideLine { .. }
+        | Rider::Anchored { .. }
+        | Rider::Hinders
+        | Rider::LongRange { .. }
+        | Rider::MagicWeapons
         | Rider::Swallow { .. } = rider
         {
             bits.push(describe_trait(rider));
+        }
+        if let Rider::AlsoCosts(cost) = rider {
+            bits.push(format!(
+                "{} {}",
+                cost.amount,
+                owner
+                    .resources
+                    .get(cost.resource)
+                    .map_or("?", |r| r.name.as_str())
+            ));
+        }
+        if let Rider::NeverProvokes = rider {
+            bits.push("moves its speed again, provoking nothing".to_string());
         }
         if let Rider::SaveOrCondition {
             ability,
@@ -295,6 +329,19 @@ pub fn body(owner: &Creature, effect: &Effect) -> String {
             }
             format!("{} ({})", body(owner, effect), notes.join(", "))
         }
+        Effect::Counter => "stops the spell".to_string(),
+        Effect::Teleport { feet } => format!("teleports up to {feet} ft"),
+        Effect::Hide { bonus } => format!("hides, Stealth {bonus:+}"),
+        Effect::Displace(d) => format!(
+            "{} dc {}: thrown up to {} ft{} and {} to all within {} ft of where it stood, or {} on a save",
+            d.ability.name(),
+            d.dc,
+            d.feet,
+            if d.away { " away" } else { "" },
+            damage_list(&d.blast),
+            d.radius,
+            damage_list(&d.on_success),
+        ),
     }
 }
 
@@ -308,6 +355,7 @@ fn waiting_on(m: &Move) -> String {
         },
         Some(Requirement::SummonRoom { max, .. }) => format!("at most {max} summoned"),
         Some(Requirement::Boon { .. }) => "needs its boon active".to_string(),
+        Some(Requirement::Shadow) => "needs dim light or darkness".to_string(),
         None => "cannot land from here".to_string(),
     }
 }
@@ -533,6 +581,130 @@ pub fn describe_trait(rider: &Rider) -> String {
             "{threshold}+ damage from inside in a turn: {} dc {dc} or regurgitate",
             ability.name()
         ),
+        Rider::MagicResistance => {
+            "magic resistance: advantage on saves against spells and magic items".to_string()
+        }
+        Rider::AdvantageAgainst { condition } => format!(
+            "advantage on attacks against anything {}",
+            condition.name()
+        ),
+        Rider::BonusDamageVsCondition {
+            dice_count,
+            dice_sides,
+            bonus,
+            damage_kind,
+            condition,
+        } => format!(
+            "+{} against anything {}",
+            damage_list(&[DamageRoll::new(
+                *dice_count,
+                *dice_sides,
+                *bonus,
+                *damage_kind
+            )]),
+            condition.name()
+        ),
+        Rider::ReflectDamage { kinds } => format!(
+            "throws back {} damage at whoever dealt it",
+            kinds.iter().map(|k| k.name()).collect::<Vec<_>>().join("/")
+        ),
+        Rider::SpellStore { up_to, holds, .. } => format!(
+            "stores spell levels (up to {holds}) that pay for slots up to level {up_to}, and              keeps what it stops"
+        ),
+        Rider::RefusesHealing => "accepts healing from nobody else".to_string(),
+        Rider::Truesight { feet } => format!("truesight {feet} ft"),
+        Rider::OneAtATime => "on one creature at a time".to_string(),
+        Rider::FirstHitDamage {
+            dice_count,
+            dice_sides,
+            bonus,
+            damage_kind,
+        } => format!(
+            "+{} on its first hit of the fight",
+            damage_list(&[DamageRoll::new(
+                *dice_count,
+                *dice_sides,
+                *bonus,
+                *damage_kind
+            )])
+        ),
+        Rider::RaiseSlain { .. } => "what it kills rises to fight for it".to_string(),
+        Rider::EscapeFor { roll } => {
+            format!("can be broken out of for {}", damage_list(&[*roll]))
+        }
+        Rider::RedirectAttacks { ability, dc } => format!(
+            "once a turn, an attacker makes a {} save dc {dc} or its attacks land on its own side",
+            ability.name()
+        ),
+        Rider::ResistNonmagical { kinds } => format!(
+            "resists {} from attacks that are not magical",
+            kinds.iter().map(|k| k.name()).collect::<Vec<_>>().join("/")
+        ),
+        Rider::MagicWeapons => "its weapon attacks are magical".to_string(),
+        Rider::InitiativeAdvantage => "advantage on initiative".to_string(),
+        Rider::NeverProvokes => "its movement provokes no opportunity attacks".to_string(),
+        Rider::PhaseThrough { roll } => format!(
+            "walks through creatures, each taking {} once a turn",
+            damage_list(&[*roll])
+        ),
+        Rider::MirrorDamage { kinds, feet } => format!(
+            "takes no {} damage: everyone within {feet} ft takes it instead",
+            kinds.iter().map(|k| k.name()).collect::<Vec<_>>().join("/")
+        ),
+        Rider::SwapWhenHit { feet, kin } => format!(
+            "reaction: hit by an attack, changes places with a {kin} within {feet} ft, which is hit instead"
+        ),
+        Rider::PassivePerception(n) => format!("passive Perception {n}"),
+        Rider::Lit(light) => format!("stands in {}", light.name()),
+        Rider::BonusDamageWithAdvantage { roll } => format!(
+            "+{} when the attack roll has advantage",
+            damage_list(&[*roll])
+        ),
+        Rider::AllHit { damage, then } => format!(
+            "every strike hitting one target: +{}{}",
+            damage_list(damage),
+            match then.as_deref() {
+                Some(Rider::SaveOrCondition {
+                    ability,
+                    dc,
+                    conditions,
+                    ..
+                }) => format!(
+                    " and {} on {} dc {dc}",
+                    conditions
+                        .iter()
+                        .map(|c| c.name())
+                        .collect::<Vec<_>>()
+                        .join(" and "),
+                    ability.name()
+                ),
+                _ => String::new(),
+            }
+        ),
+        Rider::EachInReach => "one strike at each creature in reach".to_string(),
+        Rider::SaveAdvantage { ability, kinds } => match kinds.is_empty() {
+            true => format!("advantage on {} saves", ability.name()),
+            false => format!(
+                "advantage on {} saves against {}",
+                ability.name(),
+                kinds.iter().map(|k| k.name()).collect::<Vec<_>>().join("/")
+            ),
+        },
+        Rider::Chains { feet } => {
+            format!("each failure passes it to the nearest enemy within {feet} ft")
+        }
+        Rider::HalfOnMiss => "half on a miss".to_string(),
+        Rider::SparesTarget => "not its target".to_string(),
+        Rider::TakesBonusAction => "takes the bonus action too".to_string(),
+        Rider::RideLine { feet } => {
+            format!("everything on a {feet} ft line, at the end of which it reappears")
+        }
+        Rider::Anchored { feet } => format!("put down within {feet} ft and left there"),
+        Rider::Hinders => "difficult terrain".to_string(),
+        Rider::ClosesIn => "closes with its target every turn".to_string(),
+        Rider::LongRange { feet } => format!("out to {feet} ft at disadvantage"),
+        Rider::Universal => "anybody can".to_string(),
+        Rider::AlsoCosts(cost) => format!("also spends {} of a second pool", cost.amount),
     }
 }
 

@@ -49,6 +49,7 @@ impl<'a> Fight<'a> {
         zones.push(here);
         summoned.zones = zones;
         self.fighters.push(summoned);
+        self.place_beside(seat, me);
         Some(seat)
     }
 
@@ -143,6 +144,9 @@ impl<'a> Fight<'a> {
             Some(Requirement::Summon { which, count }) => self.summons_alive(me, which) >= count,
             Some(Requirement::SummonRoom { which, max }) => self.summons_alive(me, which) < max,
             Some(Requirement::Boon { which }) => self.has_boon(me, which),
+            Some(Requirement::Shadow) => {
+                self.fighters[me].creature.light() != crate::creature::Light::Bright
+            }
         }
     }
 

@@ -61,6 +61,9 @@ pub struct PlayerCharacter {
     /// be cast first is the `lasting_aura` feature instead.
     #[serde(default)]
     pub auras: Vec<super::MoveEntry>,
+    /// Walking speed in feet, for a fight on a grid. 30 when left out.
+    #[serde(default)]
+    pub speed: Option<u32>,
 }
 
 impl PlayerCharacter {
@@ -158,6 +161,13 @@ impl PlayerCharacter {
             builder.creature.auras.push(m);
         }
 
+        if let Some(speed) = self.speed {
+            builder.creature.speed = speed;
+        }
+
+        // Proficiency by level: +2, and one more every four levels.
+        let proficiency = 2 + (self.level.max(1) as i32 - 1) / 4;
+        super::add_universal_actions(&mut builder.creature, proficiency);
         builder.build()
     }
 }

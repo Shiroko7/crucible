@@ -29,6 +29,7 @@ impl FeaturePlugin for HealingWordPlugin {
     fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
         let modifier = spellcasting_ability_modifier(builder, "Healing Word")?;
         let heal = Move::new("Healing Word", Effect::Heal(HealRoll::new(1, 4, modifier)))
+            .with_range(60)
             .with_spell_slot(BASE_SLOT_LEVEL)
             .with_kind(MoveKind::Spell);
         builder.add_bonus_action(heal);

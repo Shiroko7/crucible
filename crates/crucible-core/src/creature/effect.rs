@@ -247,6 +247,37 @@ impl Strike {
         ac_bonus: i32,
         reaction_available: bool,
     ) -> (i32, Landed, bool) {
+        self.sample_reduced_tallied(
+            rng,
+            reduce,
+            ac,
+            mode,
+            force_crit,
+            modifiers,
+            extra_damage,
+            ac_bonus,
+            reaction_available,
+            &mut |_, _| {},
+        )
+    }
+
+    /// [`Strike::sample_reduced`], telling `tally` how much of each type of
+    /// damage got through as it is rolled - for whatever answers one type
+    /// and not another.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_reduced_tallied(
+        &self,
+        rng: &mut Rng,
+        reduce: &dyn Fn(DamageKind) -> Reduction,
+        ac: i32,
+        mode: RollMode,
+        force_crit: bool,
+        modifiers: &[AttackModifier],
+        extra_damage: &[DamageRoll],
+        ac_bonus: i32,
+        reaction_available: bool,
+        tally: &mut dyn FnMut(DamageKind, i32),
+    ) -> (i32, Landed, bool) {
         let (landed, consumed) = sample_hit_with_reaction(
             rng,
             self.to_hit,
@@ -270,7 +301,11 @@ impl Strike {
             .damage
             .iter()
             .chain(extra_damage)
-            .map(|roll| roll.sample(rng, crit, roll.reduction_against(reduce)))
+            .map(|roll| {
+                let dealt = roll.sample(rng, crit, roll.reduction_against(reduce));
+                tally(roll.kind_against(reduce), dealt);
+                dealt
+            })
             .sum();
         (total, landed, consumed)
     }
@@ -537,6 +572,16 @@ impl SaveEffect {
         reduce: &dyn Fn(DamageKind) -> Reduction,
         share: Share,
     ) -> i32 {
+        self.sample_share_tallied(rng, reduce, share, &mut |_, _| {})
+    }
+
+    fn sample_share_tallied(
+        &self,
+        rng: &mut Rng,
+        reduce: &dyn Fn(DamageKind) -> Reduction,
+        share: Share,
+        tally: &mut dyn FnMut(DamageKind, i32),
+    ) -> i32 {
         if share == Share::None {
             return 0;
         }
@@ -548,9 +593,24 @@ impl SaveEffect {
                 if share == Share::Half {
                     dealt /= 2;
                 }
-                roll.reduction_against(reduce).apply(dealt)
+                let dealt = roll.reduction_against(reduce).apply(dealt);
+                tally(roll.kind_against(reduce), dealt);
+                dealt
             })
             .sum()
+    }
+
+    /// [`SaveEffect::sample_known_by`], telling `tally` how much of each
+    /// type of damage got through.
+    pub fn sample_known_tallied(
+        &self,
+        rng: &mut Rng,
+        reduce: &dyn Fn(DamageKind) -> Reduction,
+        saved: bool,
+        evasion: bool,
+        tally: &mut dyn FnMut(DamageKind, i32),
+    ) -> i32 {
+        self.sample_share_tallied(rng, reduce, self.share(saved, evasion), tally)
     }
 
     /// As [`SaveEffect::sample_known`], with `target`'s reductions scoped to
@@ -742,6 +802,16 @@ pub enum Effect {
     /// Self-targeted, which is what every source of them here is: a ward
     /// hardening its own caster's skin.
     TempHp(HealRoll),
+    /// The user is somewhere else, up to `feet` away, without crossing the
+    /// ground between: wherever in that range puts the most distance between
+    /// it and its enemies.
+    Teleport {
+        feet: u32,
+    },
+    /// Stops a spell as it is cast, and does nothing else: what a reaction
+    /// waiting on [`crate::creature::ReactionTrigger::Cast`] does when the
+    /// caster gets no save against it.
+    Counter,
     /// Raises one of the user's own
     /// [`crate::creature::Creature::lasting_auras`] for a while: a ring of
     /// spirits, a burning field, a wall of blades.
@@ -765,6 +835,60 @@ pub enum Effect {
     Summon {
         which: usize,
     },
+    /// The user tries to hide: a Stealth check at `bonus` against the best
+    /// passive Perception on the other side
+    /// ([`crate::creature::Rider::PassivePerception`]), and on a success it
+    /// is [`Condition::Hidden`] until it attacks or casts.
+    Hide {
+        bonus: i32,
+    },
+    /// Space folded around one creature - see [`Displace`].
+    Displace(Displace),
+}
+
+/// One creature saves. Failing, it is put somewhere else within `feet`, and
+/// then everything within `radius` feet of where it stood takes `blast`;
+/// saving, it stays where it is and takes `on_success` alone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Displace {
+    pub ability: Ability,
+    pub dc: i32,
+    pub feet: u32,
+    /// Thrown as far from its thrower as `feet` allows, clear of the blast.
+    /// Otherwise it is set down where the blast still catches it, which is
+    /// what does the most harm.
+    pub away: bool,
+    pub radius: u32,
+    pub blast: Vec<DamageRoll>,
+    pub on_success: Vec<DamageRoll>,
+}
+
+impl Displace {
+    /// P(the target fails the save) - see [`SaveEffect::failure_chance`].
+    pub fn failure_chance(&self, target: &Creature) -> f64 {
+        let needed = self.dc - target.save(self.ability);
+        1.0 - f64::from((21 - needed).clamp(0, 20)) / 20.0
+    }
+
+    /// The mean of `rolls` as `reduce` lets them land.
+    pub fn mean_of(rolls: &[DamageRoll], reduce: &dyn Fn(DamageKind) -> Reduction) -> f64 {
+        rolls
+            .iter()
+            .map(|r| r.pmf(false, r.reduction_against(reduce)).mean())
+            .sum()
+    }
+
+    /// What its one target can expect to take: the blast when it fails and
+    /// is left inside it, and what a success costs when it does not.
+    fn mean_damage(&self, target: &Creature) -> f64 {
+        let fail = self.failure_chance(target);
+        let reduce = |k| target.reduction(k);
+        let failed = match self.away {
+            true => 0.0,
+            false => Self::mean_of(&self.blast, &reduce),
+        };
+        fail * failed + (1.0 - fail) * Self::mean_of(&self.on_success, &reduce)
+    }
 }
 
 impl Effect {
@@ -791,8 +915,12 @@ impl Effect {
             | Effect::Afflict { .. }
             | Effect::Boon { .. }
             | Effect::TempHp(_)
+            | Effect::Counter
+            | Effect::Teleport { .. }
             | Effect::Aura { .. }
+            | Effect::Hide { .. }
             | Effect::Summon { .. } => 0.0,
+            Effect::Displace(d) => d.mean_damage(target),
             Effect::Sequence(parts) => parts.iter().map(|p| p.mean_damage(target)).sum(),
             Effect::Part { effect, .. } => effect.mean_damage(target),
         }
@@ -821,8 +949,14 @@ impl Effect {
             | Effect::Afflict { .. }
             | Effect::Boon { .. }
             | Effect::TempHp(_)
+            | Effect::Counter
+            | Effect::Teleport { .. }
             | Effect::Aura { .. }
+            | Effect::Hide { .. }
             | Effect::Summon { .. } => Pmf::constant(0),
+            // Its mean, as a point: what a report prints, not what a fight
+            // rolls.
+            Effect::Displace(d) => Pmf::constant(d.mean_damage(target).round() as i32),
             Effect::Sequence(parts) => parts.iter().fold(Pmf::constant(0), |acc, p| {
                 acc.convolve(&p.damage_pmf(target))
             }),

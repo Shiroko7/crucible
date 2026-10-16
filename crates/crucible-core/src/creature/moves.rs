@@ -86,6 +86,9 @@ pub enum Requirement {
     /// The user's `which`th boon active - a blade whose enchantment can be
     /// let go of in a burst only while it is still lit.
     Boon { which: usize },
+    /// The user standing in dim light or darkness - see
+    /// [`crate::creature::Rider::Lit`].
+    Shadow,
 }
 
 /// What taking a move uses up, beyond its own budget: the other half of
@@ -235,12 +238,26 @@ pub struct Move {
     /// [`crate::creature::Creature::mouth`]. [`Reach::Any`] for every
     /// ordinary move, and ignored on any creature without a mouth.
     pub reach: Reach,
+    /// How far this reaches on the grid, in feet: a weapon's reach, a bow's
+    /// or a spell's range. `None` reads it off the kind of move - see
+    /// `sim::fight::grid` - and nothing reads it in a fight without a grid.
+    pub range: Option<u32>,
+    /// An area's radius in feet around whoever it is aimed at: an area
+    /// effect catches only the enemies that close to its target. `None`
+    /// catches every enemy in range, as a fight without a grid always has.
+    pub area: Option<u32>,
     /// What has to already be true for this move to be taken - see
     /// [`Requirement`]. `None` for every ordinary move.
     pub requires: Option<Requirement>,
     /// What taking this move uses up beyond its own budget - see [`Spend`].
     /// `None` for every ordinary move.
     pub spends: Option<Spend>,
+    /// What taking this move is worth beyond the damage it deals, in hit
+    /// points of damage, to whatever ranks moves by damage: what a creature's
+    /// author says a turn spent paralysing somebody is worth. Counted only
+    /// while the move would change something - not for a condition its
+    /// target is already under.
+    pub worth: i32,
 }
 
 impl Move {
@@ -259,14 +276,40 @@ impl Move {
             components: None,
             legendary_cost: 1,
             reach: Reach::Any,
+            range: None,
+            area: None,
             requires: None,
             spends: None,
+            worth: 0,
         }
     }
 
     pub fn with_uses(mut self, uses: Uses) -> Self {
         self.uses = uses;
         self
+    }
+
+    /// Every rider this move carries: its own, and those on each part of it
+    /// when it is made of several.
+    pub fn all_riders(&self) -> Vec<&Rider> {
+        fn within<'m>(effect: &'m Effect, out: &mut Vec<&'m Rider>) {
+            match effect {
+                Effect::Sequence(parts) => parts.iter().for_each(|p| within(p, out)),
+                Effect::Part { effect, riders, .. } => {
+                    out.extend(riders);
+                    within(effect, out);
+                }
+                _ => {}
+            }
+        }
+        let mut out: Vec<&Rider> = self.riders.iter().collect();
+        within(&self.effect, &mut out);
+        out
+    }
+
+    /// Does this move, or any part of it, carry `rider`?
+    pub fn carries(&self, rider: &Rider) -> bool {
+        self.all_riders().contains(&rider)
     }
 
     pub fn with_cost(mut self, cost: Cost) -> Self {
@@ -343,6 +386,16 @@ impl Move {
         self
     }
 
+    pub fn with_range(mut self, feet: u32) -> Self {
+        self.range = Some(feet);
+        self
+    }
+
+    pub fn with_area(mut self, feet: u32) -> Self {
+        self.area = Some(feet);
+        self
+    }
+
     /// Takeable only while this holds - see [`Requirement`].
     pub fn requiring(mut self, requirement: Requirement) -> Self {
         self.requires = Some(requirement);
@@ -402,6 +455,19 @@ pub enum ReactionTrigger {
     /// whether it lands, while this answers one that already has and does
     /// something back.
     Hit(crate::creature::AttackTrigger),
+    /// An enemy is casting a spell, and this reaction is what stops it - a
+    /// Counterspell, a rod that drinks the spell in. `aimed` narrows it to a
+    /// spell aimed at this creature and nobody else.
+    ///
+    /// What the reaction's own move does is read as how the spell is
+    /// stopped: a save is one the caster makes to keep its spell, and
+    /// [`crate::creature::Effect::Counter`] stops it outright. One that
+    /// costs something - a slot, a charge - is kept for a spell that cost
+    /// its caster a slot; one that is free answers anything.
+    Cast { aimed: bool },
+    /// Something on the other side has just dealt this creature damage, by
+    /// whatever means - a blow, a spell it failed to save against.
+    Damaged,
 }
 
 /// A reaction that is a move of its own - an attack, a burst forcing a save

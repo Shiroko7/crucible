@@ -104,7 +104,7 @@ The V2 overhaul transforms the original nine standalone elemental pools into a u
 - **Concept:** Atmospheric pressure, flight, gale speed, sound, and direct lightning discharge.
 - **Key Talents:**
   - *Lightning Javelin:* Move DSL: `spell | ranged | hit +X | 5d12 lightning`.
-  - *Arc Chain:* Move DSL: `cost primordial 2 | save dex dc DC | 3d8 lightning | half | targets 3`.
+  - *Arc Chain:* Move DSL: `cost primordial 2 | range 120 | targets 1 | save dex dc DC | 3d8 lightning | half on success | chains 30`.
   - *Thunderous Roar:* Move DSL: `save con dc DC | 2d8 thunder | half | on fail pushed`.
   - *Conductive Touch:* Trait: `once per turn 2d12 lightning with a weapon`.
   - *Wind Barrier:* Trait: `reaction ac 2 until next turn`.
@@ -178,6 +178,10 @@ The V2 overhaul transforms the original nine standalone elemental pools into a u
   - *Thunderous Push:* Trait: `push on thunder up to large`.
   - *Thunderous Retaliation:* `retaliation` plugin (`trigger = "melee"`, `damage = "2d8 thunder"`).
 - **Cantrips & Spells:** *Lightning Lure*; *Thunderwave, Fog Cloud, Call Lightning, Sleet Storm, Lightning Arrow, Control Water, Destructive Wave, Storm of Vengeance* $\to$ Move DSL & plugins.
+  - *Call Lightning:* `call_lightning` plugin with `resource = "divine"`, `cost = 2`.
+  - *Lightning Arrow:* `spell | weapon <type> | ranged | cost divine 2 | concentration | takes bonus action | hit +X | 4d8 lightning | half on miss && area 10 | spares target | save dex dc DC | 2d8 lightning | half on success`.
+  - *Ride the Lightning:* `spell | cost divine 3 | range 60 | line 60 | save dex dc DC | 4d6 lightning | half on success`.
+  - *Maelstrom:* `lasting_aura` with `effect = "range 30 | placed 120 | difficult terrain | save str dc DC | 6d6 bludgeoning | on fail pulled"`.
 
 #### 13. Providence Path (34 entries: 9 talents [7 act / 2 pass], 3 cantrips, 22 spells)
 - **Concept:** Healing, enduring protection, hope, self-sacrifice, and freedom from restraint.
@@ -220,7 +224,7 @@ The V2 overhaul transforms the original nine standalone elemental pools into a u
   - *Divine Ocean-Splitting Record:* Move DSL: `cost immortal 5 | strikes 1 | hit +X | 2d6+STR slashing, 8d10 force`.
   - *Sky-Piercing Execution:* Reaction Move DSL: `when airborne | strikes 1 | hit +X | 1d8+STR piercing, 3d10 piercing`.
   - *Unwavering Belief:* Flat save bonus trait `saves 2` or `pc.saves` full proficiency.
-  - *Venomous Bite (Gio):* Move DSL: `strikes 1 | hit +X | 1d6+STR piercing, 2d6 poison | on fail poisoned for 1 minute`.
+  - *Venomous Bite:* Move DSL: `strikes 1 | hit +X | 1d6+STR piercing, 2d6 poison | on fail poisoned for 1 minute`.
 - **Cantrip:** *True Strike* (exceptional martial strike cantrip; no leveled spells).
 
 #### 16. Mysteries Path (28 entries: 4 talents [3 act / 1 pass], 1 cantrip, 23 spells)

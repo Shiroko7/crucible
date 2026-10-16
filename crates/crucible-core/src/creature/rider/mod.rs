@@ -445,6 +445,183 @@ pub enum Rider {
         ability: Ability,
         dc: i32,
     },
+    /// Magic Resistance: advantage on saving throws against spells and
+    /// other magical effects - any save a move tagged
+    /// [`crate::creature::MoveKind::Spell`] or
+    /// [`crate::creature::MoveKind::MagicItem`] asks for.
+    MagicResistance,
+    /// Advantage on this creature's attack rolls against anything under
+    /// `condition`: a predator that smells fear, a killer and the victim it
+    /// has marked.
+    AdvantageAgainst { condition: Condition },
+    /// Extra damage against a target under `condition`. On a creature it
+    /// joins every hit it lands on such a target; on a move it joins that
+    /// move's own damage, so a save's bonus is taken or halved with the rest.
+    BonusDamageVsCondition {
+        dice_count: u32,
+        dice_sides: u32,
+        bonus: i32,
+        damage_kind: DamageKind,
+        condition: Condition,
+    },
+    /// Once a turn, whoever makes an attack roll against this creature first
+    /// makes an `ability` save against `dc`. On a failure that attack, and
+    /// every other it makes against this creature that turn, lands on one of
+    /// the attacker's own side within its reach instead - if there is one.
+    RedirectAttacks { ability: Ability, dc: i32 },
+    /// Whoever deals this creature damage of one of `kinds` takes as much
+    /// of that kind itself - a mind that answers a thought with the same
+    /// thought.
+    ReflectDamage { kinds: Vec<DamageKind> },
+    /// A store of spell levels - a rod that drinks spells in. A slot of
+    /// `up_to` or lower that this creature does not have is paid for out of
+    /// resource pool `pool`, a level a point; and a spell it stops outright
+    /// (see [`crate::creature::Effect::Counter`]) is added to the pool, which
+    /// never holds more than `holds`.
+    SpellStore { pool: usize, up_to: u32, holds: u32 },
+    /// Never healed by anybody but itself: a curse that will not let it
+    /// accept aid.
+    RefusesHealing,
+    /// Sees what is hidden within `feet`: an invisible creature that close
+    /// gets nothing from being unseen.
+    Truesight { feet: u32 },
+    /// On a move: what it lands is borne by one creature at a time. Landing
+    /// it on another lifts it from whoever had it.
+    OneAtATime,
+    /// Extra damage on the first hit this creature lands in the fight, and
+    /// then never again: a blow struck out of hiding.
+    FirstHitDamage {
+        dice_count: u32,
+        dice_sides: u32,
+        bonus: i32,
+        damage_kind: DamageKind,
+    },
+    /// On a move: a creature it kills outright rises at the start of its
+    /// user's next turn as the `which`th of the user's own
+    /// [`crate::creature::Creature::summons`], on the user's side and taking
+    /// turns of its own.
+    RaiseSlain { which: usize },
+    /// On a move: whoever is held by what it lands can break out of it at
+    /// the start of its own turn by taking this damage - which also ends the
+    /// concentration holding it.
+    EscapeFor { roll: DamageRoll },
+    /// Resistance to `kinds` from attacks that are not magical: a weapon
+    /// attack made with nothing enchanted. A spell attack, a move that is a
+    /// spell or a magic item at work, a swing its move calls `magical`, one
+    /// a boon is riding, and anything from a creature with
+    /// [`Rider::MagicWeapons`] all get through whole - and so does damage
+    /// that was never an attack roll at all.
+    ResistNonmagical { kinds: Vec<DamageKind> },
+    /// Every weapon attack this creature makes is magical - see
+    /// [`Rider::ResistNonmagical`]. On a move: that move's attacks are.
+    MagicWeapons,
+    /// Rolls initiative with advantage.
+    InitiativeAdvantage,
+    /// Its movement never provokes an opportunity attack. On a move: the
+    /// turn it is taken, its user also covers its speed a second time - "it
+    /// can move up to its speed without provoking opportunity attacks".
+    NeverProvokes,
+    /// It walks through other creatures as through difficult terrain, and
+    /// each one it passes through takes `roll` - once a turn, which is once
+    /// a walk.
+    PhaseThrough { roll: DamageRoll },
+    /// Damage of `kinds` it would take lands on every creature within
+    /// `feet` of it instead, and none of it on itself.
+    MirrorDamage { kinds: Vec<DamageKind>, feet: u32 },
+    /// A reaction: as an attack roll hits it, it changes places with one of
+    /// its own side within `feet` whose name has `kin` in it, and that one
+    /// is hit instead.
+    SwapWhenHit { feet: u32, kin: String },
+    /// What a Stealth check has to beat to hide from it: 10 when nothing
+    /// says.
+    PassivePerception(i32),
+    /// The light it stands in - the last one said is the one that holds,
+    /// so a scenario can put a creature somewhere brighter than its file
+    /// does. See [`crate::creature::Requirement::Shadow`].
+    Lit(Light),
+    /// On a move: extra damage on a hit whose attack roll had advantage.
+    BonusDamageWithAdvantage { roll: DamageRoll },
+    /// On a move of several strikes: when every one of them hits the same
+    /// target, it takes `damage` more and whatever `then` does - which is a
+    /// [`Rider::SaveOrCondition`], when there is one.
+    AllHit {
+        damage: Vec<DamageRoll>,
+        then: Option<Box<Rider>>,
+    },
+    /// On a move: its strike is made once against each creature in its
+    /// reach, whichever side that creature is on, rather than `count` times
+    /// against one.
+    EachInReach,
+    /// Advantage on its `ability` saving throws - against anything dealing
+    /// one of `kinds`, or against everything when it names none.
+    SaveAdvantage {
+        ability: Ability,
+        kinds: Vec<DamageKind>,
+    },
+    /// On a saving throw aimed at one creature: each one that fails passes
+    /// it on to the nearest enemy within `feet` of it that it has not
+    /// reached yet, which makes the same save - until one succeeds, or
+    /// nobody is left in reach.
+    Chains { feet: u32 },
+    /// On an attack: a miss still deals half its damage.
+    HalfOnMiss,
+    /// On a saving throw around a target: the target itself is not caught.
+    SparesTarget,
+    /// On an action: taking it takes the bonus action too.
+    TakesBonusAction,
+    /// On a saving throw: its user becomes the area - a line from where it
+    /// stands to a free space within `feet`, catching every creature on the
+    /// way, where it then reappears.
+    RideLine { feet: u32 },
+    /// On an aura that is raised: it stays where it was put - around
+    /// whoever it was aimed at, up to `feet` away - rather than going where
+    /// its owner goes, and what it pulls it pulls to its middle. It catches
+    /// what starts a turn in it, not what walks in.
+    Anchored { feet: u32 },
+    /// On an aura that is anchored: difficult terrain, so whoever starts a
+    /// turn in it covers half its speed.
+    Hinders,
+    /// On a move: a second pool it spends, beside its own cost.
+    AlsoCosts(Cost),
+    /// On an attack: it can be made out to `feet`, past its move's `range`,
+    /// at disadvantage - a weapon's long range.
+    LongRange { feet: u32 },
+    /// On a move: one of the things anybody can do - Dodge, Disengage,
+    /// Help, Shove, Grapple - added to every creature loaded from a file
+    /// rather than written in its stat block. Taken only when its moment
+    /// has come: see `sim::fight`'s `universal_value`.
+    Universal,
+    /// It closes with whatever it is fighting, whatever it means to do
+    /// there: a caster who would rather stand in the press than behind it.
+    ClosesIn,
+}
+
+/// How much light a creature is standing in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Light {
+    #[default]
+    Bright,
+    Dim,
+    Dark,
+}
+
+impl Light {
+    pub fn parse(word: &str) -> Option<Self> {
+        Some(match word.to_ascii_lowercase().as_str() {
+            "bright" => Self::Bright,
+            "dim" => Self::Dim,
+            "dark" | "darkness" => Self::Dark,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bright => "bright light",
+            Self::Dim => "dim light",
+            Self::Dark => "darkness",
+        }
+    }
 }
 
 impl Rider {
@@ -468,6 +645,7 @@ impl Rider {
                 | Rider::ReactionOnTargeted { .. }
                 | Rider::HalveAttackDamage
                 | Rider::AlwaysSucceed { reaction: true, .. }
+                | Rider::SwapWhenHit { .. }
         )
     }
 }

@@ -5,7 +5,6 @@
 use crate::creature::Zone;
 use crate::prob::Rng;
 use crate::rules::{Condition, DamageRoll, Duration, Size};
-use crate::sim::fight::saves::saving_throw;
 use crate::sim::fight::threshold::reducer;
 use crate::sim::fight::{Expiry, Fight};
 
@@ -99,11 +98,17 @@ impl<'a> Fight<'a> {
             let against = self.fighters[i].creature;
             let defending = self.boon_resistances(i);
             let reduce = reducer(attacker, against, false, &defending);
+            rng.rolled();
             let raw: i32 = damage
                 .iter()
                 .map(|roll| roll.sample(rng, false, roll.reduction_against(&reduce)))
                 .sum();
+            if self.recording() {
+                let dice = rng.rolled();
+                self.hurt = Some(crate::sim::fight::events::Hurt::of(damage, &dice));
+            }
             let (dealt, _) = self.deal(rng, me, i, raw, false);
+            self.hurt = None;
             if record {
                 notes.push(format!("{} {dealt}", against.name));
             }
@@ -152,7 +157,7 @@ impl<'a> Fight<'a> {
             if taken < threshold || !self.fighters[i].alive() {
                 continue;
             }
-            let (saved, resisted) = saving_throw(&mut self.fighters, rng, i, ability, dc, false);
+            let (saved, resisted) = self.saving_throw(rng, i, ability, dc, false);
             let freed = if saved {
                 Vec::new()
             } else {

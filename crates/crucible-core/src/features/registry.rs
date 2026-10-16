@@ -36,6 +36,14 @@ impl FeatureRegistry {
         self.factories.insert(id.into(), Arc::new(factory));
     }
 
+    /// The id of every feature that can be named in a creature file, in
+    /// alphabetical order.
+    pub fn ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.factories.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
     pub fn build_plugin(
         &self,
         id: &str,

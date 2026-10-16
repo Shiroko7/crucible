@@ -1,7 +1,7 @@
 //! Trait phrases: an always-on or reactive modifier (a [`crate::creature::Rider`]),
 //! or a flat passive stat bonus.
 
-use crate::creature::{AttackTrigger, Creature, Rider};
+use crate::creature::{AttackTrigger, Creature, Light, Rider};
 use crate::dsl::grammar::lex::{
     arg, parse_damage, parse_damage_kinds, parse_dice, trailing_number,
 };
@@ -43,6 +43,13 @@ pub enum TraitEffect {
     /// Around it, enemies move one zone a turn - see
     /// [`crate::creature::Creature::difficult_terrain`].
     DifficultTerrain,
+    /// A store of spell levels kept in the resource pool `pool` - see
+    /// [`Rider::SpellStore`], which this becomes once the pool is found.
+    SpellStore {
+        pool: String,
+        up_to: u32,
+        holds: u32,
+    },
 }
 
 impl TraitEffect {
@@ -79,6 +86,18 @@ impl TraitEffect {
             Self::Mouth => creature.mouth = true,
             Self::ReactionsPerRound(n) => creature.reactions_per_round = n.max(1),
             Self::DifficultTerrain => creature.difficult_terrain = true,
+            Self::SpellStore { pool, up_to, holds } => {
+                let at = creature
+                    .resources
+                    .iter()
+                    .position(|r| r.name == pool)
+                    .ok_or_else(|| format!("`{pool}` is not a declared resource"))?;
+                creature.riders.push(Rider::SpellStore {
+                    pool: at,
+                    up_to,
+                    holds,
+                });
+            }
         }
         Ok(())
     }
@@ -122,6 +141,226 @@ pub(crate) fn parse_trait(value: &str) -> Result<TraitEffect, String> {
                 uses: n,
                 ability,
                 reaction,
+            }))
+        }
+        // `magic resistance` - advantage on saves against spells and magic
+        // items.
+        // `magic weapons` - its weapon attacks are magical, which is what
+        // gets through a hide that only resists steel (`resist nonmagical`).
+        "magic" => match lowered(&words[1..]).as_str() {
+            "resistance" => Ok(TraitEffect::Rider(Rider::MagicResistance)),
+            "weapons" | "weapon" | "attacks" => Ok(TraitEffect::Rider(Rider::MagicWeapons)),
+            _ => Err(format!(
+                "expected `magic resistance` or `magic weapons`, got `{value}`"
+            )),
+        },
+        // `advantage on initiative` - the better of two rolls for its place
+        // in the order.
+        // `advantage on dex saves [against lightning, thunder]` - on that
+        // saving throw, against anything dealing one of those types or, when
+        // none is named, against everything.
+        "advantage"
+            if words.len() >= 4
+                && words[1].eq_ignore_ascii_case("on")
+                && matches!(
+                    words[3].to_ascii_lowercase().as_str(),
+                    "saves" | "save" | "saving"
+                ) =>
+        {
+            let ability = Ability::parse(words[2])
+                .ok_or_else(|| format!("unknown ability `{}` in `{value}`", words[2]))?;
+            let kinds = match words.iter().position(|w| w.eq_ignore_ascii_case("against")) {
+                Some(at) => {
+                    let kinds = parse_damage_kinds(&words[at + 1..].join(" "), value)?;
+                    if kinds.is_empty() {
+                        return Err(format!("`{value}` names no damage type after `against`"));
+                    }
+                    kinds
+                }
+                None if words.len() == 4 => Vec::new(),
+                None => {
+                    return Err(format!(
+                        "expected `advantage on <ability> saves [against <types>]`, got `{value}`"
+                    ))
+                }
+            };
+            Ok(TraitEffect::Rider(Rider::SaveAdvantage { ability, kinds }))
+        }
+        "advantage" if lowered(&words[1..]) == "on initiative" => {
+            Ok(TraitEffect::Rider(Rider::InitiativeAdvantage))
+        }
+        // `fights up close` - it walks up to its target every turn, even to
+        // cast from there, rather than keeping its distance.
+        "fights" => match lowered(&words[1..]).as_str() {
+            "up close" | "in melee" => Ok(TraitEffect::Rider(Rider::ClosesIn)),
+            _ => Err(format!("expected `fights up close`, got `{value}`")),
+        },
+        // `no opportunity attacks` - nothing gets a swing at it for moving.
+        "no" => match lowered(&words[1..]).as_str() {
+            "opportunity attacks" | "opportunity attack" => {
+                Ok(TraitEffect::Rider(Rider::NeverProvokes))
+            }
+            _ => Err(format!("expected `no opportunity attacks`, got `{value}`")),
+        },
+        // `phase through 1d10 psychic` - it walks through other creatures,
+        // and each one it passes through takes that.
+        "phase" | "phases" => {
+            if !arg(&words, 1, value)?.eq_ignore_ascii_case("through") {
+                return Err(format!(
+                    "expected `phase through NdM <type>`, got `{value}`"
+                ));
+            }
+            let rolls = parse_damage(&words[2..].join(" "))?;
+            let [roll] = rolls[..] else {
+                return Err(format!(
+                    "expected `phase through NdM <type>`, got `{value}`"
+                ));
+            };
+            Ok(TraitEffect::Rider(Rider::PhaseThrough { roll }))
+        }
+        // `mirror psychic 10` - damage of that type it would take lands on
+        // everyone within that many feet of it instead.
+        "mirror" | "mirrors" => {
+            let (feet, kinds) = words[1..]
+                .split_last()
+                .ok_or_else(|| format!("expected `mirror <types> <feet>`, got `{value}`"))?;
+            let kinds = parse_damage_kinds(&kinds.join(" "), value)?;
+            if kinds.is_empty() {
+                return Err(format!("`{value}` needs at least one damage type"));
+            }
+            Ok(TraitEffect::Rider(Rider::MirrorDamage {
+                kinds,
+                feet: count(feet)?,
+            }))
+        }
+        // `swap when hit 60 gnoll` - a reaction: hit by an attack roll, it
+        // changes places with one of its own side within that many feet
+        // whose name has those words in it, and that one is hit instead.
+        "swap" => {
+            if lowered(&words[1..words.len().min(3)]) != "when hit" || words.len() < 5 {
+                return Err(format!(
+                    "expected `swap when hit <feet> <name of its kin>`, got `{value}`"
+                ));
+            }
+            Ok(TraitEffect::Rider(Rider::SwapWhenHit {
+                feet: count(words[3])?,
+                kin: words[4..].join(" "),
+            }))
+        }
+        // `passive perception 15` - what a Stealth check has to beat to
+        // hide from it.
+        "passive" => {
+            if !arg(&words, 1, value)?.eq_ignore_ascii_case("perception") || words.len() != 3 {
+                return Err(format!("expected `passive perception <n>`, got `{value}`"));
+            }
+            Ok(TraitEffect::Rider(Rider::PassivePerception(number(
+                words[2],
+            )?)))
+        }
+        // `in dim light`, `in darkness`, `in bright light` - where it
+        // stands, for a move that needs the dark (`in dim light` on a move).
+        "in" => {
+            let word = arg(&words, 1, value)?;
+            let light = Light::parse(word)
+                .filter(|_| matches!(lowered(&words[2..]).as_str(), "" | "light"))
+                .ok_or_else(|| {
+                    format!("expected `in bright light`, `in dim light` or `in darkness`, got `{value}`")
+                })?;
+            Ok(TraitEffect::Rider(Rider::Lit(light)))
+        }
+        // `advantage against frightened` - on its attack rolls against
+        // anything under that condition.
+        "advantage" => {
+            let named = match words[1..] {
+                [against, name] if against.eq_ignore_ascii_case("against") => name,
+                _ => {
+                    return Err(format!(
+                        "expected `advantage against <condition>`, got `{value}`"
+                    ))
+                }
+            };
+            let condition = Condition::parse(named)
+                .ok_or_else(|| format!("unknown condition `{named}` in `{value}`"))?;
+            Ok(TraitEffect::Rider(Rider::AdvantageAgainst { condition }))
+        }
+        // `redirect attacks wis dc 20` - once a turn, an attacker that fails
+        // the save hits one of its own side instead.
+        "redirect" => {
+            let (ability, dc) = match words[1..] {
+                [attacks, ability, dc_word, dc]
+                    if attacks.eq_ignore_ascii_case("attacks")
+                        && dc_word.eq_ignore_ascii_case("dc") =>
+                {
+                    (ability, dc)
+                }
+                _ => {
+                    return Err(format!(
+                        "expected `redirect attacks <ability> dc <n>`, got `{value}`"
+                    ))
+                }
+            };
+            Ok(TraitEffect::Rider(Rider::RedirectAttacks {
+                ability: Ability::parse(ability)
+                    .ok_or_else(|| format!("unknown ability `{ability}` in `{value}`"))?,
+                dc: number(dc)?,
+            }))
+        }
+        // `reflect psychic` - whoever deals it that damage takes as much.
+        "reflect" => {
+            let kinds = parse_damage_kinds(&words[1..].join(" "), value)?;
+            if kinds.is_empty() {
+                return Err(format!("`{value}` needs at least one damage type"));
+            }
+            Ok(TraitEffect::Rider(Rider::ReflectDamage { kinds }))
+        }
+        // `spell store rod up to 5 holds 50` - a pool of stored spell
+        // levels that pays for slots, and is fed by the spells it stops.
+        "spell"
+            if words
+                .get(1)
+                .is_some_and(|w| w.eq_ignore_ascii_case("store")) =>
+        {
+            match words[2..] {
+                [pool, up, to, level, holds, most]
+                    if up.eq_ignore_ascii_case("up")
+                        && to.eq_ignore_ascii_case("to")
+                        && holds.eq_ignore_ascii_case("holds") =>
+                {
+                    Ok(TraitEffect::SpellStore {
+                        pool: pool.to_string(),
+                        up_to: count(level)?,
+                        holds: count(most)?,
+                    })
+                }
+                _ => Err(format!(
+                    "expected `spell store <pool> up to <level> holds <n>`, got `{value}`"
+                )),
+            }
+        }
+        // `refuses healing` - nobody else can heal it.
+        "refuses" => {
+            if !value.trim().eq_ignore_ascii_case("refuses healing") {
+                return Err(format!("expected `refuses healing`, got `{value}`"));
+            }
+            Ok(TraitEffect::Rider(Rider::RefusesHealing))
+        }
+        // `truesight 30` - what is invisible within that many feet is not.
+        "truesight" => Ok(TraitEffect::Rider(Rider::Truesight {
+            feet: count(arg(&words, 1, value)?)?,
+        })),
+        // `first hit 2d6 necrotic` - on the first hit of the fight only.
+        "first" => {
+            if !arg(&words, 1, value)?.eq_ignore_ascii_case("hit") || words.len() != 4 {
+                return Err(format!("expected `first hit NdM <type>`, got `{value}`"));
+            }
+            let (dice, sides, bonus) = parse_dice(words[2])?;
+            let damage_kind = DamageKind::parse(words[3])
+                .ok_or_else(|| format!("unknown damage type `{}` in `{value}`", words[3]))?;
+            Ok(TraitEffect::Rider(Rider::FirstHitDamage {
+                dice_count: dice,
+                dice_sides: sides,
+                bonus,
+                damage_kind,
             }))
         }
         // `deflect 1d10+7 bludgeoning, piercing, slashing` - a reaction.
@@ -227,6 +466,19 @@ pub(crate) fn parse_trait(value: &str) -> Result<TraitEffect, String> {
         // `resistance fire`, or `resistance fire, cold` - a passive item's
         // grant of resistance to one or more damage types, alongside
         // whatever the stat block's own `resist:` list already carries.
+        // `resist nonmagical bludgeoning, piercing, slashing` - only from
+        // attacks that are not magical.
+        "resistance" | "resist"
+            if words
+                .get(1)
+                .is_some_and(|w| w.eq_ignore_ascii_case("nonmagical")) =>
+        {
+            let kinds = parse_damage_kinds(&words[2..].join(" "), value)?;
+            if kinds.is_empty() {
+                return Err(format!("`{value}` needs at least one damage type"));
+            }
+            Ok(TraitEffect::Rider(Rider::ResistNonmagical { kinds }))
+        }
         "resistance" | "resist" => {
             let kinds = parse_damage_kinds(&words[1..].join(" "), value)?;
             if kinds.is_empty() {
@@ -550,6 +802,16 @@ pub(crate) fn parse_trait(value: &str) -> Result<TraitEffect, String> {
     }
 }
 
+/// Words as one lower-case phrase, for matching a trait that is nothing but
+/// its words.
+fn lowered(words: &[&str]) -> String {
+    words
+        .iter()
+        .map(|w| w.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// `bonus 3d6 piercing vs dragon` - extra damage dice on a hit against one
 /// creature type. As a trait it rides every attack the creature makes; as a
 /// move clause, only that move's.
@@ -561,12 +823,23 @@ pub(super) fn parse_bonus_vs(words: &[&str], clause: &str) -> Result<Rider, Stri
     let vs_word = arg(words, 3, clause)?;
     if !vs_word.eq_ignore_ascii_case("vs") {
         return Err(format!(
-            "expected `bonus NdM <damage type> vs <creature type>`, got `{clause}`"
+            "expected `bonus NdM <damage type> vs <creature type or condition>`, got `{clause}`"
         ));
     }
     let type_word = arg(words, 4, clause)?;
-    let creature_type = CreatureType::parse(type_word)
-        .ok_or_else(|| format!("unknown creature type `{type_word}` in `{clause}`"))?;
+    // What it is, or what it is under: `vs dragon`, `vs frightened`.
+    if let (None, Some(condition)) = (CreatureType::parse(type_word), Condition::parse(type_word)) {
+        return Ok(Rider::BonusDamageVsCondition {
+            dice_count: dice,
+            dice_sides: sides,
+            bonus,
+            damage_kind,
+            condition,
+        });
+    }
+    let creature_type = CreatureType::parse(type_word).ok_or_else(|| {
+        format!("`{type_word}` is neither a creature type nor a condition in `{clause}`")
+    })?;
     Ok(Rider::BonusDamageVsCreatureType {
         dice_count: dice,
         dice_sides: sides,
@@ -632,6 +905,96 @@ trait: shove on cold
             "creature: x\nhp: 1\ntrait: push lightning\n",
         ] {
             assert!(parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// What a creature is, that the rest of its kit leans on: a hide only
+    /// magic bites, the dark it keeps to, how it moves and what it does with
+    /// what would hurt it.
+    #[test]
+    fn the_traits_of_something_not_quite_here_parse() {
+        let text = "
+creature: x
+hp: 10
+trait: resist nonmagical bludgeoning, piercing, slashing
+trait: magic weapons
+trait: advantage on initiative
+trait: no opportunity attacks
+trait: phase through 1d10 psychic
+trait: mirror psychic 10
+trait: swap when hit 60 rift guard
+trait: passive perception 19
+trait: in dim light
+";
+        let c = &parse(text).unwrap()[0];
+        assert_eq!(
+            c.riders,
+            vec![
+                Rider::ResistNonmagical {
+                    kinds: vec![
+                        DamageKind::Bludgeoning,
+                        DamageKind::Piercing,
+                        DamageKind::Slashing
+                    ],
+                },
+                Rider::MagicWeapons,
+                Rider::InitiativeAdvantage,
+                Rider::NeverProvokes,
+                Rider::PhaseThrough {
+                    roll: DamageRoll::new(1, 10, 0, DamageKind::Psychic),
+                },
+                Rider::MirrorDamage {
+                    kinds: vec![DamageKind::Psychic],
+                    feet: 10,
+                },
+                Rider::SwapWhenHit {
+                    feet: 60,
+                    kin: "rift guard".to_string(),
+                },
+                Rider::PassivePerception(19),
+                Rider::Lit(Light::Dim),
+            ]
+        );
+        assert_eq!(
+            parse_trait("advantage on dex saves").unwrap(),
+            TraitEffect::Rider(Rider::SaveAdvantage {
+                ability: Ability::Dex,
+                kinds: vec![],
+            })
+        );
+        assert_eq!(
+            parse_trait("advantage on dex saves against lightning, thunder").unwrap(),
+            TraitEffect::Rider(Rider::SaveAdvantage {
+                ability: Ability::Dex,
+                kinds: vec![DamageKind::Lightning, DamageKind::Thunder],
+            })
+        );
+        assert!(parse_trait("advantage on dex saves sometimes").is_err());
+        assert!(parse_trait("advantage on luck saves").is_err());
+        assert_eq!(c.passive_perception(), 19);
+        assert_eq!(c.light(), Light::Dim);
+        // The plain resistance and the plain advantage still read as they
+        // did, and the last light said is the one that holds.
+        assert_eq!(c.reduction(DamageKind::Slashing), Reduction::Normal);
+        let lit =
+            &parse("creature: x\nhp: 1\ntrait: in darkness\ntrait: in bright light\n").unwrap()[0];
+        assert_eq!(lit.light(), Light::Bright);
+        assert!(matches!(
+            parse_trait("advantage against prone").unwrap(),
+            TraitEffect::Rider(Rider::AdvantageAgainst { .. })
+        ));
+
+        for bad in [
+            "resist nonmagical",
+            "magic missiles",
+            "no retreat",
+            "phase through walls",
+            "mirror 10",
+            "swap when hit 60",
+            "passive perception keen",
+            "in twilight",
+        ] {
+            assert!(parse_trait(bad).is_err(), "should be rejected: {bad}");
         }
     }
 

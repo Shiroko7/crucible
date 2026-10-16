@@ -225,13 +225,12 @@ fn a_charge_buys_the_cast_at_its_maximum() {
             false
         )
     );
+    // A flat 24 that remembers the three d8s it stands in for.
+    let mut flat = DamageRoll::new(0, 1, 24, DamageKind::Thunder);
+    flat.maximised = Some((3, 8));
     assert_eq!(
         damage_of("Shatter (at its maximum)"),
-        (
-            vec![DamageRoll::new(0, 1, 24, DamageKind::Thunder)],
-            Some(2),
-            true
-        ),
+        (vec![flat], Some(2), true),
         "3d8 thunder, maximised, is a flat 24 - and costs a charge as well as the slot"
     );
 

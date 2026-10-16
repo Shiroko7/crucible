@@ -14,12 +14,12 @@ mod zone;
 
 pub use boon::Boon;
 pub use combatant::Creature;
-pub use effect::{AttackKind, Effect, SaveEffect, Strike};
+pub use effect::{AttackKind, Displace, Effect, SaveEffect, Strike};
 pub use moves::{
     Components, Cost, Move, MoveKind, Reaction, ReactionTrigger, Requirement, Resource, Spend, Uses,
 };
 pub use rider::{
     injury_poison_forcing_save, save_success_probability, saving_throw_against_condition,
-    AttackTrigger, Rider,
+    AttackTrigger, Light, Rider,
 };
 pub use zone::{Reach, Tactic, Zone};

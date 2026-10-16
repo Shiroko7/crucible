@@ -46,15 +46,21 @@
 //! modify another rider. Getting from this to the real pipeline is a refactor of
 //! this file, not of the data.
 //!
-//! **Positioning is mostly absent**, and with more than one creature a side that
-//! costs more than it used to. There is no map, so an area effect is assumed to
-//! catch every enemy - the pessimistic reading, since a party that spread out
-//! would not all be in one cone. `max_targets` on a saving throw is the only
-//! control over that. "An ally within 5 feet of the target", which Sneak Attack
-//! asks about, is read off who is fighting what instead: see
+//! **Positioning is optional.** A fight whose creatures all have somewhere to
+//! stand is played on a grid - see `grid` and [`crate::sim::arena`]: everyone
+//! walks before acting, a move lands only on what is in its range, and an
+//! area with a radius catches only what is that close to its target. That is
+//! all the grid knows so far; opportunity attacks, cover, shaped areas and
+//! forced movement are not on it.
+//!
+//! Without one there is no map, so an area effect is assumed to catch every
+//! enemy - the pessimistic reading, since a party that spread out would not
+//! all be in one cone. `max_targets` on a saving throw is the only control
+//! over that. "An ally within 5 feet of the target", which Sneak Attack asks
+//! about, is read off who is fighting what instead, grid or no grid: see
 //! [`Fight::ally_adjacent`].
 //!
-//! Two kinds of reach do exist. A swallowed creature is cut off from everything
+//! Two kinds of reach exist either way. A swallowed creature is cut off from everything
 //! but its swallower's insides - see [`Fight::reaches`]. And around a creature
 //! with a mouth, every enemy stands in one of four zones, which decide what
 //! reaches what, move with pulls, pushes and each side's movement, and are
@@ -80,9 +86,12 @@ mod attack;
 mod concentration;
 mod conditions;
 mod decide;
+mod events;
 mod fighter;
+mod grid;
 mod on_hit;
 mod reactions;
+mod record;
 mod resolve;
 mod saves;
 mod search;
@@ -93,12 +102,14 @@ mod test_support;
 mod threshold;
 mod turn;
 mod value;
+mod warp;
 mod zones;
 
-use crate::creature::{AttackTrigger, Creature, Zone};
+use crate::creature::{AttackTrigger, Creature, Rider, Zone};
 use crate::prob::Rng;
 use crate::rules::{Ability, AttackModifier, Condition, DamageRoll, SaveModifier, SpellSlots};
 use crate::sim::Policy;
+pub use record::{replay_teams, Detail, Die, Frame, FrameKind, Replay, Unit, UnitState};
 pub use value::expected_damage;
 
 /// Which side of the fight. A side is a team, of any size.
@@ -193,6 +204,12 @@ struct Fighter<'a> {
     /// `once_per_turn_spent` so a creature with both a Stunning-Strike-style
     /// rider and Sneak Attack gets one of each.
     sneak_attack_spent: bool,
+    /// Whether this creature has already turned an attacker this turn - see
+    /// [`crate::creature::Rider::RedirectAttacks`]. Once a turn, anybody's.
+    redirect_spent: bool,
+    /// Whose attackers this creature is this turn: every attack it aims at
+    /// that seat lands on one of its own side instead.
+    turned_from: Option<usize>,
     /// Whether this creature has a reaction to spend right now, shared by
     /// every reaction rider and reaction move it has - see
     /// [`crate::creature::Rider::is_reaction`]. One per turn at most: it comes
@@ -248,6 +265,33 @@ struct Fighter<'a> {
     zones: Vec<Zone>,
     /// Stood up from Prone as this turn began, which costs a move.
     stood_up: bool,
+    /// Levels of exhaustion - see [`Condition::Exhaustion`].
+    exhaustion: u8,
+    /// Death saving throws made and failed since it last dropped, and
+    /// whether three successes have left it stable: down, and no longer
+    /// rolling.
+    death_successes: u8,
+    death_failures: u8,
+    stable: bool,
+    /// Whether the one hit [`crate::creature::Rider::FirstHitDamage`] rides
+    /// has been landed.
+    first_hit_spent: bool,
+    /// What it killed that is due to rise for it at the start of its next
+    /// turn: which of its summons, and the seat of the corpse.
+    raising: Vec<(usize, usize)>,
+    /// What it can pay to break out of whatever is holding it - see
+    /// [`crate::creature::Rider::EscapeFor`]: who is holding it, and the
+    /// price.
+    escape: Option<(usize, DamageRoll)>,
+    /// Where each of its raised auras was put, when it was put somewhere
+    /// rather than carried - see [`Rider::Anchored`]. Parallel to
+    /// `creature.lasting_auras`.
+    anchors: Vec<Option<(i32, i32)>>,
+    /// The top-left square of its space, in a fight on a grid - see
+    /// [`crate::sim::arena`].
+    pos: (i32, i32),
+    /// Squares along each side of its space.
+    span: i32,
     dealt: i64,
     /// Resource points and limited uses burnt. This is the second column of the
     /// table `DESIGN.md` wants, because a win probability means nothing without
@@ -367,9 +411,15 @@ pub struct Plan {
     pub zone: Option<Zone>,
 }
 
-/// What [`Policy::Solver`] is allowed to spend thinking.
+/// What a fight is given to work with: what [`Policy::Solver`] is allowed
+/// to spend thinking, and how much ground there is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
+    /// The map, in squares across and down, for a fight on a grid: never
+    /// smaller than [`crate::sim::arena::FIELD`] or than everyone's starting
+    /// squares need, and that when it is `None`. Whatever its size, the two
+    /// sides start in the middle of it.
+    pub field: Option<(i32, i32)>,
     /// Rollouts per candidate turn.
     pub rollouts: u32,
     /// Rounds to play out before giving up and scoring the position on health.
@@ -381,6 +431,7 @@ pub struct Budget {
 impl Default for Budget {
     fn default() -> Self {
         Self {
+            field: None,
             rollouts: 16,
             depth: 4,
         }
@@ -420,6 +471,33 @@ struct Fight<'a> {
     /// set the reaction off - rather than on every enemy an area would catch,
     /// and a strike whose target is gone is not redirected.
     sole_target: Option<usize>,
+    /// The grid's width and height in squares, when the fight has one - see
+    /// `grid`.
+    grid: Option<(i32, i32)>,
+    /// Set while the creature whose turn it is chooses what to do: who, and
+    /// the squares it can still cover - so what it can reach is judged as if
+    /// it had already walked there.
+    stride: Option<(usize, i32)>,
+    /// The move being resolved or weighed - see [`grid::Cast`].
+    cast: std::cell::Cell<grid::Cast>,
+    /// Set while an anchored aura resolves: whose it is, and the square it
+    /// was put on - which is where it reaches from and what it pulls toward,
+    /// rather than wherever its owner happens to stand.
+    pull_to: Option<(usize, (i32, i32))>,
+    /// The frames of this fight, when it is being recorded - see `record`.
+    tape: record::Tape,
+    /// The round being played, for a frame emitted from deep inside one.
+    round: u32,
+    /// The move being resolved, for the frames it gives rise to - see
+    /// [`events::Cue`].
+    cue: events::Cue,
+    /// What the next damage dealt is made of, for the frame it becomes -
+    /// see [`events::Hurt`].
+    hurt: Option<events::Hurt>,
+    /// The concentration spell each creature last cast, by seat, kept only
+    /// for a fight being recorded: what a frame names when that creature is
+    /// still concentrating.
+    held: Vec<(usize, String)>,
 }
 
 impl<'a> Fight<'a> {
@@ -445,11 +523,12 @@ impl<'a> Fight<'a> {
             .iter()
             .enumerate()
             .map(|(i, f)| {
-                (
-                    rng.die(20) + f.creature.initiative,
-                    f.creature.initiative,
-                    i,
-                )
+                let mut die = rng.die(20);
+                // The better of two, for whatever is never caught off guard.
+                if f.creature.riders.contains(&Rider::InitiativeAdvantage) {
+                    die = die.max(rng.die(20));
+                }
+                (die + f.creature.initiative, f.creature.initiative, i)
             })
             .collect();
         rolled.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
@@ -461,6 +540,34 @@ impl<'a> Fight<'a> {
             l.push(format!("initiative: {}", line.join(", ")));
         }
 
+        // A grid, when everyone has somewhere to stand on it: big enough
+        // for the squares they chose and for what was asked, with the lot of
+        // them moved, as they stand, to the middle of it.
+        let grid = roster.iter().all(|(c, _)| c.at.is_some()).then(|| {
+            let needed =
+                crate::sim::arena::bounds(&roster.iter().map(|&(c, _)| c).collect::<Vec<_>>());
+            let asked = budget.field.unwrap_or(crate::sim::arena::FIELD);
+            let least = crate::sim::arena::FIELD;
+            (
+                needed.0.max(asked.0).max(least.0),
+                needed.1.max(asked.1).max(least.1),
+            )
+        });
+        let mut fighters = fighters;
+        if let Some((width, height)) = grid {
+            let low = |pick: fn(&Fighter<'_>) -> i32| fighters.iter().map(pick).min().unwrap_or(0);
+            let high = |pick: fn(&Fighter<'_>) -> i32| fighters.iter().map(pick).max().unwrap_or(0);
+            let (left, top) = (low(|f| f.pos.0), low(|f| f.pos.1));
+            let (right, bottom) = (high(|f| f.pos.0 + f.span), high(|f| f.pos.1 + f.span));
+            let shift = (
+                (width - (right - left)) / 2 - left,
+                (height - (bottom - top)) / 2 - top,
+            );
+            for f in fighters.iter_mut() {
+                f.pos = (f.pos.0 + shift.0, f.pos.1 + shift.1);
+            }
+        }
+
         let mut fight = Self {
             order: rolled.into_iter().map(|(_, _, i)| i).collect(),
             fighters,
@@ -470,6 +577,15 @@ impl<'a> Fight<'a> {
             rollout_plan: None,
             acting: None,
             sole_target: None,
+            grid,
+            stride: None,
+            pull_to: None,
+            cast: Default::default(),
+            tape: Default::default(),
+            round: 1,
+            cue: Default::default(),
+            hurt: None,
+            held: Vec::new(),
         };
         // Out in front of anything with a mouth, one move from closing in.
         fight.place_everyone(Zone::Range);
@@ -488,10 +604,12 @@ impl<'a> Fight<'a> {
         from_phase: usize,
         log: &mut Option<Vec<String>>,
     ) -> Outcome {
-        let phases = self.phases();
         let mut phase = from_phase;
         for round in from_round..=self.max_rounds {
-            while phase < phases {
+            self.round = round;
+            // Counted afresh each time: something raised mid-round has a
+            // turn of its own from then on.
+            while phase < self.phases() {
                 self.phase(round, phase, rng, log);
                 if let Some(o) = self.finished(round) {
                     return o;
@@ -594,6 +712,9 @@ struct ExtraPlan {
     /// budget for the turn - see
     /// [`crate::creature::Rider::OncePerTurnDamage`].
     once_per_turn_damage: bool,
+    /// The hit [`crate::creature::Rider::FirstHitDamage`] rides is in
+    /// `rolls`, and is spent if this lands.
+    first_hit: bool,
     /// The Cunning Strike effect a Sneak Attack die was spent on.
     cunning: Option<Cunning>,
 }

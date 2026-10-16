@@ -7,7 +7,7 @@ use crate::rules::{
     hit_outcomes_with, AttackModifier, Condition, DamageKind, DamageRoll, Duration, HealRoll,
     Reduction, RollMode,
 };
-use crate::sim::fight::attack::attack_mode;
+use crate::sim::fight::attack::attack_mode_at;
 use crate::sim::fight::reactions::standing_ac_boost;
 use crate::sim::fight::threshold::reducer;
 use crate::sim::fight::{Fight, Fighter, Slot};
@@ -84,7 +84,74 @@ impl<'a> Fight<'a> {
         if !self.requirement_met(me, m) || !self.move_lands(me, target, m) {
             return f64::NEG_INFINITY;
         }
-        self.effect_value(me, target, &m.effect, &m.riders, m.reach, boost)
+        if m.riders.contains(&Rider::Universal) {
+            return self.with_cast(m, target, || self.universal_value(me, target, m));
+        }
+        let value = self.with_cast(m, target, || {
+            self.effect_value(me, target, &m.effect, &m.riders, m.reach, boost)
+        });
+        // Letting go of a spell it is holding for one that would do nothing
+        // anybody here can count is no choice at all.
+        if m.concentration
+            && self.fighters[me].concentration.is_some()
+            && value <= 0.0
+            && m.worth == 0
+        {
+            return f64::NEG_INFINITY;
+        }
+        // What its author says it is worth beyond its damage, while it
+        // would still change something.
+        if value.is_finite() && m.worth != 0 && self.would_change(me, target, &m.effect) {
+            value + f64::from(m.worth)
+        } else {
+            value
+        }
+    }
+
+    /// Would `effect` leave `target`, or `me`, under something it is not
+    /// under already?
+    fn would_change(&self, me: usize, target: usize, effect: &Effect) -> bool {
+        match effect {
+            Effect::Save(save) if !save.on_failure.is_empty() => save
+                .on_failure
+                .iter()
+                .any(|&(landed, _)| !self.fighters[target].has(|c| c == landed)),
+            Effect::Stance { condition } => !self.fighters[me].has(|c| c == *condition),
+            Effect::Sequence(parts) => parts.iter().any(|p| self.would_change(me, target, p)),
+            Effect::Part { effect, .. } => self.would_change(me, target, effect),
+            _ => true,
+        }
+    }
+
+    /// What being up to `feet` away is worth to `me` right now: half of what
+    /// each enemy standing next to it could expect to do to it with its best
+    /// action - counting only those that could not simply walk after it. An
+    /// enemy with the speed to close the distance again loses nothing by
+    /// it, and a turn spent leaving one is a turn wasted.
+    fn worth_of_leaving(&self, me: usize, feet: u32) -> f64 {
+        if !self.on_grid() {
+            return 0.0;
+        }
+        let (mine, side) = (self.fighters[me].creature, self.fighters[me].side);
+        self.fighters
+            .iter()
+            .enumerate()
+            .filter(|&(i, f)| {
+                f.side != side
+                    && f.alive()
+                    && self.within(i, me, crate::sim::arena::SQUARE)
+                    && (self.squares(i) as u32) * crate::sim::arena::SQUARE < feet
+            })
+            .map(|(_, f)| {
+                let best = f
+                    .creature
+                    .actions
+                    .iter()
+                    .map(|m| m.effect.mean_damage(mine))
+                    .fold(0.0, f64::max);
+                best / 2.0
+            })
+            .sum()
     }
 
     fn effect_value(
@@ -106,12 +173,46 @@ impl<'a> Fight<'a> {
             {
                 0.0
             }
-            Effect::Save(_) | Effect::AutoHit { .. } if !self.in_reach(me, target, reach, None) => {
+            Effect::Save(_) | Effect::AutoHit { .. } | Effect::Displace(_)
+                if !self.in_reach(me, target, reach, None) =>
+            {
                 0.0
+            }
+            // One swing at everything in reach: what it does to the other
+            // side, less what it does to its own.
+            Effect::Strikes { strike, .. } if riders.contains(&Rider::EachInReach) => {
+                let rest: Vec<Rider> = riders
+                    .iter()
+                    .filter(|r| **r != Rider::EachInReach)
+                    .cloned()
+                    .collect();
+                let side = self.fighters[me].side;
+                self.swept(me, target, reach, strike.kind)
+                    .into_iter()
+                    .map(|i| {
+                        let blow = self.expected_strikes(me, i, strike, 1, &rest, boost);
+                        match self.fighters[i].side == side {
+                            true => -blow,
+                            false => blow,
+                        }
+                    })
+                    .sum()
             }
             Effect::Strikes { strike, count } => {
                 self.expected_strikes(me, target, strike, *count, riders, boost)
             }
+            Effect::Displace(d) => self.fold_value(me, target, d),
+            // Hiding is worth what striking unseen adds to its best blow,
+            // as often as it works - and nothing to something hidden
+            // already.
+            Effect::Hide { bonus } => match self.fighters[me].has(Condition::unseen) {
+                true => f64::NEG_INFINITY,
+                false => {
+                    let needed = self.keenest(me) - bonus;
+                    let chance = f64::from((21 - needed).clamp(0, 20)) / 20.0;
+                    chance * self.first_blow_gain(me, target)
+                }
+            },
             Effect::Heal(roll) => self.heal_value(me, roll),
             Effect::Sequence(parts) => parts
                 .iter()
@@ -135,16 +236,77 @@ impl<'a> Fight<'a> {
             {
                 f64::NEG_INFINITY
             }
+            // Passed on while they keep failing: each one in turn, as
+            // likely as everyone before it was to fail.
+            Effect::Save(save) if chain_of(riders).is_some() => {
+                let feet = chain_of(riders).unwrap_or(0);
+                let (mut total, mut reaching, mut struck) = (0.0, 1.0, Vec::new());
+                let mut next = Some(target);
+                while let Some(i) = next {
+                    struck.push(i);
+                    total += reaching * self.save_value(me, i, save, riders);
+                    reaching *= save.failure_chance(self.fighters[i].creature);
+                    next = match reaching > 0.01 {
+                        true => self.arc_from(me, i, feet, &struck),
+                        false => None,
+                    };
+                }
+                total
+            }
+            // Everyone on the line it would ride, its own side counted
+            // against it.
+            Effect::Save(save) if line_of(riders).is_some() => {
+                let side = self.fighters[me].side;
+                let (_, caught) = self.line_from(me, target, line_of(riders).unwrap_or(0));
+                if caught.is_empty() {
+                    return f64::NEG_INFINITY;
+                }
+                caught
+                    .into_iter()
+                    .map(|i| match self.fighters[i].side == side {
+                        true => -self.save_value(me, i, save, riders),
+                        false => self.save_value(me, i, save, riders),
+                    })
+                    .sum()
+            }
+            // A burst around its target that leaves the target out: worth
+            // what it does to everyone else it catches.
+            Effect::Save(save) if riders.contains(&Rider::SparesTarget) => self
+                .caught(me, reach)
+                .into_iter()
+                .filter(|&i| i != target)
+                .map(|i| self.save_value(me, i, save, riders))
+                .sum(),
+            // Everyone it would catch, as it catches them when it lands:
+            // whoever it was aimed at first, and no more than it can hold.
             Effect::Save(save) => {
-                let weak = self.through_weak_spot(me, target, None);
-                let defending = self.boon_resistances(target);
-                let pmf = save.damage_pmf_by(victim, &reducer(attacker, victim, weak, &defending));
-                self.past_threshold(target, weak, pmf).mean()
+                let mut caught: Vec<usize> = self
+                    .caught(me, reach)
+                    .into_iter()
+                    .filter(|&i| match &save.requires_type {
+                        None => true,
+                        Some(t) => self.fighters[i].creature.is_creature_type(t),
+                    })
+                    .collect();
+                if let Some(max) = save.max_targets {
+                    if let Some(at) = caught.iter().position(|&i| i == target) {
+                        caught[..=at].rotate_right(1);
+                    }
+                    caught.truncate(max as usize);
+                }
+                if !caught.contains(&target) {
+                    caught.push(target);
+                }
+                caught
+                    .into_iter()
+                    .map(|i| self.save_value(me, i, save, riders))
+                    .sum()
             }
             Effect::AutoHit { damage } => {
                 let weak = self.through_weak_spot(me, target, None);
                 let defending = self.boon_resistances(target);
                 let reduce = reducer(attacker, victim, weak, &defending);
+                let reduce = unmirrored(victim, &reduce);
                 damage
                     .iter()
                     .map(|r| {
@@ -157,6 +319,11 @@ impl<'a> Fight<'a> {
                     })
                     .sum()
             }
+            // Going nowhere for no reason is not a choice at all.
+            Effect::Teleport { feet } => match self.worth_of_leaving(me, *feet) {
+                worth if worth > 0.0 => worth,
+                _ => f64::NEG_INFINITY,
+            },
             // A mark is worth what it will add to this creature's blows over
             // the rounds it lasts - and nothing at all if no rider is waiting
             // on it. Marking what is already marked is not a worse choice
@@ -195,7 +362,15 @@ impl<'a> Fight<'a> {
             // it, once per turn for as long as it is up - not what it adds to
             // this creature's own blow, which is the boon's question. Raising
             // one already up is no choice at all, exactly as with a boon.
-            Effect::Aura { which, duration } => match self.has_aura(me, *which) {
+            // Nor is dropping one to raise another: holding any of them up
+            // already, it keeps the one it has.
+            Effect::Aura { which, duration } => match (0..self.fighters[me]
+                .creature
+                .lasting_auras
+                .len())
+                .any(|i| self.has_aura(me, i))
+                || self.has_aura(me, *which)
+            {
                 true => f64::NEG_INFINITY,
                 false => self.fighters[me]
                     .creature
@@ -208,7 +383,8 @@ impl<'a> Fight<'a> {
                             }
                             _ => 1,
                         };
-                        f64::from(horizon) * aura.effect.mean_damage(self.fighters[target].creature)
+                        self.rounds_inside(target, aura, horizon)
+                            * aura.effect.mean_damage(self.fighters[target].creature)
                     }),
             },
             // A double is worth the blow it will strike once it is standing.
@@ -230,6 +406,36 @@ impl<'a> Fight<'a> {
         }
     }
 
+    /// What the saving throw `save` is worth against `target` alone.
+    fn save_value(
+        &self,
+        me: usize,
+        target: usize,
+        save: &crate::creature::SaveEffect,
+        riders: &[Rider],
+    ) -> f64 {
+        let attacker = self.fighters[me].creature;
+        let victim = self.fighters[target].creature;
+        // What the move adds against whatever this target is under
+        // is part of its damage, as it is when it lands.
+        let bonus = self.bonus_vs_condition(riders.iter(), target);
+        let boosted;
+        let save = if bonus.is_empty() {
+            save
+        } else {
+            boosted = crate::creature::SaveEffect {
+                damage: save.damage.iter().copied().chain(bonus).collect(),
+                ..save.clone()
+            };
+            &boosted
+        };
+        let weak = self.through_weak_spot(me, target, None);
+        let defending = self.boon_resistances(target);
+        let reduce = reducer(attacker, victim, weak, &defending);
+        let pmf = save.damage_pmf_by(victim, &unmirrored(victim, &reduce));
+        self.past_threshold(target, weak, pmf).mean()
+    }
+
     /// A bonus action's worth, given the action this turn already leads
     /// with: its own value, or - for one that sets that action up
     /// ([`Move::before_action`] with a stance granting advantage on the
@@ -247,6 +453,14 @@ impl<'a> Fight<'a> {
         m: &Move,
         lead: Option<&Move>,
     ) -> f64 {
+        if lead.is_some_and(|a| a.carries(&Rider::TakesBonusAction)) {
+            return f64::NEG_INFINITY;
+        }
+        // Nor is a second spell to concentrate on in the one turn: it would
+        // end the first as it was cast.
+        if m.concentration && lead.is_some_and(|a| a.concentration) {
+            return f64::NEG_INFINITY;
+        }
         if let Some(a) = lead {
             let second_slot = a.spell_slot_level.is_some() && m.spell_slot_level.is_some();
             let second_heal =
@@ -255,6 +469,22 @@ impl<'a> Fight<'a> {
                 return f64::NEG_INFINITY;
             }
         }
+        // A bonus action that is nothing but footwork is taken for the
+        // footwork: a Dash by something spending its whole turn running, a
+        // Disengage by something that fights from range and is held in a
+        // reach. Otherwise it is no choice at all.
+        if matches!(&m.effect, Effect::Sequence(parts) if parts.is_empty()) {
+            let name = m.name.to_ascii_lowercase();
+            let wanted = match () {
+                _ if name.starts_with("dash") => lead.is_none() && self.on_grid(),
+                _ if name.starts_with("disengage") => !self.fighters[me].melee && self.pinned(me),
+                _ => true,
+            };
+            return match wanted {
+                true => 0.0,
+                false => f64::NEG_INFINITY,
+            };
+        }
         let sets_up = m.before_action
             && m.effect
                 .stance()
@@ -262,11 +492,16 @@ impl<'a> Fight<'a> {
         if !sets_up {
             return self.move_value(me, target, m, Boost::default());
         }
-        lead.map_or(0.0, |a| {
+        // Aiming at nothing it will roll to hit is no choice at all.
+        let gain = lead.map_or(0.0, |a| {
             let with = self.move_value(me, target, a, Boost::with_advantage());
             let without = self.move_value(me, target, a, Boost::default());
             with - without
-        })
+        });
+        match gain > 0.0 {
+            true => gain,
+            false => f64::NEG_INFINITY,
+        }
     }
 
     /// What something that lasts is worth: what it adds to this creature's
@@ -307,7 +542,7 @@ impl<'a> Fight<'a> {
             .filter(|(m, state)| {
                 first_strike(&m.effect).is_some()
                     && state.available()
-                    && f.can_pay(m.cost)
+                    && f.affords(m)
                     && f.can_cast(m.spell_slot_level)
                     && self.can_take(me, m)
             })
@@ -320,6 +555,141 @@ impl<'a> Fight<'a> {
                 }
             })
             .fold(0.0, f64::max)
+    }
+
+    /// How many of the next `horizon` rounds `target` can be counted on to
+    /// spend inside `aura`, were it raised now.
+    ///
+    /// The first, always: it is put where the target is. After that only
+    /// something that cannot or will not leave stays - one held where it
+    /// stands, or one that fights hand to hand against an emanation its
+    /// enemy carries with it. Anything else walks out of a pool on the
+    /// ground, or backs away from a ring, and is counted for a quarter of
+    /// each later round. And a save that does nothing when it is made is
+    /// worth half as much against something that can simply decide to make
+    /// it, for as long as it has such decisions left.
+    fn rounds_inside(&self, target: usize, aura: &Move, horizon: u32) -> f64 {
+        let victim = &self.fighters[target];
+        let held = victim.has(Condition::zeroes_speed) || victim.creature.speed == 0;
+        let placed = crate::sim::fight::grid::anchored(aura);
+        let stays = held || (!placed && victim.melee);
+        let later = f64::from(horizon.saturating_sub(1));
+        let rounds = 1.0 + later * if stays || !self.on_grid() { 1.0 } else { 0.25 };
+        let all_or_nothing = matches!(&aura.effect, Effect::Save(save) if !save.half_on_success);
+        let refusals: u32 = victim
+            .creature
+            .riders
+            .iter()
+            .zip(&victim.rider_uses)
+            .filter(|(r, _)| matches!(r, Rider::AlwaysSucceed { ability: None, .. }))
+            .map(|(_, &left)| left)
+            .sum();
+        match all_or_nothing && refusals > 0 {
+            true => rounds - 0.5 * rounds.min(f64::from(refusals)),
+            false => rounds,
+        }
+    }
+
+    /// What advantage on one attack roll - the first it makes, and no more -
+    /// would add to the best of `me`'s attacking actions: what striking
+    /// from hiding is worth.
+    fn first_blow_gain(&self, me: usize, target: usize) -> f64 {
+        let f = &self.fighters[me];
+        f.creature
+            .actions
+            .iter()
+            .filter_map(|m| {
+                let strike = first_strike(&m.effect)?;
+                let blow = |boost| self.expected_strikes(me, target, strike, 1, &m.riders, boost);
+                Some(blow(Boost::with_advantage()) - blow(Boost::default()))
+            })
+            .fold(0.0, f64::max)
+    }
+
+    /// What one of the things anybody can do is worth to `me` right now -
+    /// see [`Rider::Universal`]. Each has its moment, and outside it is no
+    /// choice at all, so that a creature with nothing better does not Dodge
+    /// when it should be running at its enemy:
+    ///
+    /// - Dodge, once bloodied and playing it safe, with an enemy upon it;
+    /// - Disengage, held in somebody's reach, for what getting clear saves;
+    /// - Help, for what advantage adds to an ally's first blow at the
+    ///   target;
+    /// - Shove, for the same thing, as often as the target goes down;
+    /// - Grapple, against something that fights from a distance and can
+    ///   still walk away: half of this creature's own best blow, as often
+    ///   as the hold takes.
+    ///
+    /// Something working down its own list as written never reaches for
+    /// any of them.
+    fn universal_value(&self, me: usize, target: usize, m: &Move) -> f64 {
+        let f = &self.fighters[me];
+        if f.policy == Policy::InOrder {
+            return f64::NEG_INFINITY;
+        }
+        let side = f.side;
+        let victim = &self.fighters[target];
+        // What advantage on the first blow at `target` is worth to the
+        // ally it is worth most to - one that fights hand to hand, for a
+        // target on the ground.
+        let opening = |melee_only: bool| {
+            (0..self.fighters.len())
+                .filter(|&i| {
+                    let ally = &self.fighters[i];
+                    i != me
+                        && ally.side == side
+                        && ally.alive()
+                        && !ally.incapacitated()
+                        && (ally.melee || !melee_only)
+                })
+                .map(|i| self.first_blow_gain(i, target))
+                .fold(0.0, f64::max)
+        };
+        let fails = |save: &crate::creature::SaveEffect| save.failure_chance(victim.creature);
+        let worth = match &m.effect {
+            Effect::Stance { .. } => {
+                let beset = self.fighters.iter().enumerate().any(|(i, e)| {
+                    e.side != side && e.alive() && e.melee && self.feet_between(me, i) <= 5
+                });
+                match f.policy == Policy::Defensive && f.bloodied() && beset {
+                    true => return 0.0,
+                    false => 0.0,
+                }
+            }
+            Effect::Sequence(_) => match self.pinned(me) && !f.melee {
+                true => self.worth_of_leaving(me, f.creature.speed),
+                false => 0.0,
+            },
+            Effect::Afflict { condition, .. } if !victim.has(|c| c == *condition) => opening(false),
+            Effect::Save(save) => match save.on_failure.first() {
+                Some((Condition::Prone, _))
+                    if !victim.has(|c| c == Condition::Prone)
+                        && !victim.creature.immune_to_condition(Condition::Prone) =>
+                {
+                    fails(save) * opening(true)
+                }
+                Some((Condition::Grappled, _))
+                    if !victim.melee
+                        && !victim.has(Condition::zeroes_speed)
+                        && !victim.creature.immune_to_condition(Condition::Grappled) =>
+                {
+                    let blow = f
+                        .creature
+                        .actions
+                        .iter()
+                        .filter(|a| !a.riders.contains(&Rider::Universal))
+                        .map(|a| a.effect.mean_damage(victim.creature))
+                        .fold(0.0, f64::max);
+                    fails(save) * blow / 2.0
+                }
+                _ => 0.0,
+            },
+            _ => 0.0,
+        };
+        match worth > 0.0 {
+            true => worth,
+            false => f64::NEG_INFINITY,
+        }
     }
 
     /// What calling up `me`'s `which`th summon is worth: one turn of the best
@@ -346,7 +716,7 @@ impl<'a> Fight<'a> {
     /// Expected damage of `count` strikes, the first with every rider that
     /// would apply to it; later swings without the once-per-turn Sneak
     /// Attack the first one would already have claimed.
-    fn expected_strikes(
+    pub(super) fn expected_strikes(
         &self,
         me: usize,
         target: usize,
@@ -357,7 +727,13 @@ impl<'a> Fight<'a> {
     ) -> f64 {
         let attacker = &self.fighters[me];
         let victim = &self.fighters[target];
-        let mode = attack_mode(strike.mode, attacker, victim, boost.advantage);
+        let mode = attack_mode_at(
+            strike.mode,
+            attacker,
+            victim,
+            boost.advantage,
+            self.spot(me, target, strike.kind),
+        );
         let force_crit = victim.has(Condition::auto_crits);
         // What the hypothetical would add to each of these swings, on top of
         // every rider they already carry.
@@ -375,6 +751,7 @@ impl<'a> Fight<'a> {
                 mode,
                 force_crit,
                 &with_boost(first.rolls),
+                riders,
             )
             .0;
         if count > 1 {
@@ -388,8 +765,32 @@ impl<'a> Fight<'a> {
                         mode,
                         force_crit,
                         &with_boost(rest.rolls),
+                        riders,
                     )
                     .0;
+        }
+        if riders.contains(&Rider::HalfOnMiss) {
+            let ac = victim.creature.ac + standing_ac_boost(victim, strike.kind);
+            let o = hit_outcomes_with(strike.to_hit, mode, ac, &attacker.attack_modifiers);
+            let defending = self.defending(me, target, Some(strike), riders);
+            let reduce = reducer(attacker.creature, victim.creature, false, &defending);
+            let whole = crate::creature::Displace::mean_of(&strike.damage, &reduce);
+            total += f64::from(count) * (1.0 - o.hit - o.crit) * whole / 2.0;
+        }
+        // What every one of them landing adds - see `Rider::AllHit`.
+        if count >= 2 {
+            let ac = victim.creature.ac + standing_ac_boost(victim, strike.kind);
+            let o = hit_outcomes_with(strike.to_hit, mode, ac, &attacker.attack_modifiers);
+            let every = (o.hit + o.crit).powi(count as i32);
+            let reduce = |k| match victim.creature.mirrors(k) {
+                Some(_) => Reduction::Immune,
+                None => victim.creature.reduction(k),
+            };
+            for rider in riders {
+                if let Rider::AllHit { damage, .. } = rider {
+                    total += every * crate::creature::Displace::mean_of(damage, &reduce);
+                }
+            }
         }
         total
     }
@@ -402,6 +803,7 @@ impl<'a> Fight<'a> {
     /// weak spot is taken when it is worth more than the shell: it skips the
     /// threshold but resists some damage, so a hit big enough to breach can
     /// do better against the shell, where it lands whole.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn aimed_hit(
         &self,
         me: usize,
@@ -410,20 +812,26 @@ impl<'a> Fight<'a> {
         mode: RollMode,
         force_crit: bool,
         extra: &[DamageRoll],
+        riders: &[Rider],
     ) -> (f64, bool) {
         let attacker = &self.fighters[me];
         let victim = &self.fighters[target];
-        let defending = self.boon_resistances(target);
+        let defending = self.defending(me, target, Some(strike), riders);
         // A blade the defender already has raised is part of how hard it is
-        // to hit - see `reactions::standing_ac_boost`.
-        let ac = victim.creature.ac + standing_ac_boost(victim, strike.kind);
+        // to hit - see `reactions::standing_ac_boost` - and so is whoever
+        // is standing in the way.
+        let ac = victim.creature.ac
+            + standing_ac_boost(victim, strike.kind)
+            + self.spot(me, target, strike.kind).cover;
         let hit = |weak: bool| {
             let threshold = match weak {
                 true => None,
                 false => victim.creature.damage_threshold().map(|(t, _)| t),
             };
+            let reduce = reducer(attacker.creature, victim.creature, weak, &defending);
+            let reduce = unmirrored(victim.creature, &reduce);
             expected_hit(
-                &reducer(attacker.creature, victim.creature, weak, &defending),
+                &reduce,
                 threshold,
                 strike,
                 ac,
@@ -455,7 +863,12 @@ impl<'a> Fight<'a> {
         self.fighters
             .iter()
             .enumerate()
-            .filter(|&(i, f)| f.side == side && f.can_revive() && self.reaches(me, i))
+            .filter(|&(i, f)| {
+                f.side == side
+                    && f.can_revive()
+                    && self.reaches(me, i)
+                    && (i == me || self.within(me, i, self.heal_reach()))
+            })
             .map(|(_, f)| f64::from(f.creature.hp))
             .fold(0.0, f64::max)
     }
@@ -478,6 +891,33 @@ fn quarry_dice(rider: &Rider) -> Option<DamageRoll> {
         )),
         _ => None,
     }
+}
+
+/// `reduce`, for weighing a blow at `victim`: what it would hand on to
+/// those around it (see [`Rider::MirrorDamage`]) is worth nothing against
+/// it, whatever that then does to anybody else.
+fn unmirrored<'r>(
+    victim: &'r Creature,
+    reduce: &'r dyn Fn(DamageKind) -> Reduction,
+) -> impl Fn(DamageKind) -> Reduction + 'r {
+    move |kind| match victim.mirrors(kind) {
+        Some(_) => Reduction::Immune,
+        None => reduce(kind),
+    }
+}
+
+fn chain_of(riders: &[Rider]) -> Option<u32> {
+    riders.iter().find_map(|r| match r {
+        Rider::Chains { feet } => Some(*feet),
+        _ => None,
+    })
+}
+
+fn line_of(riders: &[Rider]) -> Option<u32> {
+    riders.iter().find_map(|r| match r {
+        Rider::RideLine { feet } => Some(*feet),
+        _ => None,
+    })
 }
 
 pub(super) fn first_strike(effect: &Effect) -> Option<&Strike> {
@@ -551,6 +991,15 @@ pub fn expected_damage(attacker: &Creature, m: &Move, target: &Creature) -> f64 
         rollout_plan: None,
         acting: None,
         sole_target: None,
+        grid: None,
+        stride: None,
+        pull_to: None,
+        cast: Default::default(),
+        tape: Default::default(),
+        round: 1,
+        cue: Default::default(),
+        hurt: None,
+        held: Vec::new(),
     };
     fight.place_everyone(Zone::Mouth);
     // It is the attacker's own turn, which is what a once-a-turn rider needs

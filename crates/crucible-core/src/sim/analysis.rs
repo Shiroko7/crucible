@@ -120,7 +120,7 @@ pub fn evaluate_teams(
     })
 }
 
-/// "4x Gio", or just the name when there is one of it.
+/// "4x Knight", or just the name when there is one of it.
 fn label(roster: &[&Creature], team: u8) -> String {
     let members: Vec<&Creature> = roster.iter().copied().filter(|c| c.team == team).collect();
     match members.split_first() {

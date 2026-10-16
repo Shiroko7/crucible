@@ -121,6 +121,64 @@ pub fn parse_reaction_entry(entry: &MoveEntry, owner: &Creature) -> FeatureResul
 }
 
 /// Load a `Creature` from a formatted TOML configuration string.
+/// Give `creature` the things anybody can do with an action - Dodge,
+/// Disengage, Help, Shove and Grapple - each marked
+/// [`crate::creature::Rider::Universal`], after everything its own file
+/// gave it. `proficiency` is its proficiency bonus, which with its Strength
+/// sets what a shove or a grapple has to be saved against.
+pub(crate) fn add_universal_actions(creature: &mut Creature, proficiency: i32) {
+    use crate::creature::{Effect, Move, Rider, SaveEffect};
+    use crate::rules::{Ability, Condition, Duration};
+    let strength = match creature.ability_score(Ability::Str) {
+        0 => creature.save(Ability::Str),
+        score => (score - 10).div_euclid(2),
+    };
+    let dc = 8 + strength + proficiency;
+    let unarmed = |condition: Condition, duration: Duration| {
+        Effect::Save(SaveEffect {
+            ability: Ability::Str,
+            dc,
+            damage: Vec::new(),
+            half_on_success: false,
+            on_failure: vec![(condition, duration)],
+            max_targets: Some(1),
+            requires_type: None,
+        })
+    };
+    let moves = [
+        Move::new(
+            "Dodge",
+            Effect::Stance {
+                condition: Condition::Dodging,
+            },
+        ),
+        Move::new("Disengage", Effect::Sequence(Vec::new())),
+        Move::new(
+            "Help",
+            Effect::Afflict {
+                condition: Condition::Marked,
+                duration: Duration::ApplierTurn,
+            },
+        )
+        .with_range(5),
+        Move::new("Shove", unarmed(Condition::Prone, Duration::VictimTurn)).with_range(5),
+        Move::new(
+            "Grapple",
+            unarmed(
+                Condition::Grappled,
+                Duration::SaveEndTurn {
+                    ability: Ability::Str,
+                    dc,
+                },
+            ),
+        )
+        .with_range(5),
+    ];
+    for m in moves {
+        creature.actions.push(m.with_rider(Rider::Universal));
+    }
+}
+
 pub fn load_creature_from_str(
     content: &str,
     registry: &FeatureRegistry,
@@ -199,71 +257,92 @@ pub fn load_creature_from_file(
 mod tests {
     use super::*;
 
+    /// The example character the repo commits: the one a new one is
+    /// copied from, so it has to load.
     #[test]
-    fn test_load_gio_pc_config() {
+    fn the_example_character_loads() {
         let registry = FeatureRegistry::new();
-        let gio = load_creature_from_file("content/characters/gio.toml", &registry)
-            .expect("gio config parses and compiles to creature");
-        assert_eq!(gio.name, "Gio");
-        assert_eq!(gio.ac, 20);
-        assert_eq!(gio.hp, 69);
-        assert_eq!(gio.initiative, -1);
-        assert_eq!(gio.actions.len(), 2);
-        assert_eq!(gio.bonus_actions.len(), 3);
-        assert_eq!(gio.riders.len(), 2);
-        assert!(gio.has_evasion(crate::rules::Ability::Dex));
-        assert_eq!(gio.resources[0].name, "focus");
-        assert_eq!(gio.resources[0].max, 8);
+        let cleric = load_creature_from_file("content/characters/cleric.toml", &registry)
+            .expect("the example character parses and compiles to a creature");
+        assert_eq!(cleric.name, "Cleric");
+        assert_eq!(cleric.ac, 18);
+        assert_eq!(cleric.hp, 38);
+        assert_eq!(cleric.saves[crate::rules::Ability::Wis.index()], 7);
+        assert_eq!(cleric.creature_type, None);
+        assert!(cleric.spellcasting.is_some());
+        // Its weapon is written out; the rest of what it does is its spells.
+        let names: Vec<&str> = cleric.actions.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"Mace"), "{names:?}");
+        assert!(names.len() > 1, "{names:?}");
+    }
+
+    /// And the example monster.
+    #[test]
+    fn the_example_monster_loads() {
+        let registry = FeatureRegistry::new();
+        let brute = load_creature_from_file("content/monsters/brute.toml", &registry)
+            .expect("the example monster parses and compiles to a creature");
+        assert_eq!(brute.name, "Brute");
+        assert_eq!(brute.ac, 11);
+        assert_eq!(brute.hp, 59);
+        assert_eq!(brute.initiative, -1);
+        assert_eq!(brute.speed, 40);
+        // Its own, and the five things anybody can do.
+        assert_eq!(brute.actions.len(), 2 + 5);
+        assert_eq!(brute.creature_type, Some(crate::rules::CreatureType::Giant));
+        assert_eq!(brute.size, crate::rules::Size::Large);
     }
 
     #[test]
-    fn test_load_adult_red_dragon_monster_config() {
+    fn a_monster_with_legendary_actions_and_spells_of_its_own_loads() {
         let registry = FeatureRegistry::new();
-        let dragon = load_creature_from_file("content/monsters/adult-red-dragon.toml", &registry)
-            .expect("adult red dragon config parses and compiles to creature");
-        assert_eq!(dragon.name, "Adult Red Dragon");
-        assert_eq!(dragon.ac, 19);
-        assert_eq!(dragon.hp, 256);
-        assert_eq!(dragon.initiative, 12);
-        assert_eq!(dragon.actions.len(), 4);
-        assert_eq!(dragon.legendary_uses, 3);
-        assert_eq!(dragon.legendary.len(), 3);
-        assert_eq!(dragon.riders.len(), 1);
-        assert_eq!(
-            dragon.creature_type,
-            Some(crate::rules::CreatureType::Dragon)
-        );
-        assert_eq!(dragon.size, crate::rules::Size::Huge);
-        // Everything cast through its Spellcasting is a spell; its Rends are
-        // melee weapon attacks.
+        let toml = r#"
+            [monster]
+            name = "Wyrm"
+            size = "Huge"
+            creature_type = "Dragon"
+            ac = 19
+            hp = 250
+            initiative = 12
+            immune = ["fire"]
+            legendary_uses = 3
+            traits = ["legendary resistance 3"]
+
+            [[monster.actions]]
+            name = "Breath"
+            effect = "recharge 5 | save dex dc 21 | 17d6 fire | half on success"
+
+            [[monster.actions]]
+            name = "Claws"
+            effect = "strikes 3 | hit +14 | 1d10+8 slashing, 2d4 fire"
+
+            [[monster.actions]]
+            name = "Burst"
+            effect = "spell | uses 1 | save dex dc 20 | 8d6 fire | half on success"
+
+            [[monster.legendary]]
+            name = "Rays"
+            effect = "spell | ranged | recharge 1 | strikes 3 | hit +12 | 2d6 fire"
+
+            [[monster.legendary]]
+            name = "Pounce"
+            effect = "recharge 1 | strikes 1 | hit +14 | 1d10+8 slashing, 2d4 fire"
+        "#;
+        let wyrm = load_creature_from_str(toml, &registry).expect("it parses");
+        assert_eq!(wyrm.initiative, 12);
+        // Its own, and the five things anybody can do.
+        assert_eq!(wyrm.actions.len(), 3 + 5);
+        assert_eq!(wyrm.legendary_uses, 3);
+        assert_eq!(wyrm.legendary.len(), 2);
+        assert_eq!(wyrm.riders.len(), 1);
+        assert_eq!(wyrm.creature_type, Some(crate::rules::CreatureType::Dragon));
+        assert_eq!(wyrm.size, crate::rules::Size::Huge);
+        // What it casts is a spell; its claws are melee weapon attacks.
         use crate::creature::MoveKind;
-        let kinds: Vec<(&str, MoveKind)> = dragon
-            .actions
-            .iter()
-            .chain(&dragon.legendary)
-            .map(|m| (m.name.as_str(), m.kind))
-            .collect();
-        for (name, kind) in kinds {
-            let spell = matches!(
-                name,
-                "Fireball" | "Scorching Ray" | "Commanding Presence" | "Fiery Rays"
-            );
-            assert_eq!(kind == MoveKind::Spell, spell, "{name}");
+        for m in wyrm.actions.iter().chain(&wyrm.legendary) {
+            let spell = matches!(m.name.as_str(), "Burst" | "Rays");
+            assert_eq!(m.kind == MoveKind::Spell, spell, "{}", m.name);
         }
-    }
-
-    #[test]
-    fn test_load_ogre_monster_config() {
-        let registry = FeatureRegistry::new();
-        let ogre = load_creature_from_file("content/monsters/ogre.toml", &registry)
-            .expect("ogre config parses and compiles to creature");
-        assert_eq!(ogre.name, "Ogre");
-        assert_eq!(ogre.ac, 11);
-        assert_eq!(ogre.hp, 68);
-        assert_eq!(ogre.initiative, -1);
-        assert_eq!(ogre.actions.len(), 2);
-        assert_eq!(ogre.creature_type, Some(crate::rules::CreatureType::Giant));
-        assert_eq!(ogre.size, crate::rules::Size::Large);
     }
 
     #[test]

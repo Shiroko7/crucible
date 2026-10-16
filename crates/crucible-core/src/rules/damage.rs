@@ -82,6 +82,12 @@ pub struct DamageRoll {
     /// see [`DamageRoll::reduction_against`] - because that is how it is made
     /// at a table: nobody chooses the type their target is immune to.
     pub alternative: Option<DamageKind>,
+    /// The dice this flat amount stands in for, as count and sides, when it
+    /// is a pool taken at its maximum rather than rolled - see
+    /// [`crate::features::maximised`]. Nothing in the arithmetic reads it:
+    /// it is what lets a recorded fight show those dice landing on their
+    /// highest faces. `None` for every ordinary damage component.
+    pub maximised: Option<(u32, u32)>,
 }
 
 impl DamageRoll {
@@ -93,6 +99,7 @@ impl DamageRoll {
             bonus,
             kind,
             alternative: None,
+            maximised: None,
         }
     }
 

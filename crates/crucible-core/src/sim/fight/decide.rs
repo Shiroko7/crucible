@@ -1,7 +1,7 @@
 //! Choosing what to do: a target, then a plan for the action and bonus
 //! action, under the side's [`Policy`].
 
-use crate::creature::{Move, Uses};
+use crate::creature::{Effect, Move, Uses};
 use crate::prob::Rng;
 use crate::rules::Condition;
 use crate::sim::fight::value::Boost;
@@ -47,6 +47,11 @@ impl<'a> Fight<'a> {
             let nearest = enemies.iter().map(|&i| self.zone(i, me).distance()).min();
             enemies.retain(|&i| Some(self.zone(i, me).distance()) == nearest);
         }
+        // On a grid, one it can do something to this turn comes before one
+        // it would only be walking towards.
+        if self.on_grid() && enemies.iter().any(|&i| self.engages(me, i)) {
+            enemies.retain(|&i| self.engages(me, i));
+        }
         if enemies.is_empty() {
             return None;
         }
@@ -56,8 +61,28 @@ impl<'a> Fight<'a> {
                 .min_by_key(|&&i| self.fighters[i].hp)
                 .expect("non-empty"),
             Policy::Scattered => enemies[self.fighters[me].seat % enemies.len()],
-            _ => enemies[0],
+            // Something working down a list takes them as they are listed.
+            Policy::InOrder => enemies[0],
+            // Whoever is holding a spell up, then whoever is nearest, then
+            // whoever is nearest to falling.
+            _ => *enemies
+                .iter()
+                .min_by_key(|&&i| {
+                    let f = &self.fighters[i];
+                    (f.concentration.is_none(), self.feet_between(me, i), f.hp, i)
+                })
+                .expect("non-empty"),
         })
+    }
+
+    /// Does anything `me` has that is aimed at an enemy land on `target`
+    /// from here - or from where it can walk to, on its own turn?
+    fn engages(&self, me: usize, target: usize) -> bool {
+        let c = self.fighters[me].creature;
+        [&c.actions, &c.bonus_actions, &c.legendary]
+            .into_iter()
+            .flatten()
+            .any(|m| Self::aimed(m) && self.move_lands(me, target, m))
     }
 
     /// Who `me` plans its turn against: [`Fight::pick_target`] - or, when
@@ -118,6 +143,40 @@ impl<'a> Fight<'a> {
             .choose(Slot::Action.moves(f.creature), &f.actions, f, |m| {
                 self.move_value(me, target, m, Boost::default())
             });
+        let heals = |m: &Move| matches!(m.effect, Effect::Heal(_));
+        // A heal it can make with its bonus action is made with that, and
+        // the action kept for something else - which is then not a second
+        // heal, nor a second spell slot.
+        if action.is_some_and(|i| heals(&f.creature.actions[i])) {
+            let mended = f
+                .policy
+                .choose(
+                    Slot::Bonus.moves(f.creature),
+                    &f.bonus_actions,
+                    f,
+                    |m| match heals(m) {
+                        true => self.bonus_value(me, target, m, None),
+                        false => f64::NEG_INFINITY,
+                    },
+                )
+                .filter(|&i| {
+                    self.bonus_value(me, target, &f.creature.bonus_actions[i], None) > 0.0
+                });
+            if let Some(bonus) = mended {
+                let slotted = f.creature.bonus_actions[bonus].spell_slot_level.is_some();
+                let action = f
+                    .policy
+                    .choose(Slot::Action.moves(f.creature), &f.actions, f, |m| {
+                        if heals(m) || (slotted && m.spell_slot_level.is_some()) {
+                            f64::NEG_INFINITY
+                        } else {
+                            self.move_value(me, target, m, Boost::default())
+                        }
+                    });
+                return (self.worth_taking(me, target, action), Some(bonus));
+            }
+        }
+        let action = self.worth_taking(me, target, action);
         let lead = action.map(|i| &f.creature.actions[i]);
         let bonus = f
             .policy
@@ -125,6 +184,28 @@ impl<'a> Fight<'a> {
                 self.bonus_value(me, target, m, lead)
             });
         (action, bonus)
+    }
+
+    /// `action`, unless it is aimed at an enemy and would do nothing to it
+    /// that anything here can measure while `me` has a blow that simply
+    /// cannot reach yet: then no action at all, which is a Dash toward it.
+    fn worth_taking(&self, me: usize, target: usize, action: Option<usize>) -> Option<usize> {
+        let f = &self.fighters[me];
+        let chosen = &f.creature.actions[action?];
+        let idle = Self::aimed(chosen)
+            && chosen.worth == 0
+            && self.move_value(me, target, chosen, Boost::default()) <= 0.0;
+        let out_of_reach = self.on_grid()
+            && f.creature.actions.iter().zip(&f.actions).any(|(m, state)| {
+                crate::sim::fight::value::first_strike(&m.effect).is_some()
+                    && state.available()
+                    && f.affords(m)
+                    && !self.move_lands(me, target, m)
+            });
+        match idle && out_of_reach {
+            true => None,
+            false => action,
+        }
     }
 
     /// Keep a rollout on the plan under test, falling back slot by slot to greedy
@@ -139,7 +220,7 @@ impl<'a> Fight<'a> {
             let still_legal = pick.is_some_and(|i| {
                 slot.moves(f.creature).get(i).is_some_and(|m| {
                     slot.states(f)[i].available()
-                        && f.can_pay(m.cost)
+                        && f.affords(m)
                         && f.can_cast(m.spell_slot_level)
                         && self.can_take(me, m)
                 })
@@ -175,7 +256,7 @@ impl<'a> Fight<'a> {
             .enumerate()
         {
             if state.available()
-                && f.can_pay(m.cost)
+                && f.affords(m)
                 && f.can_cast(m.spell_slot_level)
                 && self.can_take(me, m)
             {
@@ -192,9 +273,23 @@ impl<'a> Fight<'a> {
     /// not one swallowed, and none at all from inside a swallower.
     pub(super) fn heal_target(&self, me: usize) -> usize {
         let side = self.fighters[me].side;
+        // Not one that healing cannot reach: it would be spent for nothing.
         let allies = || {
-            (0..self.fighters.len())
-                .filter(move |&i| self.fighters[i].side == side && self.reaches(me, i))
+            (0..self.fighters.len()).filter(move |&i| {
+                self.fighters[i].side == side
+                    && self.reaches(me, i)
+                    // Only as far as the heal in hand reaches - a touch,
+                    // unless it says further.
+                    && (i == me || self.within(me, i, self.heal_reach()))
+                    && !self.fighters[i].has(Condition::blocks_healing)
+                    // Nor one that will take it from nobody but itself.
+                    && (i == me
+                        || !self.fighters[i]
+                            .creature
+                            .riders
+                            .iter()
+                            .any(|r| matches!(r, crate::creature::Rider::RefusesHealing)))
+            })
         };
         if let Some(i) = allies().find(|&i| self.fighters[i].can_revive()) {
             return i;
@@ -228,7 +323,7 @@ impl Policy {
         let mut best: Option<(usize, (f64, f64))> = None;
         for (i, (m, state)) in moves.iter().zip(states).enumerate() {
             if !state.available()
-                || !f.can_pay(m.cost)
+                || !f.affords(m)
                 || !f.can_cast(m.spell_slot_level)
                 || !f.move_allowed(m)
             {
@@ -266,7 +361,12 @@ impl Policy {
     /// rules about *which target*, which is [`Fight::pick_target`]'s job.
     fn rank(self, m: &Move, value: f64, bloodied: bool) -> (f64, f64) {
         match self {
-            Policy::Nova => (f64::from(spend_weight(m)), value),
+            // The dearest first - of what would do something. Burning a
+            // slot on a spell that changes nothing is not spending it.
+            Policy::Nova if value > 0.0 || Fight::aimed(m) => {
+                (1.0 + f64::from(spend_weight(m)), value)
+            }
+            Policy::Nova => (0.0, value),
             // Once things are going badly a defensive stance beats any amount
             // of damage, and before that it is worth nothing.
             Policy::Defensive

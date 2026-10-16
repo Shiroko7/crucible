@@ -59,6 +59,14 @@ pub struct MonsterDefinition {
     /// or `hit and run` - see [`crate::creature::Tactic`].
     #[serde(default)]
     pub tactic: Option<String>,
+    /// Walking speed in feet, for a fight on a grid. 30 when left out.
+    #[serde(default)]
+    pub speed: Option<u32>,
+    /// Creatures this one can bring into the fight - a corpse it raises - each
+    /// a stat block of its own, named by the move that calls on it
+    /// (`on kill raise <name>`).
+    #[serde(default)]
+    pub minions: Vec<MonsterDefinition>,
 }
 
 impl MonsterDefinition {
@@ -141,6 +149,12 @@ impl MonsterDefinition {
             }
         }
 
+        // Its minions, before the moves that name them.
+        for minion in &self.minions {
+            let minion = minion.to_creature(registry)?;
+            builder.creature.add_summon(minion);
+        }
+
         // Apply actions
         for entry in &self.actions {
             let m = super::parse_move_entry(entry, &builder.creature)?;
@@ -177,6 +191,17 @@ impl MonsterDefinition {
             })?;
         }
 
+        if let Some(speed) = self.speed {
+            builder.creature.speed = speed;
+        }
+
+        // Proficiency by challenge rating, as by level.
+        let cr = match &self.cr {
+            Some(toml::Value::Integer(n)) => *n as i32,
+            Some(toml::Value::Float(x)) => *x as i32,
+            _ => 1,
+        };
+        super::add_universal_actions(&mut builder.creature, 2 + (cr.max(1) - 1) / 4);
         builder.build()
     }
 }

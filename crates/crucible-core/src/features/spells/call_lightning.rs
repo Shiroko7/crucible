@@ -27,11 +27,14 @@ use crate::rules::{Ability, DamageKind, DamageRoll};
 /// The concentration is on the first cast alone - which is where the cloud
 /// comes from - so a caster who loses it and re-raises the storm pays the
 /// slot again only if the sheet says it can.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallLightningPlugin {
     pub dice: u32,
     pub slot: u32,
     pub max_targets: Option<u32>,
+    /// A pool the first cast is paid out of instead of a slot, and how much
+    /// of it: a storm raised on something other than spell slots.
+    pub resource: Option<(String, u32)>,
 }
 
 impl Default for CallLightningPlugin {
@@ -40,6 +43,7 @@ impl Default for CallLightningPlugin {
             dice: 3,
             slot: 3,
             max_targets: Some(1),
+            resource: None,
         }
     }
 }
@@ -75,13 +79,17 @@ impl FeaturePlugin for CallLightningPlugin {
 
     fn apply(&self, builder: &mut CreatureBuilder) -> FeatureResult<()> {
         let dc = save_dc(builder, "call_lightning")?;
-        builder.add_action(
-            Move::new("Call Lightning", self.bolt(dc))
-                .with_uses(Uses::Limited(1))
-                .with_spell_slot(self.slot)
-                .with_kind(MoveKind::Spell)
-                .with_concentration(),
-        );
+        let cast = Move::new("Call Lightning", self.bolt(dc))
+            .with_uses(Uses::Limited(1))
+            .with_kind(MoveKind::Spell)
+            .with_concentration();
+        builder.add_action(match &self.resource {
+            Some((pool, amount)) => cast.with_cost(crate::creature::Cost {
+                resource: builder.resource_index(pool)?,
+                amount: *amount,
+            }),
+            None => cast.with_spell_slot(self.slot),
+        });
         builder.add_action(
             Move::new("Call Lightning (Again)", self.bolt(dc)).with_kind(MoveKind::Spell),
         );
@@ -99,6 +107,10 @@ pub(super) fn register(registry: &mut FeatureRegistry) {
             dice: val.get("dice").and_then(|v| v.as_integer()).unwrap_or(3) as u32,
             slot: slot_level(val, 3)?,
             max_targets: target_cap(val)?.or(Some(1)),
+            resource: val.get("resource").and_then(|v| v.as_str()).map(|pool| {
+                let amount = val.get("cost").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+                (pool.to_string(), amount)
+            }),
         }))
     });
 }

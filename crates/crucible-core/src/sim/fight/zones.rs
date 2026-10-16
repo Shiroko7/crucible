@@ -68,13 +68,15 @@ impl<'a> Fight<'a> {
                 _ => true,
             };
         }
-        true
+        self.in_range(from, to, attack)
     }
 
     /// Does any part of `m` land on `target` - or need no target at all? A
     /// move that can do nothing from here is not a choice.
     pub(super) fn move_lands(&self, me: usize, target: usize, m: &Move) -> bool {
-        self.effect_lands(me, target, &m.effect, m.reach)
+        self.with_cast(m, target, || {
+            self.effect_lands(me, target, &m.effect, m.reach)
+        })
     }
 
     fn effect_lands(&self, me: usize, target: usize, effect: &Effect, reach: Reach) -> bool {
@@ -95,10 +97,22 @@ impl<'a> Fight<'a> {
             Effect::HarmSwallowed { .. } => !self.held_by(me).is_empty(),
             // A mark has to reach whoever it marks; a boon and a summon are
             // the user's own business, wherever anyone is standing.
-            Effect::Afflict { .. } => self.in_reach(me, target, reach, None),
-            Effect::Stance { .. }
+            Effect::Afflict { .. } | Effect::Displace(_) => self.in_reach(me, target, reach, None),
+            Effect::Aura { which, .. }
+                if self.fighters[me]
+                    .creature
+                    .lasting_auras
+                    .get(*which)
+                    .is_some_and(crate::sim::fight::grid::anchored) =>
+            {
+                self.in_reach(me, target, reach, None)
+            }
+            Effect::Hide { .. }
+            | Effect::Stance { .. }
             | Effect::Heal(_)
             | Effect::TempHp(_)
+            | Effect::Counter
+            | Effect::Teleport { .. }
             | Effect::Buff { .. }
             | Effect::SaveOrModifier { .. }
             | Effect::Boon { .. }
@@ -209,7 +223,7 @@ impl<'a> Fight<'a> {
             .zip(Slot::Action.states(f))
             .filter(|(m, state)| {
                 state.available()
-                    && f.can_pay(m.cost)
+                    && f.affords(m)
                     && f.can_cast(m.spell_slot_level)
                     && self.can_take(me, m)
                     && (m.is_free() || f.will_spend())

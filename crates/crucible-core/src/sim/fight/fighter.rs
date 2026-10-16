@@ -83,6 +83,8 @@ impl<'a> Fighter<'a> {
             save_modifiers: Vec::new(),
             once_per_turn_spent: false,
             sneak_attack_spent: false,
+            redirect_spent: false,
+            turned_from: None,
             reaction: true,
             reactions_left: creature.reactions_per_round,
             armed: vec![false; creature.riders.len()],
@@ -95,6 +97,16 @@ impl<'a> Fighter<'a> {
             inside_damage: 0,
             zones: Vec::new(),
             stood_up: false,
+            exhaustion: 0,
+            death_successes: 0,
+            death_failures: 0,
+            stable: false,
+            first_hit_spent: false,
+            raising: Vec::new(),
+            escape: None,
+            anchors: vec![None; creature.lasting_auras.len()],
+            pos: creature.at.unwrap_or_default(),
+            span: crate::sim::arena::span(creature.size),
             dealt: 0,
             spent: 0,
         }
@@ -112,6 +124,23 @@ impl<'a> Fighter<'a> {
 
     /// Down but not dead: a player character at 0 hit points that healing
     /// can still bring back.
+    /// Its store of spell levels, if it has one: the pool, the highest slot
+    /// it pays for, and the most it holds. See
+    /// [`crate::creature::Rider::SpellStore`].
+    pub(super) fn spell_store(&self) -> Option<(usize, u32, u32)> {
+        self.creature.riders.iter().find_map(|r| match *r {
+            crate::creature::Rider::SpellStore { pool, up_to, holds } => Some((pool, up_to, holds)),
+            _ => None,
+        })
+    }
+
+    /// The pool a slot of this level can be paid from, if there is one with
+    /// enough in it.
+    fn stored(&self, level: u32) -> Option<usize> {
+        let (pool, up_to, _) = self.spell_store()?;
+        (level <= up_to && self.resources.get(pool).is_some_and(|&r| r >= level)).then_some(pool)
+    }
+
     pub(super) fn can_revive(&self) -> bool {
         !self.alive() && !self.dead && self.creature.player_character
     }
@@ -193,6 +222,34 @@ impl<'a> Fighter<'a> {
         }
     }
 
+    /// Can it pay everything `m` costs out of its pools - its own cost, and
+    /// any second one ([`crate::creature::Rider::AlsoCosts`])?
+    pub(super) fn affords(&self, m: &Move) -> bool {
+        // Two costs out of the one pool are one cost of both together.
+        let mut owed: Vec<Cost> = Vec::new();
+        let extra = m.all_riders().into_iter().filter_map(|r| match r {
+            crate::creature::Rider::AlsoCosts(cost) => Some(*cost),
+            _ => None,
+        });
+        for cost in m.cost.into_iter().chain(extra) {
+            match owed.iter_mut().find(|c| c.resource == cost.resource) {
+                Some(c) => c.amount += cost.amount,
+                None => owed.push(cost),
+            }
+        }
+        owed.into_iter().all(|cost| self.can_pay(Some(cost)))
+    }
+
+    /// Pay everything `m` costs out of its pools.
+    pub(super) fn charge(&mut self, m: &Move) {
+        self.pay(m.cost);
+        for rider in m.all_riders() {
+            if let crate::creature::Rider::AlsoCosts(cost) = rider {
+                self.pay(Some(*cost));
+            }
+        }
+    }
+
     pub(super) fn can_pay(&self, cost: Option<Cost>) -> bool {
         match cost {
             None => true,
@@ -227,7 +284,7 @@ impl<'a> Fighter<'a> {
             Some(lvl) => {
                 self.will_spend()
                     && !self.slot_spent_this_turn
-                    && self.spell_slots.available(lvl) > 0
+                    && (self.spell_slots.available(lvl) > 0 || self.stored(lvl).is_some())
             }
         }
     }
@@ -236,7 +293,15 @@ impl<'a> Fighter<'a> {
     /// resource cost. A no-op for a move with no slot cost.
     pub(super) fn cast_spell_slot(&mut self, level: Option<u32>) {
         if let Some(lvl) = level {
-            self.spell_slots.cast(lvl);
+            // Its own slot if it has one, and what it has stored if not.
+            match self.stored(lvl) {
+                Some(pool) if self.spell_slots.available(lvl) == 0 => {
+                    self.resources[pool] -= lvl;
+                }
+                _ => {
+                    self.spell_slots.cast(lvl);
+                }
+            }
             self.spent += 1;
             self.slot_spent_this_turn = true;
         }
@@ -272,7 +337,7 @@ impl<'a> Fighter<'a> {
     /// reactions left this round has one again. One per turn, however many
     /// the round allows.
     pub(super) fn offer_reaction(&mut self) {
-        if self.reactions_left > 0 {
+        if self.reactions_left > 0 && !self.has(Condition::no_reactions) {
             self.reaction = true;
         }
     }
@@ -280,6 +345,10 @@ impl<'a> Fighter<'a> {
     pub(super) fn add_condition(&mut self, condition: Condition, expiry: Expiry) {
         if !self.conditions.iter().any(|&(c, _)| c == condition) {
             self.conditions.push((condition, expiry));
+        }
+        // What takes its reactions takes the one it was holding, too.
+        if condition.no_reactions() {
+            self.reaction = false;
         }
     }
 }
@@ -328,7 +397,7 @@ pub(super) fn refresh(f: &mut Fighter<'_>, rng: &mut Rng) {
     f.once_per_turn_spent = false;
     f.once_per_turn_damage_spent = false;
     f.reactions_left = creature.reactions_per_round;
-    f.reaction = true;
+    f.reaction = !f.has(Condition::no_reactions);
     f.reactive_ac = None;
     f.slot_spent_this_turn = false;
 }

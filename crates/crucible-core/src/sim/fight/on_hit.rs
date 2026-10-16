@@ -4,7 +4,6 @@
 use crate::creature::Rider;
 use crate::prob::Rng;
 use crate::rules::{Ability, Condition, Duration};
-use crate::sim::fight::saves::saving_throw;
 use crate::sim::fight::{Cunning, Fight};
 
 impl<'a> Fight<'a> {
@@ -47,8 +46,11 @@ impl<'a> Fight<'a> {
                         self.fighters[me].once_per_turn_spent = true;
                     }
 
+                    let advantage = advantage
+                        || self.resists_magic(target)
+                        || self.fighters[target].creature.save_advantage(*ability, &[]);
                     let (saved, resisted) =
-                        saving_throw(&mut self.fighters, rng, target, *ability, *dc, advantage);
+                        self.saving_throw(rng, target, *ability, *dc, advantage);
                     if !saved {
                         for &(condition, duration) in &conditions {
                             self.land_condition(me, target, condition, duration, landed_conditions);
@@ -130,8 +132,7 @@ impl<'a> Fight<'a> {
         if conditions.is_empty() {
             return;
         }
-        let (saved, resisted) =
-            saving_throw(&mut self.fighters, rng, target, ability, dc, advantage);
+        let (saved, resisted) = self.saving_throw(rng, target, ability, dc, advantage);
         if !saved {
             self.land_condition(me, target, condition, duration, landed_conditions);
         }
@@ -179,8 +180,7 @@ impl<'a> Fight<'a> {
         if conditions.is_empty() {
             return;
         }
-        let (saved, resisted) =
-            saving_throw(&mut self.fighters, rng, target, ability, dc, advantage);
+        let (saved, resisted) = self.saving_throw(rng, target, ability, dc, advantage);
         if !saved {
             for (condition, duration) in &conditions {
                 self.land_condition(me, target, *condition, *duration, landed_conditions);

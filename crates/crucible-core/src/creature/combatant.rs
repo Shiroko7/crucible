@@ -1,6 +1,6 @@
 //! The Creature combatant model.
 
-use crate::creature::{Boon, Move, Reaction, Resource, Rider, Tactic};
+use crate::creature::{Boon, Light, Move, Reaction, Resource, Rider, Tactic};
 use crate::rules::{
     Ability, Condition, CreatureType, DamageKind, DamageRoll, Reduction, Size, SpellCastingProfile,
     SpellSlots,
@@ -107,6 +107,13 @@ pub struct Creature {
     pub difficult_terrain: bool,
     /// How a creature with a mouth moves on its turn.
     pub tactic: Tactic,
+    /// Walking speed in feet - what it can cover on the grid in a turn. Read
+    /// only in a fight that has one; see [`crate::sim::arena`].
+    pub speed: u32,
+    /// Where it starts on the grid, as the top-left square of its space.
+    /// A fight is played on a grid when every creature in it has one - see
+    /// [`crate::sim::arena::place`], which fills in whoever was left out.
+    pub at: Option<(i32, i32)>,
     /// Reliable Talent (2024 Rogue 7): a floor under a d20 roll for a check
     /// the creature is proficient in - `Some(10)` for the standard feature,
     /// `None` for a creature without it. Plain field rather than a
@@ -160,6 +167,8 @@ impl Creature {
             mouth: false,
             difficult_terrain: false,
             tactic: Tactic::default(),
+            speed: 30,
+            at: None,
             reliable_talent_floor: None,
             boons: Vec::new(),
             summons: Vec::new(),
@@ -256,6 +265,87 @@ impl Creature {
         self.riders
             .iter()
             .any(|r| matches!(r, Rider::ExtraDamageAppliesToSpellAttacks))
+    }
+
+    /// The light it stands in - the last [`Rider::Lit`] it was given, and
+    /// bright when it was given none.
+    pub fn light(&self) -> Light {
+        self.riders
+            .iter()
+            .rev()
+            .find_map(|r| match r {
+                Rider::Lit(light) => Some(*light),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// What a Stealth check has to beat to hide from it: what it says
+    /// ([`Rider::PassivePerception`]), or 10 and its Wisdom modifier when it
+    /// has a Wisdom score to read one off, or 10.
+    pub fn passive_perception(&self) -> i32 {
+        let wisdom = self.abilities[Ability::Wis.index()];
+        self.riders
+            .iter()
+            .rev()
+            .find_map(|r| match r {
+                Rider::PassivePerception(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(match wisdom > 0 {
+                true => 10 + (wisdom - 10).div_euclid(2),
+                false => 10,
+            })
+    }
+
+    /// Does its movement never provoke an opportunity attack?
+    pub fn never_provokes(&self) -> bool {
+        self.riders.contains(&Rider::NeverProvokes)
+    }
+
+    /// What each creature it walks through takes - see
+    /// [`Rider::PhaseThrough`].
+    pub fn phases_through(&self) -> Option<DamageRoll> {
+        self.riders.iter().find_map(|r| match r {
+            Rider::PhaseThrough { roll } => Some(*roll),
+            _ => None,
+        })
+    }
+
+    /// Does damage of `kind` it would take land on those around it instead,
+    /// and how far out - see [`Rider::MirrorDamage`]?
+    pub fn mirrors(&self, kind: DamageKind) -> Option<u32> {
+        self.riders.iter().find_map(|r| match r {
+            Rider::MirrorDamage { kinds, feet } if kinds.contains(&kind) => Some(*feet),
+            _ => None,
+        })
+    }
+
+    /// Does it make an `ability` save against something dealing `kinds`
+    /// with advantage - see [`Rider::SaveAdvantage`]?
+    pub fn save_advantage(&self, ability: Ability, kinds: &[DamageKind]) -> bool {
+        self.riders.iter().any(|r| match r {
+            Rider::SaveAdvantage {
+                ability: mine,
+                kinds: against,
+            } => {
+                *mine == ability
+                    && (against.is_empty() || against.iter().any(|k| kinds.contains(k)))
+            }
+            _ => false,
+        })
+    }
+
+    /// The types it resists from an attack that is not magical - see
+    /// [`Rider::ResistNonmagical`].
+    pub fn resists_nonmagical(&self) -> impl Iterator<Item = DamageKind> + '_ {
+        self.riders
+            .iter()
+            .filter_map(|r| match r {
+                Rider::ResistNonmagical { kinds } => Some(kinds.iter().copied()),
+                _ => None,
+            })
+            .flatten()
     }
 
     /// This creature's damage threshold, and whether a breach cracks it - see

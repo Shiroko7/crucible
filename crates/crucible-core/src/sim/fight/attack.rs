@@ -5,6 +5,7 @@
 
 use crate::creature::{Rider, Strike};
 use crate::rules::{Condition, DamageKind, DamageRoll, RollMode, Size};
+use crate::sim::arena::{self, SQUARE};
 use crate::sim::fight::{
     ActiveConcentration, ConcentrationEffect, Cunning, Expiry, ExtraPlan, Fight, Fighter,
 };
@@ -17,17 +18,61 @@ impl<'a> Fight<'a> {
     /// the instant they have been read into this roll's mode rather than
     /// waiting for a turn boundary the way every other condition's
     /// [`crate::sim::fight::Expiry`] does.
+    #[cfg(test)]
     pub(super) fn attack_mode_consuming(
         &mut self,
         base: RollMode,
         attacker: usize,
         target: usize,
     ) -> RollMode {
-        let mode = attack_mode(
+        self.attack_mode_consuming_at(base, attacker, target, Spot::default())
+    }
+
+    /// Where an attack of `kind` from `me` at `target` is being made from,
+    /// and what that does to it. Nothing, with nowhere to stand.
+    pub(super) fn spot(&self, me: usize, target: usize, kind: crate::creature::AttackKind) -> Spot {
+        if !self.on_grid() || self.has_mouth(me) || self.has_mouth(target) {
+            return Spot::default();
+        }
+        let side = self.fighters[me].side;
+        let far = !self.within(me, target, SQUARE);
+        if !kind.ranged {
+            return Spot {
+                far,
+                ..Spot::default()
+            };
+        }
+        // Somebody hostile, on its feet and able to act, within five feet.
+        let crowded = self.fighters.iter().enumerate().any(|(i, f)| {
+            f.side != side
+                && f.alive()
+                && !f.incapacitated()
+                && f.swallowed_by().is_none()
+                && self.feet_between(me, i) <= SQUARE
+        });
+        let long =
+            self.cast.get().long.is_some() && !self.within(me, target, self.normal_range(kind));
+        Spot {
+            hampered: crowded || long,
+            far,
+            cover: if self.screened(me, target) { 2 } else { 0 },
+        }
+    }
+
+    /// [`Fight::attack_mode_consuming`], made from `spot`.
+    pub(super) fn attack_mode_consuming_at(
+        &mut self,
+        base: RollMode,
+        attacker: usize,
+        target: usize,
+        spot: Spot,
+    ) -> RollMode {
+        let mode = attack_mode_at(
             base,
             &self.fighters[attacker],
             &self.fighters[target],
             false,
+            spot,
         );
         self.fighters[target]
             .conditions
@@ -51,6 +96,30 @@ impl<'a> Fight<'a> {
     /// Both halves are asked because either can end on its own: the
     /// concentration can break while the condition is cleared some other way,
     /// and nothing should pay out on half a mark.
+    /// The extra damage `riders` add against `target` for a condition it is
+    /// under - see [`Rider::BonusDamageVsCondition`].
+    pub(super) fn bonus_vs_condition<'r>(
+        &self,
+        riders: impl Iterator<Item = &'r Rider>,
+        target: usize,
+    ) -> Vec<DamageRoll> {
+        let victim = &self.fighters[target];
+        riders
+            .filter_map(|rider| match *rider {
+                Rider::BonusDamageVsCondition {
+                    dice_count,
+                    dice_sides,
+                    bonus,
+                    damage_kind,
+                    condition,
+                } if victim.has(|c| c == condition) => {
+                    Some(DamageRoll::new(dice_count, dice_sides, bonus, damage_kind))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(super) fn marks_quarry(&self, me: usize, target: usize) -> bool {
         let holding = matches!(
             &self.fighters[me].concentration,
@@ -109,6 +178,37 @@ impl<'a> Fight<'a> {
                     *damage_kind,
                 ));
             }
+        }
+
+        // The one blow it lands before anyone knows it is there.
+        if !attacker.first_hit_spent {
+            for rider in &creature.riders {
+                if let Rider::FirstHitDamage {
+                    dice_count,
+                    dice_sides,
+                    bonus,
+                    damage_kind,
+                } = *rider
+                {
+                    plan.rolls
+                        .push(DamageRoll::new(dice_count, dice_sides, bonus, damage_kind));
+                    plan.first_hit = true;
+                }
+            }
+        }
+
+        // Whatever the target is under that this creature, or this move,
+        // hits harder for.
+        plan.rolls
+            .extend(self.bonus_vs_condition(creature.riders.iter().chain(move_riders), target));
+
+        // What this move adds to a roll made with advantage.
+        if mode == RollMode::Advantage {
+            plan.rolls
+                .extend(move_riders.iter().filter_map(|rider| match rider {
+                    Rider::BonusDamageWithAdvantage { roll } => Some(*roll),
+                    _ => None,
+                }));
         }
 
         // A lasting boon this creature is holding - a form that makes its
@@ -291,23 +391,71 @@ pub(super) fn vexed_by(condition: Condition, expiry: Expiry, seat: usize) -> boo
     )
 }
 
-/// The 5e stacking rule: any advantage and any disadvantage cancel to a flat
-/// roll, however many of each there are. `steady` adds one more source of
-/// advantage - a policy asking what Steady Aim would be worth.
+/// What where an attack is made from does to it - see [`Fight::spot`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Spot {
+    /// A ranged attack with an enemy at its maker's elbow, or made past
+    /// its normal range: disadvantage.
+    pub hampered: bool,
+    /// Made from more than five feet off: a prone target is harder to hit
+    /// from there, not easier.
+    pub far: bool,
+    /// What a creature in the way adds to the target's Armor Class.
+    pub cover: i32,
+}
+
+/// [`attack_mode_at`] with nothing known about where anyone stands.
+#[cfg(test)]
 pub(super) fn attack_mode(
     base: RollMode,
     attacker: &Fighter<'_>,
     target: &Fighter<'_>,
     steady: bool,
 ) -> RollMode {
+    attack_mode_at(base, attacker, target, steady, Spot::default())
+}
+
+/// The 5e stacking rule: any advantage and any disadvantage cancel to a flat
+/// roll, however many of each there are. `steady` adds one more source of
+/// advantage - a policy asking what Steady Aim would be worth.
+pub(super) fn attack_mode_at(
+    base: RollMode,
+    attacker: &Fighter<'_>,
+    target: &Fighter<'_>,
+    steady: bool,
+    spot: Spot,
+) -> RollMode {
     let mut advantage = base == RollMode::Advantage || steady;
-    let mut disadvantage = base == RollMode::Disadvantage;
+    let mut disadvantage = base == RollMode::Disadvantage || spot.hampered;
     for &(c, expiry) in &target.conditions {
+        // On the ground it is an easy mark for whoever stands over it, and
+        // a hard one for anybody further off.
+        if c == Condition::Prone && spot.far {
+            disadvantage = true;
+            continue;
+        }
         advantage |= c.advantage_to_attackers();
         // Vex: advantage for the one attacker that landed it, nobody else.
         advantage |= vexed_by(c, expiry, attacker.seat);
         disadvantage |= c.disadvantage_to_attackers();
     }
+    // What this attacker has the measure of - see `Rider::AdvantageAgainst`.
+    advantage |= attacker.creature.riders.iter().any(
+        |r| matches!(r, Rider::AdvantageAgainst { condition } if target.has(|c| c == *condition)),
+    );
+    // Unseen, unless whoever is on the other end of the roll sees it anyway.
+    let unseen = |hidden: &Fighter<'_>, by: &Fighter<'_>| {
+        let feet = arena::gap(hidden.pos, hidden.span, by.pos, by.span).max(0) as u32 * SQUARE;
+        hidden.has(|c| c == Condition::Hidden)
+            || hidden.has(|c| c == Condition::Invisible)
+                && !by
+                    .creature
+                    .riders
+                    .iter()
+                    .any(|r| matches!(r, Rider::Truesight { feet: sight } if feet <= *sight))
+    };
+    advantage |= unseen(attacker, target);
+    disadvantage |= unseen(target, attacker);
     for &(c, _) in &attacker.conditions {
         disadvantage |= c.disadvantage_on_attacks();
         // Steady Aim: see `Condition::advantage_on_attacks`.

@@ -213,6 +213,7 @@ mod tests {
             Budget {
                 rollouts: 4,
                 depth: 2,
+                field: None,
             },
             &mut log,
         );

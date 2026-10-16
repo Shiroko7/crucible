@@ -81,6 +81,60 @@
 //!             | on hit save str dc 17 prone and pushed until victim
 //! action: Gush | recharge 5 | reach front | save con dc 17 | 8d8 cold | on fail pushed
 //! legendary: Chill | reach near | save con dc 17 | 4d6 cold | on fail slowed for 1 round
+//! trait: magic resistance
+//! trait: advantage against frightened
+//! trait: bonus 1d8 necrotic vs quarry
+//! trait: redirect attacks wis dc 20
+//! bonus: Mark | targets 1 | save wis dc 18 | on fail quarry for 1 minute
+//!             | on fail unhealable for 1 minute
+//! action: Bloom | save wis dc 18 | 5d10 psychic | on fail reeling until victim end
+//! legendary: Whisper | targets 1 | save wis dc 18 | on fail frightened until victim end
+//!                    | bonus 3d8 psychic vs quarry
+//! reaction: Unravel | when enemy casts | spell | slot 3 | save con dc 18
+//! reaction: Drink | when targeted by a spell | item | counter
+//! reaction: Rebuke | when damaged | save dex dc 15 | 3d10 fire | half on success
+//! trait: reflect psychic
+//! trait: truesight 30
+//! trait: refuses healing
+//! trait: first hit 2d6 necrotic
+//! resource: rod 10
+//! trait: spell store rod up to 5 holds 50
+//! action: Unmake | spell | uses 1 | save con dc 18 | 7d8+30 necrotic | half on success
+//!                | on kill raise Zombie
+//! action: Prison | concentration | targets 1 | save int dc 18
+//!                | on fail restrained for 1 minute | escape 10d10 psychic
+//! action: Static | save int dc 18 | 8d6 psychic | on fail muddled until save
+//! action: Hold | targets 1 | worth 30 | save wis dc 18 | on fail paralyzed until save
+//! action: Vanish | spell | concentration | stance invisible
+//! legendary: Step | teleport 30
+//! trait: resist nonmagical bludgeoning, piercing, slashing
+//! trait: magic weapons
+//! trait: advantage on initiative
+//! trait: passive perception 15
+//! trait: in dim light
+//! trait: no opportunity attacks
+//! trait: phase through 1d10 psychic
+//! trait: mirror psychic 10
+//! trait: swap when hit 60 gnoll
+//! action: Claws | strikes 2 | hit +7 | 1d8+4 slashing | bonus 2d6 psychic with advantage
+//! action: Slams | range 10 | strikes 2 | hit +9 | 2d8+5 bludgeoning
+//!               | all hit 2d8 psychic save con dc 17 stunned until victim end
+//! action: Reap | recharge 5 | range 10 | strikes each | hit +9 | 2d8+5 bludgeoning
+//!              | on hit save dex dc 17 prone until victim
+//! action: Rush | recharge 5 | strikes 6 | hit +7 | 1d8+4 slashing | no opportunity attacks
+//! action: Fold | recharge 6 | range 30 | save wis dc 19 | on fail thrown 60
+//!              | blast 10 6d12 psychic | on success 3d12 psychic
+//! action: Sword | hit +9 | 1d8+5 slashing | magical
+//! bonus: Fade | in dim light | hide +7
+//! trait: advantage on dex saves against lightning
+//! action: Arc | cost essence 2 | range 120 | targets 1 | save dex dc 17 | 3d8 lightning
+//!             | half on success | chains 30
+//! action: Ride | range 60 | line 60 | save dex dc 17 | 4d6 lightning | half on success
+//! action: Arrow | spell | weapon dagger | ranged | range 20 | takes bonus action | hit +6
+//!               | 4d8 lightning | half on miss
+//!               && area 10 | spares target | save dex dc 17 | 2d8 lightning | half on success
+//! action: Grasp | spell | hit +9 | 3d8 lightning | on hit shocked until victim
+//! action: Wrath | cost essence 3 | also cost charges 1 | save con dc 17 | 5d6 thunder
 //! ```
 //!
 //! `&&` joins a move out of several effects, for a Multiattack that is not all
@@ -108,6 +162,131 @@
 //! [lifetime]`, with no `save`, lands one with nothing to resist it - what a
 //! weapon mastery like Vex does (`on hit vexed until end`: advantage on that
 //! attacker's own next roll against the target).
+//!
+//! Three more conditions a save or a hit can land: `unhealable` (it cannot
+//! regain hit points or gain temporary ones), `reeling` (its speed is 0 and
+//! it cannot take reactions) and `addled` (it cannot cast a spell or use a
+//! magic item). `until victim end` lasts through the end of the victim's
+//! next turn, where `until victim` ends at the start of it. A save aimed at
+//! `targets 1` is made by whoever the move was aimed at.
+//!
+//! A creature that turns its enemies' strength on them: `magic resistance`
+//! is advantage on saves against anything tagged `spell` or `item`;
+//! `advantage against <condition>` is advantage on its own attack rolls
+//! against anything under that condition; `bonus NdM <type> vs <condition>`
+//! is extra damage against such a target - as a trait on every hit, as a
+//! clause on a move joining that move's damage; and `redirect attacks <ability>
+//! dc N` makes the first creature to attack it each turn save or land that
+//! attack, and its others that turn, on one of its own side in reach. A
+//! reaction `when enemy casts` stops a spell as it is cast - a save in it is
+//! the caster's, to keep the spell, and `counter` stops it with no save -
+//! and `when targeted by a spell` answers only one aimed at this creature
+//! alone. One that costs a slot or a charge is kept for a spell that cost
+//! its caster a slot. A stopped spell costs its caster the action, not the
+//! slot.
+//!
+//! What else a failed save or a hit can leave behind: `exhaustion` is a
+//! level of it each time it lands - 2 off every attack roll and save and 5
+//! feet off its speed a level, and dead at the sixth; `doomed` is
+//! disadvantage on death saving throws; `muddled` is 1d6 off every attack
+//! roll and off saves to keep concentrating; `sapped` is 1d4 off the next
+//! save, which uses it up; `fleeing` spends the victim's reaction, if it has
+//! one, running its speed away; and `invisible`, as a `stance` on the user,
+//! is disadvantage to attack it and advantage on its own attacks, until it
+//! attacks, casts, or loses the concentration holding it. On a grid `pushed`
+//! and `pulled` move their victim ten feet away from, or toward, whoever did
+//! it. A player character that is down makes death saving throws.
+//!
+//! More of a creature's own: `reflect <types>` throws damage of those types
+//! back at whoever dealt it; `truesight N` sees the invisible within N feet;
+//! `refuses healing` is healed by nobody but itself; `first hit NdM <type>`
+//! is extra damage on its first hit of the fight; and `spell store <pool> up
+//! to N holds M` keeps spell levels in a resource pool, which pay for slots
+//! up to level N it has run out of and are fed by the level of any spell it
+//! stops with `counter`. A reaction `when damaged` answers damage dealt by
+//! any means. On a move, `one at a time` lifts what it lands from whoever
+//! else was under it; `escape NdM <type>` lets whoever it holds break out
+//! at the start of its turn by taking that, ending the concentration;
+//! `on kill raise <name>` raises a humanoid it kills outright as one of the
+//! creature's `minions` (stat blocks of their own, under `[[monster.minions]]`
+//! in a file), which then takes turns; `teleport N` puts its user up to N
+//! feet away from where its enemies are; and `worth N` tells whatever ranks
+//! moves by damage what this one is worth besides, in hit points of damage -
+//! how a creature is played rather than a rule, and the only way one that
+//! deals no damage gets chosen.
+//!
+//! Creatures that are not quite where they seem: `resist nonmagical <types>`
+//! resists those types from an attack that is not magical - a spell attack
+//! is, and so is a move tagged `spell` or `item`, a move with the clause
+//! `magical`, a swing a boon is riding, and anything from a creature with
+//! the trait `magic weapons`; damage that was never an attack roll is not
+//! resisted at all. `advantage on initiative` rolls two dice for its place
+//! in the order. `no opportunity attacks` as a trait means its movement
+//! never provokes one; as a clause on a move, the turn that move is taken
+//! its user covers its speed a second time and provokes nothing - "it can
+//! move up to its speed without provoking opportunity attacks". `phase
+//! through NdM <type>` walks through other creatures, each one it passes
+//! through taking that once a turn. `mirror <types> N` takes no damage of
+//! those types: every creature within N feet of it takes it instead,
+//! whichever side it is on. `swap when hit N <words>` is a reaction: hit by
+//! an attack roll, it changes places with one of its own side within N feet
+//! whose name has those words in it, and that one is hit instead. On a
+//! move, `bonus NdM <type> with advantage` is extra damage on a hit whose
+//! attack roll had advantage; `all hit NdM <type> [save <ability> dc N
+//! <condition> [lifetime]]` is what every strike of the move landing on one
+//! creature adds; and `strikes each` makes one strike at each creature in
+//! the move's `range`, the user's own side included. `on fail thrown N`
+//! turns a save into one creature's (the one aimed at): failing, it is put
+//! down somewhere else within N feet and everything within the `blast R NdM
+//! <type>` radius of where it stood takes that - itself too, unless it is
+//! `thrown N away`, clear of it - and saving, it takes `on success NdM
+//! <type>` and stays. `hide +N` is a Stealth check against the best passive
+//! Perception among its user's enemies (`passive perception N`, or 10 and
+//! its Wisdom modifier): on a success it is `hidden` - advantage on its
+//! attacks and disadvantage to attack it - until its first attack roll, hit
+//! or miss. The clause `in dim light` allows a move only while its user
+//! stands in dim light or darkness, which is the trait `in dim light` or
+//! `in darkness`; a creature that says nothing stands in bright light, and
+//! the last light said holds, so a scenario can add `trait: in bright
+//! light` under a `source:` line.
+//!
+//! A storm thrown by hand: on a save aimed at one creature, `chains N`
+//! passes it from each creature that fails to the nearest enemy within N
+//! feet of it that it has not reached, until one saves. `line N` makes the
+//! user the area - the straight line of N feet that crosses the most
+//! enemies and the fewest of its own side, everyone on it saving, and the
+//! user reappearing at its far end. On an attack, `half on miss` still
+//! lands half its damage. On a save around a target (`area N`), `spares
+//! target` leaves the target itself out - the burst that follows a blow.
+//! `takes bonus action` on an action uses up the bonus action too, for a
+//! spell that is a bonus action and the attack it rides. `also cost <pool>
+//! N` is a second pool beside `cost`, and a move needs both. `on hit
+//! shocked` leaves a target unable to make opportunity attacks. The trait
+//! `advantage on <ability> saves [against <types>]` is advantage on that
+//! save - against damage of those types, or always. An aura raised with
+//! the `lasting_aura` feature can carry `placed N`: it is put down around
+//! whoever it is aimed at, up to N feet away, and stays there - reaching
+//! `range` feet from that spot, catching what starts a turn inside it
+//! rather than what walks in, and pulling toward its middle; with
+//! `difficult terrain`, whoever starts a turn in it covers half its speed.
+//!
+//! Where a creature stands to do it: a `heal` reaches as far as its move's
+//! `range` says and a touch - five feet - when it says nothing, so its user
+//! walks to whoever it means to heal first; and the trait `fights up close`
+//! makes a creature walk up to its target every turn, even to cast from
+//! there, where anything else aiming from range keeps its distance.
+//!
+//! What nobody has to write down. On a grid, a ranged attack is at
+//! disadvantage with an enemy that can act within five feet of its maker,
+//! and beyond its `range` out to its `long N` if it has one; a prone target
+//! is hit with advantage from within five feet and at disadvantage from
+//! further off; and a creature standing between a ranged attacker and its
+//! target is half cover, +2 to the target's Armor Class. `on fail grappled`
+//! leaves a creature's speed 0 until it breaks free. Every creature loaded
+//! from a file can also Dodge, Disengage, Help, Shove (a Strength save
+//! against 8 + its Strength modifier + its proficiency bonus, or prone) and
+//! Grapple (the same save, or grappled until it is made again at the end
+//! of a turn) without any of them being in its file.
 //!
 //! A shell and a gullet: `damage threshold N` ignores any single instance of
 //! damage below N, and a weak spot skips it - reached from inside, or by an
@@ -138,6 +317,14 @@
 //! by (`only undead`) and a shove gated on size (`push on lightning up to
 //! large`) read.
 //!
+//! On a grid (see [`crate::sim::arena`]) a creature covers `speed:` feet a
+//! turn - 30 unless it says - and starts on the square `at: x, y` names, or
+//! wherever its side lines up when it names none. A move reaches `range N`
+//! feet: 5 for a melee attack and 60 for anything else unless it says, so a
+//! longbow is `ranged | range 150` and a ten-foot reach is `range 10`.
+//! `area N` is an area's radius around whoever it is aimed at; without it an
+//! area catches every enemy in range.
+//!
 //! Some mechanisms are only reachable through a feature plugin, because they
 //! need more than a phrase: a mark maintained by concentration that a rider
 //! pays out against (`hunters_mark`), a lasting boon a creature puts on
@@ -157,6 +344,7 @@ use crate::creature::{Creature, Resource, Tactic};
 use crate::dsl::grammar::{count, number, parse_move, parse_reaction, parse_trait};
 use crate::rules::{Ability, Condition, CreatureType, DamageKind, Reduction, Size};
 use std::fmt;
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -177,6 +365,12 @@ impl std::error::Error for ParseError {}
 /// A line ending in `|` or `&&` continues onto the next, so a monk's action can
 /// be written over several lines without becoming unreadable.
 pub fn parse(text: &str) -> Result<Vec<Creature>, ParseError> {
+    parse_under(text, Path::new(""))
+}
+
+/// [`parse`], with every `source:` line read relative to `root` rather than
+/// to wherever the process happens to be standing.
+pub fn parse_under(text: &str, root: &Path) -> Result<Vec<Creature>, ParseError> {
     let mut creatures: Vec<Creature> = Vec::new();
     let mut pending_team: Option<u8> = None;
 
@@ -208,8 +402,9 @@ pub fn parse(text: &str) -> Result<Vec<Creature>, ParseError> {
 
         if key == "source" || key == "import" || key == "file" {
             let registry = crate::features::FeatureRegistry::new();
-            let mut creature = crate::dsl::config::load_creature_from_file(&value, &registry)
-                .map_err(|e| fail(format!("failed to load creature from '{value}': {e}")))?;
+            let mut creature =
+                crate::dsl::config::load_creature_from_file(root.join(&value), &registry)
+                    .map_err(|e| fail(format!("failed to load creature from '{value}': {e}")))?;
             if let Some(team) = pending_team.take() {
                 creature.team = team;
             }
@@ -328,6 +523,15 @@ pub fn parse(text: &str) -> Result<Vec<Creature>, ParseError> {
             "reaction" => {
                 let r = parse_reaction(&value, current).map_err(fail)?;
                 current.reactions.push(r);
+            }
+            // Feet a turn on the grid, and the square it starts on.
+            "speed" => current.speed = count(&value).map_err(fail)?,
+            "at" => {
+                let cell: Vec<&str> = value.split(',').map(str::trim).collect();
+                let [x, y] = cell[..] else {
+                    return Err(fail(format!("expected `at: 4, 7`, got `{value}`")));
+                };
+                current.at = Some((number(x).map_err(fail)?, number(y).map_err(fail)?));
             }
             "tactic" => {
                 current.tactic = Tactic::parse(&value).ok_or_else(|| {
@@ -522,16 +726,16 @@ action: Greatclub | strikes 1 | hit +6 | 2d8+4 bludgeoning
     fn scenarios_can_reference_external_config_sources() {
         let text = "
 team: a
-source: content/characters/gio.toml
+source: content/characters/cleric.toml
 
 team: b
-source: content/monsters/adult-red-dragon.toml
+source: content/monsters/brute.toml
 ";
         let combatants = parse(text).expect("parses external config sources");
         assert_eq!(combatants.len(), 2);
-        assert_eq!(combatants[0].name, "Gio");
+        assert_eq!(combatants[0].name, "Cleric");
         assert_eq!(combatants[0].team, 0);
-        assert_eq!(combatants[1].name, "Adult Red Dragon");
+        assert_eq!(combatants[1].name, "Brute");
         assert_eq!(combatants[1].team, 1);
     }
 }

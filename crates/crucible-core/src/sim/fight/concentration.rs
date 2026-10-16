@@ -4,7 +4,6 @@
 
 use crate::prob::Rng;
 use crate::rules::Ability;
-use crate::sim::fight::saves::saving_throw;
 use crate::sim::fight::{ConcentrationEffect, Fight};
 
 /// DC for the Constitution save concentration takes when its holder takes
@@ -14,6 +13,10 @@ use crate::sim::fight::{ConcentrationEffect, Fight};
 fn concentration_dc(damage: i32) -> i32 {
     (damage / 2).max(10)
 }
+
+/// What a muddled mind takes off a save to keep concentrating.
+const MUDDLED_SAVE: crate::rules::SaveModifier =
+    crate::rules::SaveModifier::PenaltyDice { count: 1, sides: 6 };
 
 impl<'a> Fight<'a> {
     /// The Constitution save concentration takes when its holder is
@@ -25,8 +28,18 @@ impl<'a> Fight<'a> {
             return;
         }
         let dc = concentration_dc(damage);
-        let (saved, _resisted) =
-            saving_throw(&mut self.fighters, rng, who, Ability::Con, dc, false);
+        // A muddled mind holds a spell worse: 1d6 off this save alone.
+        let muddled = self.fighters[who].has(|c| c == crate::rules::Condition::Muddled);
+        if muddled {
+            self.fighters[who].save_modifiers.push(MUDDLED_SAVE);
+        }
+        let (saved, _resisted) = self.saving_throw(rng, who, Ability::Con, dc, false);
+        if muddled {
+            let modifiers = &mut self.fighters[who].save_modifiers;
+            if let Some(at) = modifiers.iter().rposition(|&m| m == MUDDLED_SAVE) {
+                modifiers.remove(at);
+            }
+        }
         if !saved {
             self.end_concentration(who);
         }
@@ -127,7 +140,14 @@ mod tests {
             Budget::default(),
             &mut log,
         );
-        fight.take_turn(1, 0, &mut rng, &mut log, None);
+        // Told to do both: nothing would choose to, since the second ends
+        // the first.
+        let both = crate::sim::Plan {
+            action: Some(0),
+            bonus: Some(0),
+            zone: None,
+        };
+        fight.take_turn(1, 0, &mut rng, &mut log, Some(both));
 
         assert!(
             !fight.fighters[1].has(|c| c == Condition::Prone),
@@ -657,7 +677,13 @@ mod tests {
             },
         });
 
-        fight.take_turn(1, 0, &mut rng, &mut log, None);
+        // Told to: nothing would choose to drop what it holds for it.
+        let bless = crate::sim::Plan {
+            action: Some(0),
+            bonus: None,
+            zone: None,
+        };
+        fight.take_turn(1, 0, &mut rng, &mut log, Some(bless));
 
         assert!(
             !fight.fighters[1].has(|c| c == Condition::Poisoned),
@@ -751,8 +777,14 @@ mod tests {
         let n = 100_000;
         let mut successes = 0usize;
         for _ in 0..n {
-            let (saved, _) =
-                saving_throw(&mut fight.fighters, &mut rng, 0, Ability::Con, dc, false);
+            let (saved, _) = crate::sim::fight::saves::saving_throw(
+                &mut fight.fighters,
+                &mut rng,
+                0,
+                Ability::Con,
+                dc,
+                false,
+            );
             if saved {
                 successes += 1;
             }

@@ -222,10 +222,22 @@ fn primordial_family_cultivator_loads_and_simulates() {
     }
 
     // Verify traits: push on lightning, reduce physical, ignore resistance fire/lightning, downgrade fire immunity
-    assert!(pc.riders.iter().any(|r| matches!(r, Rider::PushOnDamage { .. })));
-    assert!(pc.riders.iter().any(|r| matches!(r, Rider::ReduceDamage { .. })));
-    assert!(pc.riders.iter().any(|r| r.ignores_damage_resistance(DamageKind::Fire)));
-    assert!(pc.riders.iter().any(|r| r.ignores_damage_resistance(DamageKind::Lightning)));
+    assert!(pc
+        .riders
+        .iter()
+        .any(|r| matches!(r, Rider::PushOnDamage { .. })));
+    assert!(pc
+        .riders
+        .iter()
+        .any(|r| matches!(r, Rider::ReduceDamage { .. })));
+    assert!(pc
+        .riders
+        .iter()
+        .any(|r| r.ignores_damage_resistance(DamageKind::Fire)));
+    assert!(pc
+        .riders
+        .iter()
+        .any(|r| r.ignores_damage_resistance(DamageKind::Lightning)));
 
     // Simulate combat against an enemy striker
     let enemy_dsl = "creature: Fire Elemental\nhp: 70\nac: 13\nresist: fire\naction: Slam | strikes 2 | hit +6 | 2d6+3 bludgeoning\n";
@@ -244,28 +256,41 @@ fn primordial_family_cultivator_loads_and_simulates() {
     );
 
     assert!(outcome.rounds >= 1);
-    assert!(outcome.damage_dealt[0] > 0, "Primordial cultivator deals damage");
+    assert!(
+        outcome.damage_dealt[0] > 0,
+        "Primordial cultivator deals damage"
+    );
 }
 
 #[test]
 fn divine_family_cultivator_multi_damage_and_quarry_compose() {
     let registry = FeatureRegistry::new();
-    let mut pc = load_creature_from_str(DIVINE_CULTIVATOR, &registry)
-        .expect("valid divine cultivator");
+    let mut pc =
+        load_creature_from_str(DIVINE_CULTIVATOR, &registry).expect("valid divine cultivator");
     pc.team = 0;
 
     let pool_idx = pc.resource_index("divine").expect("divine pool");
     assert_eq!(pc.resources[pool_idx].max, 10);
 
     // Verify multi-type damage parsing in Moonlit Verdant Beam (radiant + poison)
-    let beam = pc.actions.iter().find(|a| a.name == "Moonlit Verdant Beam").expect("beam action");
-    let Effect::Strikes { strike, .. } = &beam.effect else { panic!("expected strike") };
+    let beam = pc
+        .actions
+        .iter()
+        .find(|a| a.name == "Moonlit Verdant Beam")
+        .expect("beam action");
+    let Effect::Strikes { strike, .. } = &beam.effect else {
+        panic!("expected strike")
+    };
     assert_eq!(strike.damage.len(), 2);
     assert_eq!(strike.damage[0].kind, DamageKind::Radiant);
     assert_eq!(strike.damage[1].kind, DamageKind::Poison);
 
     // Verify Netherdark Fist force strike with cost
-    let fist = pc.actions.iter().find(|a| a.name == "Netherdark Fist").expect("netherdark action");
+    let fist = pc
+        .actions
+        .iter()
+        .find(|a| a.name == "Netherdark Fist")
+        .expect("netherdark action");
     assert_eq!(fist.cost.as_ref().map(|c| c.amount), Some(3));
 
     // Verify reactions and retaliation
@@ -293,31 +318,51 @@ fn divine_family_cultivator_multi_damage_and_quarry_compose() {
 #[test]
 fn immortal_family_cultivator_heart_martial_and_mysteries_simulate() {
     let registry = FeatureRegistry::new();
-    let mut pc = load_creature_from_str(IMMORTAL_CULTIVATOR, &registry)
-        .expect("valid immortal cultivator");
+    let mut pc =
+        load_creature_from_str(IMMORTAL_CULTIVATOR, &registry).expect("valid immortal cultivator");
     pc.team = 0;
 
     let pool_idx = pc.resource_index("immortal").expect("immortal pool");
     assert_eq!(pc.resources[pool_idx].max, 12);
 
     // Verify Stone Fist unarmed multiattack
-    let stone_fist = pc.actions.iter().find(|a| a.name == "Stone Fist").expect("stone fist");
-    let Effect::Strikes { strike, count } = &stone_fist.effect else { panic!("expected strikes") };
+    let stone_fist = pc
+        .actions
+        .iter()
+        .find(|a| a.name == "Stone Fist")
+        .expect("stone fist");
+    let Effect::Strikes { strike, count } = &stone_fist.effect else {
+        panic!("expected strikes")
+    };
     assert_eq!(*count, 2);
     assert_eq!(strike.damage[0].sides, 8); // 1d8 Stone Fist III
     assert_eq!(strike.damage[0].kind, DamageKind::Bludgeoning);
 
     // Verify Radiant Vein Blade strikes dealing weapon slashing + radiant
-    let blade = pc.actions.iter().find(|a| a.name == "Radiant Vein Blade").expect("radiant blade");
+    let blade = pc
+        .actions
+        .iter()
+        .find(|a| a.name == "Radiant Vein Blade")
+        .expect("radiant blade");
     assert_eq!(blade.cost.as_ref().map(|c| c.amount), Some(1));
-    let Effect::Strikes { strike: blade_strike, count: blade_count } = &blade.effect else { panic!("strikes") };
+    let Effect::Strikes {
+        strike: blade_strike,
+        count: blade_count,
+    } = &blade.effect
+    else {
+        panic!("strikes")
+    };
     assert_eq!(*blade_count, 2);
     assert_eq!(blade_strike.damage.len(), 2);
     assert_eq!(blade_strike.damage[0].kind, DamageKind::Slashing);
     assert_eq!(blade_strike.damage[1].kind, DamageKind::Radiant);
 
     // Verify Supreme Heart-Reflection Sword autohit counter with immortal cost
-    let counter = pc.reactions.iter().find(|r| r.action.name == "Supreme Heart-Reflection Sword").expect("sword counter");
+    let counter = pc
+        .reactions
+        .iter()
+        .find(|r| r.action.name == "Supreme Heart-Reflection Sword")
+        .expect("sword counter");
     assert_eq!(counter.action.cost.as_ref().map(|c| c.amount), Some(4));
     match &counter.action.effect {
         Effect::AutoHit { damage } => {
@@ -328,9 +373,15 @@ fn immortal_family_cultivator_heart_martial_and_mysteries_simulate() {
     }
 
     // Verify Fishing the Moon from the Well grandmaster technique
-    let fish = pc.actions.iter().find(|a| a.name == "Fishing the Moon from the Well").expect("moon fishing");
+    let fish = pc
+        .actions
+        .iter()
+        .find(|a| a.name == "Fishing the Moon from the Well")
+        .expect("moon fishing");
     assert_eq!(fish.cost.as_ref().map(|c| c.amount), Some(5));
-    let Effect::Save(save) = &fish.effect else { panic!("expected save") };
+    let Effect::Save(save) = &fish.effect else {
+        panic!("expected save")
+    };
     assert_eq!(save.damage[0].kind, DamageKind::Force);
 
     // Simulate in combat
@@ -478,7 +529,10 @@ fn alchemy_caustic_bomb_boon_and_apex_toxinator_simulate() {
     );
 
     assert!(outcome.rounds >= 1);
-    assert!(outcome.damage_dealt[0] > 0, "Alchemist and Snake Horror dealt damage");
+    assert!(
+        outcome.damage_dealt[0] > 0,
+        "Alchemist and Snake Horror dealt damage"
+    );
 }
 
 const THALASSIOS_STORM: &str = r#"
@@ -529,7 +583,8 @@ attacks = ["Slam | strikes 1 | hit +6 | 1d8+3 bludgeoning, 1d8 cold"]
 #[test]
 fn water_clone_and_lightning_overload_spend_shared_primordial_pool() {
     let registry = FeatureRegistry::new();
-    let mut pc = load_creature_from_str(THALASSIOS_STORM, &registry).expect("valid thalassios storm");
+    let mut pc =
+        load_creature_from_str(THALASSIOS_STORM, &registry).expect("valid thalassios storm");
     pc.team = 0;
 
     let pool_idx = pc.resource_index("primordial").expect("primordial pool");
@@ -553,4 +608,3 @@ fn water_clone_and_lightning_overload_spend_shared_primordial_pool() {
     assert!(outcome.rounds >= 1);
     assert!(outcome.damage_dealt[0] > 0);
 }
-

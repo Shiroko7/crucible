@@ -51,6 +51,11 @@ impl FeaturePlugin for LastingAuraPlugin {
             &builder.creature,
         )
         .map_err(FeatureError::InvalidConfiguration)?;
+        // One that is put down at a distance is raised from that distance.
+        let placed = aura.riders.iter().find_map(|r| match r {
+            crate::creature::Rider::Anchored { feet } => Some(*feet),
+            _ => None,
+        });
         let which = builder.creature.add_lasting_aura(aura);
         if u8::try_from(which).is_err() {
             return Err(FeatureError::InvalidConfiguration(
@@ -67,6 +72,7 @@ impl FeaturePlugin for LastingAuraPlugin {
         )
         .with_uses(self.uses)
         .with_kind(self.kind);
+        raise.range = placed;
         if self.concentration {
             raise = raise.with_concentration();
         }

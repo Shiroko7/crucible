@@ -55,6 +55,16 @@ pub fn parse_duration(
     match words.get(at).map(|w| w.to_ascii_lowercase()) {
         Some(w) if w == "until" => {
             let who = arg(words, at + 1, clause)?.to_ascii_lowercase();
+            // `until victim end`: the end of the victim's next turn, where
+            // `until victim` alone is the start of it.
+            let theirs = matches!(who.as_str(), "victim" | "theirs" | "their");
+            if theirs
+                && words
+                    .get(at + 2)
+                    .is_some_and(|w| w.eq_ignore_ascii_case("end"))
+            {
+                return Ok((DurationSpec::Fixed(Duration::VictimNextTurnEnd), 3));
+            }
             let spec = match who.as_str() {
                 "victim" | "theirs" | "their" => DurationSpec::Fixed(Duration::VictimTurn),
                 "applier" | "mine" | "my" => DurationSpec::Fixed(Duration::ApplierTurn),

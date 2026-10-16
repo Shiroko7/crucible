@@ -294,7 +294,7 @@ mod tests {
                 fight.swallow(1, 0, Size::Huge);
             }
             let mode = attack_mode(strike.mode, &fight.fighters[0], &fight.fighters[1], false);
-            let (exact, weak) = fight.aimed_hit(0, 1, strike, mode, false, &[]);
+            let (exact, weak) = fight.aimed_hit(0, 1, strike, mode, false, &[], &[]);
             assert_eq!(weak, inside);
 
             let n = 40_000;
@@ -328,7 +328,7 @@ mod tests {
         let big = slash(10, DamageRoll::new(0, 1, 60, DamageKind::Slashing));
         let aim = |m: &Move| {
             fight
-                .aimed_hit(0, 1, strike_of(m), RollMode::Normal, false, &[])
+                .aimed_hit(0, 1, strike_of(m), RollMode::Normal, false, &[], &[])
                 .1
         };
         assert!(aim(&small), "a small hit goes through the crack");

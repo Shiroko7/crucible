@@ -40,7 +40,9 @@ pub(super) fn saving_throw(
     // needed here for that being "the same creature".
     let mode = save_mode(f, ability, advantage);
     let bonus = sample_save_modifier_bonus(rng, &f.save_modifiers);
-    let rolled = !auto_fail && mode.roll(rng) + f.creature.save(ability) + bonus >= dc;
+    // Exhaustion comes off every d20 test, two a level.
+    let tired = 2 * i32::from(f.exhaustion);
+    let rolled = !auto_fail && mode.roll(rng) + f.creature.save(ability) + bonus - tired >= dc;
     if rolled {
         return (true, false);
     }

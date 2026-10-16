@@ -132,9 +132,11 @@ pub enum Condition {
     /// nothing here inflicts it yet, and a stat block that is immune to it
     /// needs only the name.
     Petrified,
-    /// Exhaustion, whose levels take a penalty off every d20 test. Levels are
-    /// not modelled - nothing here inflicts any - so this is the name a stat
-    /// block's condition immunities need, and nothing more.
+    /// Exhaustion, in levels: each one takes 2 off every attack roll and
+    /// saving throw its holder makes and 5 feet off its speed, and the sixth
+    /// kills. Landing it again is another level rather than nothing - the
+    /// count is the fight's to keep (`sim::fight`), and it does not wear off
+    /// before the fight is over.
     Exhaustion,
     /// Dragged toward whoever applied it - a whirlpool's pull, a tentacle
     /// reeling a creature in. On its own it does nothing: around a creature
@@ -220,6 +222,48 @@ pub enum Condition {
     /// a creature with a mouth, where it is read as being unable to move
     /// between zones - see [`Condition::zeroes_speed`].
     Restrained,
+    /// Can't regain hit points or gain temporary ones: a wound that will not
+    /// close, a mark that death has already claimed its bearer. Healing aimed
+    /// at it is spent for nothing, and one that has dropped stays down.
+    Unhealable,
+    /// Rooted where it stands and too rattled to answer anything: its speed
+    /// is 0 and it can't take reactions. It still takes its turn - what it
+    /// loses is the walk and the riposte.
+    Reeling,
+    /// Its mind is too far gone to shape a spell or work a magic item
+    /// ([`Condition::blocks_magic`]) - and nothing else: it still swings
+    /// whatever is in its hand. [`Condition::Suppressed`] without the
+    /// burdened saves and the halved damage.
+    Addled,
+    /// Its thoughts will not hold together: it takes 1d6 off every attack
+    /// roll it makes, and off the saves it makes to keep concentrating.
+    Muddled,
+    /// A splinter left in its mind: 1d4 off the next saving throw it makes,
+    /// which uses it up.
+    Sapped,
+    /// Death has its hand on it: a death saving throw it makes is rolled at
+    /// disadvantage. Nothing else, and nothing at all for a creature that
+    /// never makes one.
+    Doomed,
+    /// Unseen. Attack rolls against it have disadvantage and its own have
+    /// advantage - neither against something that sees it anyway (see
+    /// [`crate::creature::Rider::Truesight`]) - and it ends the moment its
+    /// holder attacks or casts a spell.
+    Invisible,
+    /// Hiding: unseen exactly as [`Condition::Invisible`] is, and for as
+    /// long - but by keeping out of sight rather than by magic, so no sense
+    /// sees through it.
+    Hidden,
+    /// Jolted: it cannot make opportunity attacks. Its other reactions are
+    /// its own.
+    Shocked,
+    /// Held by somebody: its speed is 0. It ends when it breaks free - a
+    /// save at the end of each of its turns - or is somewhere else.
+    Grappled,
+    /// Made to run: as it lands, its holder spends its reaction, if it has
+    /// one, moving its speed away from whoever did this. It does not linger -
+    /// there is nothing left of it once the running is done.
+    Fleeing,
     /// A lasting boon its holder put on itself - the `n`th entry of its own
     /// [`crate::creature::Creature::boons`]: extra damage on its hits,
     /// resistances, or both, for as long as this condition lasts.
@@ -290,6 +334,17 @@ impl Condition {
             "vexed" | "vex" => Self::Vexed,
             "outlined" => Self::Outlined,
             "restrained" => Self::Restrained,
+            "unhealable" | "no_healing" => Self::Unhealable,
+            "reeling" => Self::Reeling,
+            "addled" | "feebleminded" => Self::Addled,
+            "doomed" => Self::Doomed,
+            "muddled" => Self::Muddled,
+            "sapped" => Self::Sapped,
+            "invisible" => Self::Invisible,
+            "hidden" => Self::Hidden,
+            "shocked" | "jolted" => Self::Shocked,
+            "grappled" => Self::Grappled,
+            "fleeing" | "flees" => Self::Fleeing,
             "disadvantage_str_saves" => Self::SaveDisadvantage(Ability::Str),
             "disadvantage_dex_saves" => Self::SaveDisadvantage(Ability::Dex),
             "disadvantage_con_saves" => Self::SaveDisadvantage(Ability::Con),
@@ -331,6 +386,17 @@ impl Condition {
             Self::Vexed => "vexed",
             Self::Outlined => "outlined",
             Self::Restrained => "restrained",
+            Self::Unhealable => "unhealable",
+            Self::Reeling => "reeling",
+            Self::Addled => "addled",
+            Self::Doomed => "doomed",
+            Self::Muddled => "muddled",
+            Self::Sapped => "sapped",
+            Self::Invisible => "invisible",
+            Self::Hidden => "hidden",
+            Self::Shocked => "shocked",
+            Self::Grappled => "grappled",
+            Self::Fleeing => "fleeing",
             // Never parsed back: which boon it is belongs to the creature
             // that put it on itself, not to a word in a stat block.
             Self::Boon(_) => "boon",
@@ -409,11 +475,36 @@ impl Condition {
     /// unable to change zone (see `sim::fight`'s movement allowance);
     /// anywhere else there is no movement model for it to apply to.
     pub fn zeroes_speed(self) -> bool {
-        matches!(self, Self::SteadyAim | Self::Restrained)
+        matches!(
+            self,
+            Self::SteadyAim | Self::Restrained | Self::Reeling | Self::Grappled
+        )
+    }
+
+    /// Does it take away its holder's reactions, and nothing else of its
+    /// turn? An incapacitated creature loses them too, with everything else.
+    pub fn no_reactions(self) -> bool {
+        matches!(self, Self::Reeling)
+    }
+
+    /// Does it stop its holder striking at what walks out of its reach?
+    pub fn no_opportunity_attacks(self) -> bool {
+        matches!(self, Self::Shocked)
+    }
+
+    /// Does it stop its holder regaining hit points or gaining temporary
+    /// ones?
+    pub fn blocks_healing(self) -> bool {
+        matches!(self, Self::Unhealable)
     }
 
     /// Ends the moment its holder makes an attack or takes a legendary
     /// action: a mouth clamped shut has to open to bite.
+    /// Is its holder unseen - until it attacks or casts, which gives it up?
+    pub fn unseen(self) -> bool {
+        matches!(self, Self::Invisible | Self::Hidden)
+    }
+
     pub fn lapses_on_attack(self) -> bool {
         matches!(self, Self::Sealed)
     }
@@ -445,7 +536,7 @@ impl Condition {
     /// selects a move checks this before taking one of either kind - see
     /// `sim::fight`'s move gating - this only answers the question.
     pub fn blocks_magic(self) -> bool {
-        matches!(self, Self::Suppressed)
+        matches!(self, Self::Suppressed | Self::Addled)
     }
 
     /// Blocks casting a spell the ordinary way, but not a cast made without
@@ -498,6 +589,12 @@ pub enum Duration {
     ApplierTurn,
     /// Until the start of the victim's next turn.
     VictimTurn,
+    /// Until the *end* of the victim's next turn - "it can't take reactions
+    /// until the end of its next turn". [`Duration::ApplierNextTurnEnd`]
+    /// counted on the other creature's turns: landed during the victim's own
+    /// turn it outlasts that turn's end, and otherwise ends with the very
+    /// next one it takes.
+    VictimNextTurnEnd,
     /// Until the *end* of the applier's next turn - Guiding Bolt's "before
     /// the end of your next turn". Applied during the applier's own turn, it
     /// survives that turn's end and clears at the end of the one after;

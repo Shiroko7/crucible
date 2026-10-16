@@ -94,6 +94,7 @@ impl FeaturePlugin for DivineSparkPlugin {
                     "Divine Spark (Heal)",
                     Effect::Heal(HealRoll::new(dice, 8, modifier)),
                 )
+                .with_range(30)
                 .with_cost(charge),
             );
         }

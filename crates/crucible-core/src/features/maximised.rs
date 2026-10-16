@@ -91,17 +91,16 @@ impl FeaturePlugin for MaximisedDamagePlugin {
         }
 
         if let Some((pool, amount)) = &self.resource {
-            if mv.cost.is_some() {
-                return Err(FeatureError::InvalidConfiguration(format!(
-                    "`{}` already spends a pool of its own, so it cannot also be charged \
-                     `{pool}` - a move has one resource cost",
-                    self.move_name
-                )));
-            }
-            mv = mv.with_cost(Cost {
+            let charge = Cost {
                 resource: builder.resource_index(pool)?,
                 amount: *amount,
-            });
+            };
+            // A move that already spends a pool of its own spends this one
+            // beside it.
+            mv = match mv.cost {
+                Some(_) => mv.with_rider(crate::creature::Rider::AlsoCosts(charge)),
+                None => mv.with_cost(charge),
+            };
         }
 
         match self.bonus_action {
@@ -168,7 +167,8 @@ fn at_most(roll: DamageRoll, kinds: &[DamageKind]) -> DamageRoll {
         return roll;
     }
     let max = i32::try_from(roll.count * roll.sides).unwrap_or(i32::MAX) + roll.bonus;
-    let flat = DamageRoll::new(0, 1, max, roll.kind);
+    let mut flat = DamageRoll::new(0, 1, max, roll.kind);
+    flat.maximised = Some((roll.count, roll.sides));
     match roll.alternative {
         Some(alternative) => flat.or(alternative),
         None => flat,
@@ -225,6 +225,13 @@ pub(super) fn register(registry: &mut FeatureRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pool taken at its maximum: the flat amount, and the dice it was.
+    fn flat(amount: i32, kind: DamageKind, dice: (u32, u32)) -> DamageRoll {
+        let mut roll = DamageRoll::new(0, 1, amount, kind);
+        roll.maximised = Some(dice);
+        roll
+    }
     use crate::features::FeatureRegistry;
     use crate::rules::{Ability, SpellCastingProfile};
 
@@ -268,7 +275,7 @@ mod tests {
         assert!(save.half_on_success);
         assert_eq!(
             save.damage,
-            vec![DamageRoll::new(0, 1, 24, DamageKind::Thunder)],
+            vec![flat(24, DamageKind::Thunder, (3, 8))],
             "3d8 thunder maximised is a flat 24"
         );
     }
@@ -292,7 +299,7 @@ mod tests {
         assert_eq!(
             save.damage,
             vec![
-                DamageRoll::new(0, 1, 30, DamageKind::Thunder),
+                flat(30, DamageKind::Thunder, (5, 6)),
                 DamageRoll::new(5, 6, 0, DamageKind::Radiant),
             ]
         );
@@ -314,7 +321,7 @@ mod tests {
         };
         assert_eq!(
             strike.damage,
-            vec![DamageRoll::new(0, 1, 23, DamageKind::Lightning)],
+            vec![flat(23, DamageKind::Lightning, (2, 10))],
             "2d10+3 is at most 23"
         );
     }
@@ -338,12 +345,11 @@ mod tests {
         );
     }
 
-    /// A move already spending a pool cannot also be charged for being
-    /// maximised: a move has one resource cost, and silently dropping either
-    /// one would be a free charge.
+    /// A move already spending a pool is charged for being maximised
+    /// beside it: both are paid, neither one dropped.
     #[test]
-    fn a_move_that_already_spends_a_pool_is_rejected_rather_than_charged_twice() {
-        let err = build(
+    fn a_move_that_already_spends_a_pool_is_charged_for_both() {
+        let built = build(
             r#"
             plugin = "maximised_damage"
             name = "Breath (maximised)"
@@ -351,10 +357,13 @@ mod tests {
             resource = "channel_divinity"
             "#,
         )
-        .expect_err("two costs");
-        assert!(
-            matches!(&err, FeatureError::InvalidConfiguration(m) if m.contains("one resource cost")),
-            "{err}"
-        );
+        .expect("two costs");
+        let m = &built.creature.actions[0];
+        let charge = Cost {
+            resource: 0,
+            amount: 1,
+        };
+        assert_eq!(m.cost, Some(charge));
+        assert_eq!(m.riders, vec![crate::creature::Rider::AlsoCosts(charge)]);
     }
 }

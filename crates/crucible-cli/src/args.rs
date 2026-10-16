@@ -74,10 +74,7 @@ pub fn parse_args() -> Result<Args, String> {
         copies: None,
         sweep: None,
         sweep_samples: 2_000,
-        budget: Budget {
-            rollouts: 16,
-            depth: 4,
-        },
+        budget: Budget::default(),
         solver_samples: 1_000,
     };
 

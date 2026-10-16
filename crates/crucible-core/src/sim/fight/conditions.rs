@@ -3,7 +3,11 @@
 //! damage.
 
 use crate::rules::{Condition, Duration};
+use crate::sim::fight::record::FrameKind;
 use crate::sim::fight::{Expiry, Fight, Fighter};
+
+/// How far a shove or a drag moves its victim on a grid, in squares.
+const SHOVE: i32 = 2;
 
 impl<'a> Fight<'a> {
     /// Which of `conditions` `applier` can actually give `victim`, and
@@ -44,6 +48,18 @@ impl<'a> Fight<'a> {
     /// pull or a push (see [`Fight::shift`]), and arm any of `applier`'s
     /// weapon buffs that wait for exactly that condition to land on an enemy -
     /// see [`crate::creature::Rider::arms_on_condition`].
+    /// Does `who` save with advantage against the move being resolved,
+    /// because it is magic and `who` resists magic? See
+    /// [`Rider::MagicResistance`].
+    pub(super) fn resists_magic(&self, who: usize) -> bool {
+        self.cast.get().magical
+            && self.fighters[who]
+                .creature
+                .riders
+                .iter()
+                .any(|r| matches!(r, crate::creature::Rider::MagicResistance))
+    }
+
     pub(super) fn land_condition(
         &mut self,
         applier: usize,
@@ -54,7 +70,9 @@ impl<'a> Fight<'a> {
     ) {
         let expiry = self.expiry(applier, victim, duration);
         self.apply_condition(victim, condition, expiry);
+        self.afflicted(applier, victim, condition);
         self.shift(applier, victim, condition);
+        self.drive(applier, victim, condition);
         landed_conditions.push((victim, condition));
         if self.fighters[applier].side != self.fighters[victim].side {
             let creature = self.fighters[applier].creature;
@@ -79,6 +97,10 @@ impl<'a> Fight<'a> {
                 who: applier,
                 ends_left: if self.acting == Some(applier) { 2 } else { 1 },
             },
+            Duration::VictimNextTurnEnd => Expiry::TurnEnd {
+                who: victim,
+                ends_left: if self.acting == Some(victim) { 2 } else { 1 },
+            },
             Duration::Rounds(n) => Expiry::Rounds {
                 who: applier,
                 left: n.max(1),
@@ -99,7 +121,70 @@ impl<'a> Fight<'a> {
     /// takes away their turn. An Incapacitated creature cannot concentrate on
     /// anything, and 5e offers no save against losing it that way - unlike
     /// damage, which gets one.
+    /// On a grid, what a shove, a drag or a rout does to where its victim is
+    /// standing: ten feet away from whoever did it, ten toward, or - made to
+    /// flee - as far as its speed takes it, at the price of its reaction.
+    /// Around a creature with a mouth, places are zones and `shift` moves
+    /// them instead.
+    fn drive(&mut self, applier: usize, victim: usize, condition: Condition) {
+        let (squares, away, how) = match condition {
+            Condition::Pushed => (SHOVE, true, "is pushed"),
+            Condition::Pulled => (SHOVE, false, "is pulled"),
+            Condition::Fleeing => {
+                let f = &mut self.fighters[victim];
+                f.conditions.retain(|&(c, _)| c != Condition::Fleeing);
+                if !f.reaction || f.incapacitated() {
+                    return;
+                }
+                f.spend_reaction_budget();
+                (self.squares(victim), true, "flees")
+            }
+            _ => return,
+        };
+        if !self.on_grid() || self.has_mouth(applier) || self.has_mouth(victim) {
+            return;
+        }
+        let path = self.displace(victim, applier, squares, away);
+        if !path.is_empty() {
+            let text = format!(
+                "{} {how} {} ft",
+                self.fighters[victim].creature.name,
+                path.len() * crate::sim::arena::SQUARE as usize
+            );
+            self.frame(
+                self.round,
+                FrameKind::Move,
+                Some(victim),
+                Some(applier),
+                text,
+                path,
+            );
+        }
+    }
+
     pub(super) fn apply_condition(&mut self, victim: usize, condition: Condition, expiry: Expiry) {
+        // Exhaustion is counted rather than held: another level each time,
+        // none of them wearing off, and the sixth is the last.
+        if condition == Condition::Exhaustion {
+            let f = &mut self.fighters[victim];
+            f.exhaustion = f.exhaustion.saturating_add(1);
+            f.conditions.retain(|&(c, _)| c != Condition::Exhaustion);
+            f.conditions.push((
+                condition,
+                Expiry::Rounds {
+                    who: victim,
+                    left: u32::MAX,
+                },
+            ));
+            if f.exhaustion >= 6 && f.hp > 0 {
+                f.hp = 0;
+                f.dead = true;
+                self.end_concentration(victim);
+                self.release_all(victim, false);
+                self.release_summons(victim);
+            }
+            return;
+        }
         self.fighters[victim].add_condition(condition, expiry);
         if condition.incapacitated() {
             self.end_concentration(victim);

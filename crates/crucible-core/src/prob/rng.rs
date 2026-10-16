@@ -16,6 +16,11 @@
 pub struct Rng {
     state: u64,
     inc: u64,
+    /// Every die rolled since the last [`Rng::rolled`], as sides and face,
+    /// when something is watching - see [`Rng::watch`]. A fight being
+    /// recorded reads its dice off this rather than have every rule that
+    /// rolls one hand it back.
+    seen: Option<Vec<(u32, i32)>>,
 }
 
 const MULT: u64 = 6_364_136_223_846_793_005;
@@ -34,6 +39,7 @@ impl Rng {
         let mut r = Self {
             state: 0,
             inc: (stream << 1) | 1,
+            seen: None,
         };
         r.next_u32();
         r.state = r.state.wrapping_add(seed);
@@ -76,7 +82,23 @@ impl Rng {
     /// One die, in `[1, sides]`.
     #[inline]
     pub fn die(&mut self, sides: u32) -> i32 {
-        self.below(sides) as i32 + 1
+        let face = self.below(sides) as i32 + 1;
+        if let Some(seen) = self.seen.as_mut() {
+            seen.push((sides, face));
+        }
+        face
+    }
+
+    /// Start remembering every die rolled. What comes out of the generator
+    /// is the same either way.
+    pub fn watch(&mut self) {
+        self.seen.get_or_insert_with(Vec::new);
+    }
+
+    /// The dice rolled since this was last asked, in the order they fell:
+    /// sides, then face. Empty unless [`Rng::watch`]ed.
+    pub fn rolled(&mut self) -> Vec<(u32, i32)> {
+        self.seen.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// Uniform in `[0, 1)`.

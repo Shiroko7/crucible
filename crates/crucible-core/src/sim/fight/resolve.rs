@@ -1,13 +1,37 @@
 //! Resolving a move: each of its effects - strikes, saves, heals, stances,
 //! buffs - applied to its targets, and the damage that results.
 
-use crate::creature::{Effect, Move, Reach, Rider};
+use crate::creature::{Effect, Move, MoveKind, Reach, ReactionTrigger, Rider, SaveEffect};
 use crate::prob::Rng;
+use crate::rules::AttackModifier;
+use crate::rules::DamageKind;
 use crate::rules::{apply_healing, Condition, DamageRoll, Duration, Landed};
+use crate::sim::fight::events;
+use crate::sim::fight::grid::Cast;
+use crate::sim::fight::reactions::first_harm;
 use crate::sim::fight::reactions::{ac_boost_reaction, react_to_hit, standing_ac_boost};
-use crate::sim::fight::saves::saving_throw;
+use crate::sim::fight::record::FrameKind;
 use crate::sim::fight::threshold::{reducer, Shell};
 use crate::sim::fight::{ActiveConcentration, Answer, ConcentrationEffect, Expiry, Fight};
+
+/// What a muddled mind takes off an attack roll.
+const MUDDLE: AttackModifier = AttackModifier::PenaltyDice { count: 1, sides: 6 };
+
+/// How far a save passes itself on, if it does - see [`Rider::Chains`].
+fn chain_of(riders: &[Rider]) -> Option<u32> {
+    riders.iter().find_map(|r| match r {
+        Rider::Chains { feet } => Some(*feet),
+        _ => None,
+    })
+}
+
+/// How long a line its user rides, if it does - see [`Rider::RideLine`].
+fn line_of(riders: &[Rider]) -> Option<u32> {
+    riders.iter().find_map(|r| match r {
+        Rider::RideLine { feet } => Some(*feet),
+        _ => None,
+    })
+}
 
 impl<'a> Fight<'a> {
     /// Resolve one move and apply everything it does.
@@ -27,7 +51,14 @@ impl<'a> Fight<'a> {
     ) {
         if m.concentration {
             self.end_concentration(me);
+            if self.recording() {
+                self.held.retain(|(who, _)| *who != me);
+                self.held.push((me, m.name.clone()));
+            }
         }
+        let unseen = self.fighters[me].has(Condition::unseen);
+        let outer = self.cast.replace(Cast::of(m, target));
+        let cue = self.announce(m, me, target);
         let mut notes: Vec<String> = Vec::new();
         let mut landed: Vec<(usize, Condition)> = Vec::new();
         let mut concentration_effect: Option<ConcentrationEffect> = None;
@@ -58,6 +89,13 @@ impl<'a> Fight<'a> {
         if !self.fighters[me].creature.reactions.is_empty() {
             self.react_to_landed(rng, me, &landed, record, &mut notes);
         }
+        // Attacking or casting from hiding gives the hiding up - once the
+        // blow it helped has landed.
+        if unseen && (m.kind == MoveKind::Spell || first_harm(&m.effect).is_some()) {
+            self.fighters[me].conditions.retain(|&(c, _)| !c.unseen());
+        }
+        self.cast.set(outer);
+        self.cue = cue;
         if record {
             if !line.is_empty() {
                 line.push_str(" | ");
@@ -86,16 +124,65 @@ impl<'a> Fight<'a> {
         concentration_effect: &mut Option<ConcentrationEffect>,
     ) {
         match effect {
+            // One swing at everything in reach rather than several at one
+            // creature: each is resolved as a strike of its own, at that
+            // creature alone.
+            Effect::Strikes { strike, .. } if move_riders.contains(&Rider::EachInReach) => {
+                let riders: Vec<Rider> = move_riders
+                    .iter()
+                    .filter(|r| **r != Rider::EachInReach)
+                    .cloned()
+                    .collect();
+                let one = Effect::Strikes {
+                    strike: strike.clone(),
+                    count: 1,
+                };
+                let previous = self.sole_target;
+                for victim in self.swept(me, target, reach, strike.kind) {
+                    if !self.fighters[me].alive() {
+                        break;
+                    }
+                    self.sole_target = Some(victim);
+                    self.resolve(
+                        &one,
+                        rng,
+                        me,
+                        victim,
+                        &riders,
+                        reach,
+                        record,
+                        notes,
+                        landed_conditions,
+                        concentration_effect,
+                    );
+                }
+                self.sole_target = previous;
+            }
             Effect::Strikes { strike, count } => {
                 let mut current_target = target;
+                // Who each swing that landed, landed on.
+                let mut hits: Vec<usize> = Vec::new();
                 // Ongoing attack-roll modifiers this attacker is carrying -
                 // Bless, Bane. Cloned once: they do not change mid-move, and
                 // `self.fighters` cannot stay borrowed here across the
                 // mutable borrows the loop below takes for `current_target`.
-                let modifiers = self.fighters[me].attack_modifiers.clone();
+                let mut modifiers = self.fighters[me].attack_modifiers.clone();
+                if self.fighters[me].has(|c| c == Condition::Muddled) {
+                    modifiers.push(MUDDLE);
+                }
+                // Exhaustion comes off every d20 test, two a level.
+                if self.fighters[me].exhaustion > 0 {
+                    modifiers.push(AttackModifier::Flat(
+                        -2 * i32::from(self.fighters[me].exhaustion),
+                    ));
+                }
                 let attacker = self.fighters[me].creature;
                 self.lapse_on_attack(me);
                 for _ in 0..*count {
+                    // Dropped by what its own blows threw back at it.
+                    if !self.fighters[me].alive() {
+                        break;
+                    }
                     if !self.fighters[current_target].alive()
                         || !self.in_reach(me, current_target, reach, Some(strike.kind))
                     {
@@ -111,17 +198,24 @@ impl<'a> Fight<'a> {
                         };
                         current_target = new_target;
                     }
+                    // Turned on one of its own, if what it swung at can do
+                    // that - see `Fight::redirect`.
+                    current_target =
+                        self.redirect(rng, me, current_target, reach, strike.kind, record, notes);
                     let against = self.fighters[current_target].creature;
                     // Worked out per swing: a mark or Steady Aim is used up by
                     // the first roll it helps, so a multiattack's later swings
                     // roll without it.
-                    let mode = self.attack_mode_consuming(strike.mode, me, current_target);
+                    let spot = self.spot(me, current_target, strike.kind);
+                    let mode = self.attack_mode_consuming_at(strike.mode, me, current_target, spot);
                     // Paralyzed: any hit against it is an automatic critical hit.
                     let force_crit = self.fighters[current_target].has(Condition::auto_crits);
                     // A blade already raised is just a higher AC; a fresh
                     // reaction is a decision, and may leave it raised.
                     let standing = standing_ac_boost(&self.fighters[current_target], strike.kind)
-                        + self.boon_ac(current_target);
+                        + self.boon_ac(current_target)
+                        // Somebody standing in the way is half cover.
+                        + spot.cover;
                     let boost = ac_boost_reaction(&self.fighters[current_target], strike.kind);
                     let plan =
                         self.extra_damage_plan(me, current_target, strike, move_riders, mode, true);
@@ -129,10 +223,20 @@ impl<'a> Fight<'a> {
                     // the shell - see `Fight::aimed_hit`.
                     let weak = self.through_weak_spot(me, current_target, Some(strike.kind))
                         && self
-                            .aimed_hit(me, current_target, strike, mode, force_crit, &plan.rolls)
+                            .aimed_hit(
+                                me,
+                                current_target,
+                                strike,
+                                mode,
+                                force_crit,
+                                &plan.rolls,
+                                move_riders,
+                            )
                             .1;
-                    let defending = self.boon_resistances(current_target);
-                    let (raw, landed, consumed) = strike.sample_reduced(
+                    let defending = self.defending(me, current_target, Some(strike), move_riders);
+                    rng.rolled();
+                    let mut kinds: Vec<(DamageKind, i32)> = Vec::new();
+                    let (raw, landed, consumed) = strike.sample_reduced_tallied(
                         rng,
                         &reducer(attacker, against, weak, &defending),
                         against.ac + standing,
@@ -142,6 +246,7 @@ impl<'a> Fight<'a> {
                         &plan.rolls,
                         boost.map_or(0, |(bonus, _)| bonus),
                         boost.is_some(),
+                        &mut |kind, dealt| kinds.push((kind, dealt)),
                     );
                     if consumed {
                         let defender = &mut self.fighters[current_target];
@@ -165,9 +270,84 @@ impl<'a> Fight<'a> {
                             ));
                         }
                     }
-                    let (raw, answer) =
-                        react_to_hit(rng, &mut self.fighters[current_target], strike, raw);
-                    let (dealt, shell) = self.deal(rng, me, current_target, raw, weak);
+                    if self.recording() {
+                        let ac = against.ac
+                            + standing
+                            + boost.filter(|_| consumed).map_or(0, |(bonus, _)| bonus);
+                        let dice = rng.rolled();
+                        self.attack_rolled(
+                            me,
+                            current_target,
+                            strike,
+                            mode,
+                            &modifiers,
+                            ac,
+                            landed,
+                            &dice,
+                            &plan.rolls,
+                            plan.sneak_attack,
+                        );
+                    }
+                    // What was hiding has given itself away, hit or miss.
+                    self.fighters[me]
+                        .conditions
+                        .retain(|&(c, _)| c != Condition::Hidden);
+                    // The blow lands on somebody else, if what it hit can
+                    // change places with one of its own - and then it is
+                    // that one's hide it has to get through.
+                    let mut struck = current_target;
+                    let mut raw = raw;
+                    let mut weak = weak;
+                    // A blow that still lands half of itself when it misses.
+                    if landed == Landed::Miss && move_riders.contains(&Rider::HalfOnMiss) {
+                        raw = self.landed_instead(
+                            rng,
+                            me,
+                            struck,
+                            strike,
+                            move_riders,
+                            &[],
+                            Landed::Hit,
+                            &mut kinds,
+                        ) / 2;
+                        for share in kinds.iter_mut() {
+                            share.1 /= 2;
+                        }
+                    }
+                    if landed != Landed::Miss && raw > 0 {
+                        if let Some(other) = self.bend(current_target) {
+                            if record {
+                                notes.push(format!(
+                                    "{} takes it instead",
+                                    self.fighters[other].creature.name
+                                ));
+                            }
+                            struck = other;
+                            weak = false;
+                            raw = self.landed_instead(
+                                rng,
+                                me,
+                                other,
+                                strike,
+                                move_riders,
+                                &plan.rolls,
+                                landed,
+                                &mut kinds,
+                            );
+                        }
+                    }
+                    let (raw, answer) = react_to_hit(rng, &mut self.fighters[struck], strike, raw);
+                    if let Some(hurt) = self.hurt.as_mut() {
+                        match answer {
+                            Some(Answer::Deflected(cut)) => hurt.note(format!("deflected {cut}")),
+                            Some(Answer::Halved) => hurt.note("halved".to_string()),
+                            None => {}
+                        }
+                    }
+                    let raw = self.mirror(rng, struck, raw, &kinds, record, notes);
+                    let (dealt, shell) = self.deal(rng, me, struck, raw, weak);
+                    self.hurt = None;
+                    self.reflect(rng, me, struck, dealt, &kinds, record, notes);
                     if record {
                         let sneak = if plan.sneak_attack && landed != Landed::Miss {
                             " sneak"
@@ -192,19 +372,29 @@ impl<'a> Fight<'a> {
                             (Landed::Hit, None) => format!("{dealt}{sneak}{shell_note}"),
                         });
                     }
-                    self.answer_breach(rng, me, current_target, shell, record, notes);
+                    self.answer_breach(rng, me, struck, shell, record, notes);
+                    if landed == Landed::Miss && dealt > 0 {
+                        if record {
+                            notes.push(format!("{dealt} all the same"));
+                        }
+                        self.shove_on_damage(me, struck, dealt, &strike.damage, record, notes);
+                    }
                     if landed != Landed::Miss {
+                        hits.push(struck);
                         if plan.sneak_attack {
                             self.fighters[me].sneak_attack_spent = true;
                         }
                         if plan.once_per_turn_damage {
                             self.fighters[me].once_per_turn_damage_spent = true;
                         }
+                        if plan.first_hit {
+                            self.fighters[me].first_hit_spent = true;
+                        }
                         if let Some(choice) = plan.cunning {
                             self.resolve_cunning_strike(
                                 rng,
                                 me,
-                                current_target,
+                                struck,
                                 choice,
                                 record,
                                 notes,
@@ -215,7 +405,7 @@ impl<'a> Fight<'a> {
                             self.resolve_injury_poison(
                                 rng,
                                 me,
-                                current_target,
+                                struck,
                                 record,
                                 notes,
                                 landed_conditions,
@@ -224,7 +414,7 @@ impl<'a> Fight<'a> {
                         self.fire_on_hit(
                             rng,
                             me,
-                            current_target,
+                            struck,
                             move_riders,
                             record,
                             notes,
@@ -233,23 +423,97 @@ impl<'a> Fight<'a> {
                         // Damage of a type that also shoves - see
                         // `Rider::PushOnDamage` - and then whatever the
                         // creature just hit answers a blow with.
-                        self.shove_on_damage(
-                            me,
-                            current_target,
-                            dealt,
-                            &strike.damage,
-                            record,
-                            notes,
-                        );
+                        self.shove_on_damage(me, struck, dealt, &strike.damage, record, notes);
                         self.react_to_being_hit(
                             rng,
-                            current_target,
+                            struck,
                             me,
                             strike.kind,
+                            dealt > 0,
                             record,
                             notes,
                         );
+                        self.slain(me, struck, move_riders);
                     }
+                }
+                // Every swing of several landed on the one creature.
+                let all = *count >= 2
+                    && hits.len() == *count as usize
+                    && hits.iter().all(|&h| h == hits[0]);
+                if all && self.fighters[hits[0]].alive() {
+                    let victim = hits[0];
+                    for rider in move_riders {
+                        let Rider::AllHit { damage, then } = rider else {
+                            continue;
+                        };
+                        let dealt = self.harm(rng, me, victim, damage, record, notes);
+                        if record && !damage.is_empty() {
+                            notes.push(format!("{dealt} more, every blow having landed"));
+                        }
+                        if let Some(then) = then {
+                            self.fire_on_hit(
+                                rng,
+                                me,
+                                victim,
+                                std::slice::from_ref(then.as_ref()),
+                                record,
+                                notes,
+                                landed_conditions,
+                            );
+                        }
+                    }
+                }
+            }
+            // Passed from one creature to the next for as long as they
+            // keep failing - see `Rider::Chains`.
+            Effect::Save(save) if chain_of(move_riders).is_some() => {
+                let feet = chain_of(move_riders).unwrap_or(0);
+                let mut struck: Vec<usize> = Vec::new();
+                let mut next = (self.fighters[target].alive()
+                    && self.in_reach(me, target, reach, None))
+                .then_some(target);
+                while let Some(i) = next {
+                    struck.push(i);
+                    let saved = self.save_against(
+                        rng,
+                        me,
+                        i,
+                        save,
+                        move_riders,
+                        record,
+                        notes,
+                        landed_conditions,
+                    );
+                    if saved || !self.fighters[me].alive() {
+                        break;
+                    }
+                    next = self.arc_from(me, i, feet, &struck);
+                }
+            }
+            // Its user is the area: everything between where it stands and
+            // where it reappears - see `Rider::RideLine`.
+            Effect::Save(save) if line_of(move_riders).is_some() => {
+                let feet = line_of(move_riders).unwrap_or(0);
+                let (to, caught) = self.line_from(me, target, feet);
+                for i in caught {
+                    if self.fighters[i].alive() {
+                        self.save_against(
+                            rng,
+                            me,
+                            i,
+                            save,
+                            move_riders,
+                            record,
+                            notes,
+                            landed_conditions,
+                        );
+                    }
+                }
+                if let (Some(to), true) = (to, self.fighters[me].alive()) {
+                    self.fighters[me].pos = to;
+                    let name = &self.fighters[me].creature.name;
+                    let text = format!("{name} reappears at the far end");
+                    self.frame(self.round, FrameKind::Move, Some(me), None, text, vec![to]);
                 }
             }
             Effect::Save(save) => {
@@ -267,73 +531,68 @@ impl<'a> Fight<'a> {
                         None => true,
                         Some(t) => self.fighters[i].creature.is_creature_type(t),
                     })
+                    // A burst around its target that leaves the target
+                    // out.
+                    .filter(|&i| i != target || !move_riders.contains(&Rider::SparesTarget))
                     .collect();
                 if let Some(max) = save.max_targets {
+                    // Whoever it was aimed at is the first it catches: a
+                    // save only one creature makes is that creature's.
+                    if let Some(at) = caught.iter().position(|&i| i == target) {
+                        caught[..=at].rotate_right(1);
+                    }
                     caught.truncate(max as usize);
                 }
-                let attacker = self.fighters[me].creature;
                 for i in caught {
-                    let against = self.fighters[i].creature;
-                    let (conditions, advantage) = self.conditions_against(me, i, &save.on_failure);
-                    if save.damage.is_empty()
-                        && !save.on_failure.is_empty()
-                        && conditions.is_empty()
-                    {
-                        // Immune to everything it could do: nothing to roll
-                        // against, and no Legendary Resistance to waste on it.
-                        if record {
-                            notes.push(format!("{} immune", self.fighters[i].creature.name));
-                        }
-                        continue;
-                    }
-                    let (saved, resisted) =
-                        saving_throw(&mut self.fighters, rng, i, save.ability, save.dc, advantage);
-                    // Evasion is explicitly unavailable while Incapacitated.
-                    let evasion = against.has_evasion(save.ability)
-                        && !self.fighters[i].has(Condition::blocks_riders);
-                    let weak = self.through_weak_spot(me, i, None);
-                    let defending = self.boon_resistances(i);
-                    let raw = save.sample_known_by(
+                    self.save_against(
                         rng,
-                        &reducer(attacker, against, weak, &defending),
-                        saved,
-                        evasion,
+                        me,
+                        i,
+                        save,
+                        move_riders,
+                        record,
+                        notes,
+                        landed_conditions,
                     );
-                    let (dealt, shell) = self.deal(rng, me, i, raw, weak);
-                    if !saved {
-                        for &(condition, duration) in &conditions {
-                            self.land_condition(me, i, condition, duration, landed_conditions);
-                        }
-                    }
+                }
+            }
+            // Nothing of its own: stopping the spell is all of it, and that
+            // has happened by the time anything is resolved - see
+            // `Fight::countered`.
+            Effect::Counter => {}
+            Effect::Teleport { feet } => {
+                self.fighters[me]
+                    .conditions
+                    .retain(|&(c, _)| c != Condition::Grappled);
+                if let Some(to) = self.teleport(me, *feet) {
+                    let name = &self.fighters[me].creature.name;
+                    let text = format!("{name} is somewhere else");
                     if record {
-                        let how = match (saved, resisted) {
-                            (true, true) => "legendary resistance",
-                            (true, false) => "saved",
-                            _ => "failed",
-                        };
-                        let extra = if !saved && !conditions.is_empty() {
-                            let names: Vec<&str> =
-                                conditions.iter().map(|&(c, _)| c.name()).collect();
-                            format!(" and {}", names.join(" and "))
-                        } else {
-                            String::new()
-                        };
-                        let shell_note = match shell {
-                            Shell::Absorbed => format!(" (shell took {raw})"),
-                            Shell::Breached => " (breach)".to_string(),
-                            Shell::Open => String::new(),
-                        };
-                        notes.push(format!(
-                            "{} {how} for {dealt}{shell_note}{extra}",
-                            self.fighters[i].creature.name
-                        ));
+                        notes.push("teleports".to_string());
                     }
-                    self.shove_on_damage(me, i, dealt, &save.damage, record, notes);
-                    self.answer_breach(rng, me, i, shell, record, notes);
+                    self.frame(self.round, FrameKind::Move, Some(me), None, text, vec![to]);
+                }
+            }
+            Effect::Hide { bonus } => {
+                if self.hide(rng, me, *bonus, record, notes) {
+                    landed_conditions.push((me, Condition::Hidden));
+                }
+            }
+            Effect::Displace(d) => {
+                if self.fighters[target].alive() && self.in_reach(me, target, reach, None) {
+                    self.fold(rng, me, target, d, record, notes);
                 }
             }
             Effect::Stance { condition } => {
-                self.apply_condition(me, *condition, Expiry::TurnStart(me));
+                // A footing lasts until its holder's next turn. Being unseen
+                // lasts until it is given up - by attacking, by casting, or
+                // by losing the concentration that holds it.
+                let expiry = match condition {
+                    Condition::Invisible => Expiry::Rounds { who: me, left: 600 },
+                    _ => Expiry::TurnStart(me),
+                };
+                self.apply_condition(me, *condition, expiry);
+                self.afflicted(me, me, *condition);
                 landed_conditions.push((me, *condition));
                 if record {
                     notes.push(condition.name().to_string());
@@ -345,7 +604,7 @@ impl<'a> Fight<'a> {
             Effect::TempHp(roll) => {
                 let gained = roll.sample(rng);
                 let f = &mut self.fighters[me];
-                if f.hp > 0 && gained > f.temp_hp {
+                if f.hp > 0 && gained > f.temp_hp && !f.has(Condition::blocks_healing) {
                     f.temp_hp = gained;
                     if record {
                         notes.push(format!("{gained} temp hp"));
@@ -359,15 +618,28 @@ impl<'a> Fight<'a> {
                 let who = self.heal_target(me);
                 let healed = roll.sample(rng);
                 let f = &mut self.fighters[who];
-                let (new_hp, revived) = if f.dead {
+                // Dead, or under something that will not let a wound close:
+                // the healing is spent and nothing comes of it.
+                let (new_hp, revived) = if f.dead || f.has(Condition::blocks_healing) {
                     (f.hp, false)
                 } else {
                     apply_healing(f.hp.max(0), f.creature.hp, healed)
                 };
+                let gained = new_hp - f.hp.max(0);
                 f.hp = new_hp;
+                if revived {
+                    // Back on its feet, with its death saves behind it.
+                    f.death_successes = 0;
+                    f.death_failures = 0;
+                    f.stable = false;
+                }
+                self.healed(me, who, gained, revived);
+                let f = &self.fighters[who];
                 if record {
                     let name = &f.creature.name;
-                    notes.push(if revived {
+                    notes.push(if f.has(Condition::blocks_healing) {
+                        format!("cannot heal {name}")
+                    } else if revived {
                         format!("heals {name} {healed} (revives)")
                     } else {
                         format!("heals {name} {healed}")
@@ -401,13 +673,32 @@ impl<'a> Fight<'a> {
                     let weak = self.through_weak_spot(me, current_target, None);
                     let defending = self.boon_resistances(current_target);
                     let reduce = reducer(attacker, against, weak, &defending);
+                    rng.rolled();
                     let raw = roll.sample(rng, false, roll.reduction_against(&reduce));
+                    if self.recording() {
+                        let dice = rng.rolled();
+                        self.hurt = Some(events::Hurt::of(std::slice::from_ref(roll), &dice));
+                    }
+                    let kinds = [(roll.kind_against(&reduce), raw)];
+                    let raw = self.mirror(rng, current_target, raw, &kinds, record, notes);
                     let (dealt, shell) = self.deal(rng, me, current_target, raw, weak);
+                    self.hurt = None;
+                    self.reflect(rng, me, current_target, dealt, &kinds, record, notes);
                     if record {
                         notes.push(match shell {
                             Shell::Absorbed => format!("0 (shell took {raw})"),
                             _ => dealt.to_string(),
                         });
+                    }
+                    if dealt > 0 {
+                        self.react(
+                            rng,
+                            current_target,
+                            ReactionTrigger::Damaged,
+                            me,
+                            record,
+                            notes,
+                        );
                     }
                     self.shove_on_damage(
                         me,
@@ -479,8 +770,7 @@ impl<'a> Fight<'a> {
                 );
                 let mut debuffed = Vec::new();
                 for i in caught {
-                    let (saved, resisted) =
-                        saving_throw(&mut self.fighters, rng, i, *ability, dc, false);
+                    let (saved, resisted) = self.saving_throw(rng, i, *ability, dc, false);
                     if !saved {
                         self.fighters[i].attack_modifiers.push(*attack_modifier);
                         self.fighters[i].save_modifiers.push(*save_modifier);
@@ -549,6 +839,13 @@ impl<'a> Fight<'a> {
                 let Ok(index) = u8::try_from(*which) else {
                     return;
                 };
+                // Put down around whoever it was aimed at, if it is the kind
+                // that stays where it is put.
+                let put =
+                    crate::sim::fight::grid::anchored(aura).then(|| self.fighters[target].pos);
+                if let Some(slot) = self.fighters[me].anchors.get_mut(*which) {
+                    *slot = put;
+                }
                 let expiry = self.expiry(me, me, *duration);
                 self.apply_condition(me, Condition::Aura(index), expiry);
                 landed_conditions.push((me, Condition::Aura(index)));
@@ -603,6 +900,114 @@ impl<'a> Fight<'a> {
         }
     }
 
+    /// `i` makes the saving throw `plain` asks for, forced by `me` with a
+    /// move carrying `move_riders`, and takes what follows. Whether it
+    /// saved - or was past being touched by any of it.
+    #[allow(clippy::too_many_arguments)]
+    fn save_against(
+        &mut self,
+        rng: &mut Rng,
+        me: usize,
+        i: usize,
+        plain: &SaveEffect,
+        move_riders: &[Rider],
+        record: bool,
+        notes: &mut Vec<String>,
+        landed_conditions: &mut Vec<(usize, Condition)>,
+    ) -> bool {
+        let attacker = self.fighters[me].creature;
+        let against = self.fighters[i].creature;
+        // Damage the move adds against whatever this one is
+        // under joins the rest of it, for this target alone.
+        let bonus = self.bonus_vs_condition(move_riders.iter(), i);
+        let boosted;
+        let save = if bonus.is_empty() {
+            plain
+        } else {
+            boosted = SaveEffect {
+                damage: plain.damage.iter().copied().chain(bonus).collect(),
+                ..plain.clone()
+            };
+            &boosted
+        };
+        let (conditions, advantage) = self.conditions_against(me, i, &save.on_failure);
+        let kinds: Vec<DamageKind> = save
+            .damage
+            .iter()
+            .flat_map(|r| std::iter::once(r.kind).chain(r.alternative))
+            .collect();
+        let advantage =
+            advantage || self.resists_magic(i) || against.save_advantage(save.ability, &kinds);
+        if save.damage.is_empty() && !save.on_failure.is_empty() && conditions.is_empty() {
+            // Immune to everything it could do: nothing to roll
+            // against, and no Legendary Resistance to waste on it.
+            if record {
+                notes.push(format!("{} immune", self.fighters[i].creature.name));
+            }
+            return true;
+        }
+        let (saved, resisted) = self.saving_throw(rng, i, save.ability, save.dc, advantage);
+        // Evasion is explicitly unavailable while Incapacitated.
+        let evasion =
+            against.has_evasion(save.ability) && !self.fighters[i].has(Condition::blocks_riders);
+        let weak = self.through_weak_spot(me, i, None);
+        let defending = self.boon_resistances(i);
+        rng.rolled();
+        let mut kinds: Vec<(DamageKind, i32)> = Vec::new();
+        let raw = save.sample_known_tallied(
+            rng,
+            &reducer(attacker, against, weak, &defending),
+            saved,
+            evasion,
+            &mut |kind, dealt| kinds.push((kind, dealt)),
+        );
+        if self.recording() && !save.damage.is_empty() {
+            let dice = rng.rolled();
+            self.hurt = Some(events::Hurt::of(&save.damage, &dice));
+        }
+        let raw = self.mirror(rng, i, raw, &kinds, record, notes);
+        let (dealt, shell) = self.deal(rng, me, i, raw, weak);
+        self.hurt = None;
+        self.reflect(rng, me, i, dealt, &kinds, record, notes);
+        if !saved {
+            if !conditions.is_empty() {
+                self.hold(me, i, move_riders, &conditions);
+            }
+            for &(condition, duration) in &conditions {
+                self.land_condition(me, i, condition, duration, landed_conditions);
+            }
+        }
+        self.slain(me, i, move_riders);
+        if record {
+            let how = match (saved, resisted) {
+                (true, true) => "legendary resistance",
+                (true, false) => "saved",
+                _ => "failed",
+            };
+            let extra = if !saved && !conditions.is_empty() {
+                let names: Vec<&str> = conditions.iter().map(|&(c, _)| c.name()).collect();
+                format!(" and {}", names.join(" and "))
+            } else {
+                String::new()
+            };
+            let shell_note = match shell {
+                Shell::Absorbed => format!(" (shell took {raw})"),
+                Shell::Breached => " (breach)".to_string(),
+                Shell::Open => String::new(),
+            };
+            notes.push(format!(
+                "{} {how} for {dealt}{shell_note}{extra}",
+                self.fighters[i].creature.name
+            ));
+        }
+        self.shove_on_damage(me, i, dealt, &save.damage, record, notes);
+        self.answer_breach(rng, me, i, shell, record, notes);
+        if dealt > 0 {
+            self.react(rng, i, ReactionTrigger::Damaged, me, record, notes);
+        }
+        saved
+    }
+
     /// Apply damage already run through resistance and reactions, then
     /// handle what it does to the target: dropping to 0 HP ends its
     /// concentration outright (no save offered, same as Incapacitated), and
@@ -628,12 +1033,25 @@ impl<'a> Fight<'a> {
         f.temp_hp -= soaked;
         let dealt = dealt - soaked;
         let before = f.hp;
+        // Hurt while it is down and rolling for its life: a death save
+        // failed, and no longer stable if it was.
+        if before <= 0 && dealt > 0 && f.can_revive() {
+            f.stable = false;
+            f.death_failures += 1;
+            if f.death_failures >= 3 {
+                f.dead = true;
+            }
+        }
         f.hp -= dealt;
+        let dropped = before > 0 && f.hp <= 0;
         if f.hp <= 0 {
             if before > 0 && dealt - before >= f.creature.hp {
                 f.dead = true;
             }
             f.hp = 0;
+        }
+        self.damaged(target, dealt + soaked, dropped);
+        if self.fighters[target].hp <= 0 {
             self.end_concentration(target);
             self.release_all(target, false);
             self.release_summons(target);
@@ -696,7 +1114,9 @@ impl<'a> Fight<'a> {
         };
         candidates
             .into_iter()
-            .filter(|&i| self.fighters[i].alive() && self.in_reach(me, i, reach, None))
+            .filter(|&i| {
+                self.fighters[i].alive() && self.in_reach(me, i, reach, None) && self.in_area(i)
+            })
             .collect()
     }
 

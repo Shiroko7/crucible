@@ -2,10 +2,26 @@
 //! incoming attack, on cutting a hit's damage, or on a move of its own when
 //! its trigger happens.
 
-use crate::creature::{AttackKind, ReactionTrigger, Rider, Strike};
+use crate::creature::{AttackKind, Effect, Move, MoveKind, Reach, ReactionTrigger, Rider, Strike};
 use crate::prob::Rng;
 use crate::rules::Condition;
-use crate::sim::fight::{Answer, Fight, Fighter};
+use crate::sim::fight::record::FrameKind;
+use crate::sim::fight::{Answer, Expiry, Fight, Fighter};
+
+/// How far a reaction that stops a spell reaches when it does not say.
+const COUNTER_RANGE: u32 = 60;
+
+/// The first part of an effect that is aimed at somebody to hurt them.
+pub(super) fn first_harm(effect: &Effect) -> Option<&Effect> {
+    match effect {
+        Effect::Strikes { .. } | Effect::Save(_) | Effect::AutoHit { .. } | Effect::Displace(_) => {
+            Some(effect)
+        }
+        Effect::Sequence(parts) => parts.iter().find_map(first_harm),
+        Effect::Part { effect, .. } => first_harm(effect),
+        _ => None,
+    }
+}
 
 impl<'a> Fight<'a> {
     /// Take `me`'s first [`crate::creature::Reaction`] answering `trigger`,
@@ -32,27 +48,34 @@ impl<'a> Fight<'a> {
     /// reaction is the side that says which blows it answers - "hits you
     /// with a melee attack" - exactly as a raised shield does; see
     /// [`ReactionTrigger::Hit`].
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn react_to_being_hit(
         &mut self,
         rng: &mut Rng,
         me: usize,
         attacker: usize,
         kind: AttackKind,
+        hurt: bool,
         record: bool,
         notes: &mut Vec<String>,
     ) {
-        if !self.fighters[me]
-            .creature
-            .reactions
-            .iter()
-            .any(|r| matches!(r.trigger, ReactionTrigger::Hit(_)))
-        {
+        if !self.fighters[me].creature.reactions.iter().any(|r| {
+            matches!(
+                r.trigger,
+                ReactionTrigger::Hit(_) | ReactionTrigger::Damaged
+            )
+        }) {
             return;
         }
         self.react_matching(
             rng,
             me,
-            |t| matches!(t, ReactionTrigger::Hit(trigger) if trigger.answers(kind)),
+            |t| match t {
+                ReactionTrigger::Hit(trigger) => trigger.answers(kind),
+                // A hit that got nothing through is not damage.
+                ReactionTrigger::Damaged => hurt,
+                _ => false,
+            },
             attacker,
             record,
             notes,
@@ -85,7 +108,7 @@ impl<'a> Fight<'a> {
         let Some(i) = creature.reactions.iter().enumerate().position(|(i, r)| {
             answers(r.trigger)
                 && f.reactions[i].available()
-                && f.can_pay(r.action.cost)
+                && f.affords(&r.action)
                 && f.can_cast(r.action.spell_slot_level)
                 && self.can_take(me, &r.action)
                 && self.move_lands(me, at, &r.action)
@@ -93,7 +116,7 @@ impl<'a> Fight<'a> {
             return;
         };
         let m = &creature.reactions[i].action;
-        self.fighters[me].pay(m.cost);
+        self.fighters[me].charge(m);
         self.fighters[me].cast_spell_slot(m.spell_slot_level);
         self.fighters[me].spend_reaction(i);
         if let Some(spend) = m.spends {
@@ -101,7 +124,9 @@ impl<'a> Fight<'a> {
         }
         let previous = self.sole_target.replace(at);
         let mut line = String::new();
+        let slot = std::mem::replace(&mut self.cue.slot, "reaction");
         self.apply(m, rng, me, at, record, &mut line);
+        self.cue.slot = slot;
         self.sole_target = previous;
         if record {
             notes.push(format!("{} reacts: {line}", creature.name));
@@ -111,6 +136,299 @@ impl<'a> Fight<'a> {
     /// Answer the conditions `me` has just given enemies with the reaction
     /// waiting for one - [`ReactionTrigger::EnemyGains`] - the first that
     /// fires, since there is one reaction a round.
+    /// `caster` is casting `m` at `target`: does anybody on the other side
+    /// stop it? Each creature with a reaction for that - see
+    /// [`ReactionTrigger::Cast`] - and the means to take it gets its chance,
+    /// in roster order, until one of them works.
+    pub(super) fn countered(
+        &mut self,
+        rng: &mut Rng,
+        caster: usize,
+        target: usize,
+        m: &Move,
+        record: bool,
+        line: &mut String,
+    ) -> bool {
+        if m.kind != MoveKind::Spell {
+            return false;
+        }
+        let side = self.fighters[caster].side;
+        // Aimed at one creature: an attack roll, or a save only one makes.
+        // A weapon attack made as part of a spell is not one of them: that
+        // spell is cast on its caster, and what flies at the target is the
+        // weapon.
+        let single = match first_harm(&m.effect) {
+            Some(Effect::Save(save)) => save.max_targets == Some(1),
+            Some(Effect::Strikes { strike, .. }) => !(strike.kind.weapon && strike.kind.spell),
+            Some(_) => true,
+            None => false,
+        };
+        for e in 0..self.fighters.len() {
+            let f = &self.fighters[e];
+            if f.side == side
+                || !f.alive()
+                || !f.reaction
+                || f.incapacitated()
+                || !self.reaches(e, caster)
+            {
+                continue;
+            }
+            let creature = f.creature;
+            let Some(i) = creature.reactions.iter().enumerate().position(|(i, r)| {
+                let ReactionTrigger::Cast { aimed } = r.trigger else {
+                    return false;
+                };
+                let costly = r.action.cost.is_some() || r.action.spell_slot_level.is_some();
+                (!aimed || (single && target == e))
+                    && (!costly || m.spell_slot_level.is_some())
+                    && f.reactions[i].available()
+                    && f.affords(&r.action)
+                    && f.can_cast(r.action.spell_slot_level)
+                    && self.can_take(e, &r.action)
+                    && self.within(e, caster, r.action.range.unwrap_or(COUNTER_RANGE))
+            }) else {
+                continue;
+            };
+            let answer = &creature.reactions[i].action;
+            self.fighters[e].charge(answer);
+            self.fighters[e].cast_spell_slot(answer.spell_slot_level);
+            self.fighters[e].spend_reaction(i);
+            // What is stopped outright is drunk in, by anything that keeps
+            // spells - see `Rider::SpellStore`.
+            if let (Effect::Counter, Some((pool, _, holds))) =
+                (&answer.effect, self.fighters[e].spell_store())
+            {
+                let stored = &mut self.fighters[e].resources[pool];
+                *stored = (*stored + m.spell_slot_level.unwrap_or(0)).min(holds);
+            }
+            // A save is the caster's, to keep hold of its spell; anything
+            // else simply stops it.
+            let stopped = match &answer.effect {
+                Effect::Save(save) => {
+                    !self
+                        .saving_throw(rng, caster, save.ability, save.dc, false)
+                        .0
+                }
+                _ => true,
+            };
+            let how = if stopped { "stops" } else { "fails to stop" };
+            let (stopper, casting) = (&creature.name, &self.fighters[caster].creature.name);
+            let text = format!("{stopper}'s {} {how} {casting}'s {}", answer.name, m.name);
+            if record {
+                if !line.is_empty() {
+                    line.push_str(" | ");
+                }
+                line.push_str(&format!("{} ({text})", m.name));
+            }
+            self.beat(FrameKind::Other, Some(e), Some(caster), text, None);
+            if stopped {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `me` has just dealt `victim` `dealt` damage, made up of `kinds` as it
+    /// was rolled: whatever of it `victim` throws back - see
+    /// [`Rider::ReflectDamage`] - `me` takes, as that same type.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reflect(
+        &mut self,
+        rng: &mut Rng,
+        me: usize,
+        victim: usize,
+        dealt: i32,
+        kinds: &[(crate::rules::DamageKind, i32)],
+        record: bool,
+        notes: &mut Vec<String>,
+    ) {
+        if dealt <= 0 || me == victim {
+            return;
+        }
+        let Some(reflected) = self.fighters[victim]
+            .creature
+            .riders
+            .iter()
+            .find_map(|r| match r {
+                Rider::ReflectDamage { kinds } => Some(kinds),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        let rolled: i32 = kinds.iter().map(|&(_, n)| n).sum();
+        let Some(&(kind, _)) = kinds.iter().find(|(k, n)| reflected.contains(k) && *n > 0) else {
+            return;
+        };
+        let matching: i32 = kinds
+            .iter()
+            .filter(|(k, _)| reflected.contains(k))
+            .map(|&(_, n)| n)
+            .sum();
+        // What got through of it, when something - a ward, a shell, a
+        // reaction - took a share of the whole.
+        let back = (i64::from(matching) * i64::from(dealt) / i64::from(rolled.max(1))) as i32;
+        let hurt = self.fighters[me].creature.reduction(kind).apply(back);
+        if hurt <= 0 {
+            return;
+        }
+        self.fighters[victim].dealt += i64::from(hurt);
+        self.apply_damage(rng, me, hurt);
+        if record {
+            notes.push(format!("{hurt} thrown back"));
+        }
+    }
+
+    /// `me` has just hurt `victim` with a move carrying `riders`: if it is
+    /// dead of it and the move raises what it kills, that is noted for the
+    /// start of `me`'s next turn. Dead, not down: a player character that
+    /// has only dropped is still its own.
+    pub(super) fn slain(&mut self, me: usize, victim: usize, riders: &[Rider]) {
+        let Some(which) = riders.iter().find_map(|r| match *r {
+            Rider::RaiseSlain { which } => Some(which),
+            _ => None,
+        }) else {
+            return;
+        };
+        let f = &self.fighters[victim];
+        let gone = !f.alive() && (f.dead || !f.creature.player_character);
+        if gone
+            && !f.is_summon()
+            && f.creature.is_creature_type("humanoid")
+            && !self.fighters[me]
+                .raising
+                .iter()
+                .any(|&(_, corpse)| corpse == victim)
+        {
+            self.fighters[me].raising.push((which, victim));
+        }
+    }
+
+    /// What `me` killed and can raise gets up, where it fell, with a turn of
+    /// its own from here on. The start of `me`'s turn.
+    pub(super) fn raise(&mut self, me: usize, log: &mut Option<Vec<String>>) {
+        for (which, corpse) in std::mem::take(&mut self.fighters[me].raising) {
+            let Some(seat) = self.summon(me, which) else {
+                continue;
+            };
+            self.place_beside(seat, corpse);
+            self.order.push(seat);
+            let text = format!(
+                "{} rises as {}'s {}",
+                self.fighters[corpse].creature.name,
+                self.fighters[me].creature.name,
+                self.fighters[seat].creature.name
+            );
+            if let Some(l) = log.as_mut() {
+                l.push(format!("r{} {text}", self.round));
+            }
+            self.beat(FrameKind::Other, Some(seat), Some(corpse), text, None);
+        }
+    }
+
+    /// `me` is about to land `conditions` on `victim` with a move carrying
+    /// `riders`: one that is borne by one creature at a time is lifted from
+    /// whoever had it, and one that can be broken out of leaves its price
+    /// with whoever it holds.
+    pub(super) fn hold(
+        &mut self,
+        me: usize,
+        victim: usize,
+        riders: &[Rider],
+        conditions: &[(Condition, crate::rules::Duration)],
+    ) {
+        for rider in riders {
+            match *rider {
+                Rider::OneAtATime => {
+                    for (i, f) in self.fighters.iter_mut().enumerate() {
+                        if i == victim {
+                            continue;
+                        }
+                        f.conditions.retain(|&(c, expiry)| {
+                            let mine = matches!(
+                                expiry,
+                                Expiry::TurnStart(who)
+                                    | Expiry::TurnEnd { who, .. }
+                                    | Expiry::Rounds { who, .. }
+                                    | Expiry::RoundsOrDamaged { who, .. } if who == me
+                            );
+                            !(mine && conditions.iter().any(|&(landed, _)| landed == c))
+                        });
+                    }
+                }
+                Rider::EscapeFor { roll } => self.fighters[victim].escape = Some((me, roll)),
+                _ => {}
+            }
+        }
+    }
+
+    /// Whoever `me` is about to swing at may turn the blow on one of `me`'s
+    /// own side - see [`Rider::RedirectAttacks`]. Who the swing lands on.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn redirect(
+        &mut self,
+        rng: &mut Rng,
+        me: usize,
+        target: usize,
+        reach: Reach,
+        kind: AttackKind,
+        record: bool,
+        notes: &mut Vec<String>,
+    ) -> usize {
+        // Whoever of its own side it can reach instead: the one closest to
+        // falling, which is who anybody choosing would choose.
+        let instead = |fight: &Self| {
+            let side = fight.fighters[me].side;
+            (0..fight.fighters.len())
+                .filter(|&i| {
+                    i != me
+                        && fight.fighters[i].side == side
+                        && fight.fighters[i].alive()
+                        && fight.in_reach(me, i, reach, Some(kind))
+                })
+                .min_by_key(|&i| fight.fighters[i].hp)
+        };
+        if self.fighters[me].turned_from != Some(target) {
+            let holder = &self.fighters[target];
+            let Some((ability, dc)) = holder.creature.riders.iter().find_map(|r| match *r {
+                Rider::RedirectAttacks { ability, dc } => Some((ability, dc)),
+                _ => None,
+            }) else {
+                return target;
+            };
+            // Not twice a turn, not while it cannot act, and not with nobody
+            // there to turn the blow on.
+            if holder.redirect_spent || holder.incapacitated() || instead(self).is_none() {
+                return target;
+            }
+            self.fighters[target].redirect_spent = true;
+            let (saved, _) = self.saving_throw(rng, me, ability, dc, false);
+            if saved {
+                return target;
+            }
+            self.fighters[me].turned_from = Some(target);
+        }
+        match instead(self) {
+            Some(other) => {
+                if record {
+                    notes.push(format!("turned on {}", self.fighters[other].creature.name));
+                }
+                if self.recording() {
+                    let name = |i: usize| self.fighters[i].creature.name.clone();
+                    let text = format!(
+                        "{} turns {}'s attack on {}",
+                        name(target),
+                        name(me),
+                        name(other)
+                    );
+                    self.beat(FrameKind::Other, Some(target), Some(me), text, None);
+                }
+                other
+            }
+            None => target,
+        }
+    }
+
     pub(super) fn react_to_landed(
         &mut self,
         rng: &mut Rng,
@@ -786,7 +1104,15 @@ mod tests {
         let (mut fight, mut rng) = fight_of(&roster, 21);
         let mut notes = Vec::new();
 
-        fight.react_to_being_hit(&mut rng, 0, 1, AttackKind::MELEE_WEAPON, true, &mut notes);
+        fight.react_to_being_hit(
+            &mut rng,
+            0,
+            1,
+            AttackKind::MELEE_WEAPON,
+            true,
+            true,
+            &mut notes,
+        );
         assert_eq!(fight.fighters[1].hp, 190, "the storm answers the blade");
         assert!(
             !fight.fighters[0].reaction,
@@ -795,12 +1121,28 @@ mod tests {
         assert!(notes.join(" ").contains("Wrath"), "{notes:?}");
 
         // Spent: a second hit in the same round answers nothing.
-        fight.react_to_being_hit(&mut rng, 0, 1, AttackKind::MELEE_WEAPON, false, &mut notes);
+        fight.react_to_being_hit(
+            &mut rng,
+            0,
+            1,
+            AttackKind::MELEE_WEAPON,
+            true,
+            false,
+            &mut notes,
+        );
         assert_eq!(fight.fighters[1].hp, 190);
 
         // Back on its own turn - but an arrow is not what it answers.
         refresh(&mut fight.fighters[0], &mut rng);
-        fight.react_to_being_hit(&mut rng, 0, 1, AttackKind::RANGED_WEAPON, false, &mut notes);
+        fight.react_to_being_hit(
+            &mut rng,
+            0,
+            1,
+            AttackKind::RANGED_WEAPON,
+            true,
+            false,
+            &mut notes,
+        );
         assert_eq!(fight.fighters[1].hp, 190);
         assert!(fight.fighters[0].reaction, "nothing was spent on an arrow");
     }
@@ -820,6 +1162,7 @@ mod tests {
                 0,
                 1,
                 AttackKind::MELEE_WEAPON,
+                true,
                 false,
                 &mut Vec::new(),
             );
