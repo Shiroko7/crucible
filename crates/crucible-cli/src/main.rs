@@ -9,8 +9,8 @@ mod report;
 
 use args::{parse_args, USAGE};
 use report::{
-    print_fights, print_monster_sweep, print_party_sweep, print_profile, print_sheet,
-    print_tactic_sweep, resize,
+    export_fights, muster, print_fights, print_monster_sweep, print_party_sweep, print_profile,
+    print_sheet, print_tactic_sweep,
 };
 
 fn main() -> ExitCode {
@@ -52,8 +52,17 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let creatures = resize(&parsed, args.copies.unwrap_or(0));
+    let creatures = muster(&args, &parsed, args.copies.unwrap_or(0));
     let roster: Vec<&Creature> = creatures.iter().collect();
+    if let Some(file) = &args.export {
+        return match export_fights(&args, &roster, file) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("crucible: cannot write {file}: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     print_sheet(&roster);
     print_profile(&args, &roster);
     print_monster_sweep(&args, &roster);

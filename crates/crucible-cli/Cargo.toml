@@ -12,3 +12,4 @@ path = "src/main.rs"
 
 [dependencies]
 crucible-core = { path = "../crucible-core" }
+serde_json = "1.0.151"

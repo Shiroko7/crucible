@@ -14,6 +14,11 @@ usage: crucible <scenario file> [options]
   --rollouts N  solver rollouts per candidate turn (default 16)
   --depth N     solver lookahead in rounds (default 4)
   --solver-n N  fights for the solver row (default 1000; it costs ~200x a row)
+  --apart N     feet between the two sides' front lines at the start (default 30)
+  --map WxH     the map in squares, across by down (default and least 40x30)
+  --no-grid     fight without a grid: everyone reaches everyone
+  --export F    write the worst, median and best fight of each playstyle to F
+                as JSON, for a viewer, and stop
 ";
 
 /// Playstyles swept for the party in a minimax. `Scattered` and `FocusFire` are
@@ -49,6 +54,9 @@ pub struct Args {
     pub sweep_samples: usize,
     pub budget: Budget,
     pub solver_samples: usize,
+    pub apart: u32,
+    pub grid: bool,
+    pub export: Option<String>,
 }
 
 impl Args {
@@ -76,9 +84,29 @@ pub fn parse_args() -> Result<Args, String> {
         sweep_samples: 2_000,
         budget: Budget::default(),
         solver_samples: 1_000,
+        apart: 30,
+        grid: true,
+        export: None,
     };
 
     while let Some(arg) = args.next() {
+        if arg == "--no-grid" {
+            out.grid = false;
+            continue;
+        }
+        if arg == "--map" {
+            let size = args.next().ok_or("`--map` needs a size, like 60x40")?;
+            let parsed = size
+                .split_once(['x', 'X'])
+                .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
+            out.budget.field =
+                Some(parsed.ok_or_else(|| format!("`{size}` is not a map size, like 60x40"))?);
+            continue;
+        }
+        if arg == "--export" {
+            out.export = Some(args.next().ok_or("`--export` needs a file name")?);
+            continue;
+        }
         let mut value = || {
             args.next()
                 .ok_or_else(|| format!("`{arg}` needs a value"))?
@@ -97,6 +125,7 @@ pub fn parse_args() -> Result<Args, String> {
             "--rollouts" => out.budget.rollouts = value()? as u32,
             "--depth" => out.budget.depth = value()? as u32,
             "--solver-n" => out.solver_samples = value()? as usize,
+            "--apart" => out.apart = value()? as u32,
             other if other.starts_with('-') => return Err(format!("unknown option `{other}`")),
             other => path = Some(other.to_string()),
         }

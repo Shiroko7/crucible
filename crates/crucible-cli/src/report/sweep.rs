@@ -3,7 +3,7 @@
 use crate::args::{Args, MONSTER_STYLES, PARTY_STYLES};
 use crate::report::sheet::strip_number;
 use crucible_core::creature::Creature;
-use crucible_core::sim::{evaluate_teams, Policy, Summary};
+use crucible_core::sim::{arena, evaluate_teams, Policy, Summary};
 /// Rebuild the roster with `copies` of each creature on the first side, or leave
 /// it alone when `copies` is zero.
 pub fn resize(parsed: &[Creature], copies: usize) -> Vec<Creature> {
@@ -25,6 +25,16 @@ pub fn resize(parsed: &[Creature], copies: usize) -> Vec<Creature> {
     }
     out.extend(parsed.iter().filter(|c| c.team == 1).cloned());
     out
+}
+
+/// [`resize`], with everyone given somewhere to stand unless the run is
+/// without a grid.
+pub fn muster(args: &Args, parsed: &[Creature], copies: usize) -> Vec<Creature> {
+    let mut creatures = resize(parsed, copies);
+    if args.grid {
+        arena::place(&mut creatures, args.apart);
+    }
+    creatures
 }
 
 /// "How many does it take" as a minimax, because the honest answer depends on who
@@ -50,7 +60,7 @@ pub fn print_party_sweep(args: &Args, parsed: &[Creature], max: usize) {
     );
 
     for size in 1..=max {
-        let creatures = resize(parsed, size);
+        let creatures = muster(args, parsed, size);
         let roster: Vec<&Creature> = creatures.iter().collect();
         let mut seed = args.seed.wrapping_add(1_000 * size as u64);
 

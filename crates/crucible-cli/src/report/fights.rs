@@ -1,9 +1,17 @@
 //! Replayable example fight narrations.
 
-use crate::args::Args;
+use crate::args::{Args, PARTY_STYLES};
 use crucible_core::creature::Creature;
 use crucible_core::prob::Rng;
-use crucible_core::sim::{run_teams, Outcome, Policy, Side};
+use crucible_core::sim::showcase::{picks, ranked, showcase};
+use crucible_core::sim::{run_teams, Policy};
+
+/// Enough fights to have a genuine worst and best case to choose between,
+/// without paying for a second full evaluation.
+fn probe(args: &Args) -> usize {
+    args.samples.min(2_000)
+}
+
 /// Replayable example fights, chosen from a probe run rather than cherry-picked by
 /// hand: the worst case for the first side, the median, and the best.
 pub fn print_fights(args: &Args, roster: &[&Creature]) {
@@ -11,46 +19,18 @@ pub fn print_fights(args: &Args, roster: &[&Creature]) {
         return;
     }
     let policies = [Policy::Greedy; 2];
-    // Enough fights to have a genuine worst and best case to choose between,
-    // without paying for a second full evaluation.
-    let probe = args.samples.min(2_000);
+    let probe = probe(args);
+    let runs = ranked(args.seed, roster, policies, probe, args.cap, args.budget);
 
-    let mut runs: Vec<(u64, Outcome)> = (0..probe as u64)
-        .map(|stream| {
-            let mut rng = Rng::with_stream(args.seed, stream);
-            let mut log = None;
-            (
-                stream,
-                run_teams(&mut rng, roster, policies, args.cap, args.budget, &mut log),
-            )
-        })
-        .collect();
-
-    // Rank by how the first side did: winning dominates, then its own HP, then how
-    // far into the opponent it got. That last term is what separates the runs in a
-    // matchup it never wins, where every fight leaves it on zero.
-    runs.sort_by_key(|(_, o)| {
-        (
-            o.winner == Some(Side::A),
-            o.hp_left[0].max(0),
-            -o.hp_left[1],
-        )
-    });
-
-    let picks: Vec<(&str, usize)> = [
-        ("worst for the first side", 0),
-        ("median", runs.len() / 2),
-        ("best for the first side", runs.len() - 1),
-    ]
-    .into_iter()
-    .take(args.fights)
-    .collect();
-
-    for (label, at) in picks {
+    for (label, at) in picks(runs.len()).into_iter().take(args.fights) {
         let (stream, _) = runs[at];
         let mut rng = Rng::with_stream(args.seed, stream);
         let mut log = Some(Vec::new());
         let outcome = run_teams(&mut rng, roster, policies, args.cap, args.budget, &mut log);
+        let label = match label {
+            "median" => label.to_string(),
+            other => format!("{other} for the first side"),
+        };
         println!(
             "--- {label} (seed {} stream {stream}, of {probe} probed) ---",
             args.seed
@@ -76,6 +56,30 @@ pub fn print_fights(args: &Args, roster: &[&Creature]) {
             ),
         }
     }
+}
+
+/// The worst, median and best fight of each party playstyle against a greedy
+/// monster, recorded frame by frame and written to `file` as JSON - what the
+/// viewers play back.
+pub fn export_fights(args: &Args, roster: &[&Creature], file: &str) -> std::io::Result<()> {
+    let bundle = showcase(
+        &args.path,
+        args.seed,
+        roster,
+        &PARTY_STYLES,
+        Policy::Greedy,
+        probe(args),
+        args.cap,
+        args.budget,
+    );
+    std::fs::write(file, serde_json::to_string(&bundle)?)?;
+    println!(
+        "wrote {} fights ({} playstyles, {} probed each) to {file}",
+        bundle.entries.len(),
+        PARTY_STYLES.len(),
+        bundle.probed
+    );
+    Ok(())
 }
 
 pub fn rounds(n: u32) -> String {
