@@ -1,0 +1,21 @@
+[package]
+name = "crucible-server"
+version = "0.1.0"
+description = "A local server for the web app: the scenario library, simulations, and the built front end."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum = "0.8.9"
+crucible-core = { path = "../crucible-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "net"] }
+toml = "1.1.6"
+tower-http = { version = "0.7.1", features = ["fs"] }
+
+[dev-dependencies]
+headless_chrome = "1.0.22"
+tokio = { version = "1.53.2", features = ["rt-multi-thread"] }
+tower = { version = "0.5.3", features = ["util"] }

@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/crucible-cli", "crates/crucible-core"]
+members = [
+    "crates/crucible-cli",
+    "crates/crucible-core",
+    "crates/crucible-server",
+]
 
 [workspace.package]
 edition = "2021"
