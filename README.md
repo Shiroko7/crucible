@@ -52,7 +52,7 @@ times, reported.
 | `analysis` | `sim::analysis` | win and death probability, CVaR of the bad tail, exact pacing check |
 | policies | `sim::policy` | eight of the nine from `DESIGN.md`: `solver`, `nova`, `greedy`, `focus-fire`, `scattered`, `in-order`, `defensive`, `attrition`, `thrifty` |
 | search | `sim::fight` | flat Monte Carlo over one turn, to a depth budget |
-| content | `content/` | data-driven PC (`content/characters/`) and Monster (`content/monsters/`) formatted configurations |
+| content | `content/` | one example character (`content/characters/`) and one example monster (`content/monsters/`) as data; your own go in the gitignored `content/local/` |
 | event pipeline | `sim::fight` | riders fire at fixed points (at the start of a turn, as an attack is rolled, on being targeted, on a hit's damage, as damage lands, on a hit, as a condition lands, on a failed save, on a save for half, at the end of a turn); they do not yet subscribe to hooks |
 | `fitted` policy | | blocked: it means fitting parameters to logged play, and there are no logs |
 
@@ -91,6 +91,20 @@ lot:
 | `Swallow`, `Digestion`, `Regurgitate` | a purple worm's, a behir's or a tarrasque's gullet |
 | a `Reaction` move with a trigger | a snap at whoever is dragged into reach, a spray from a breached shell |
 | `mouth`, `reach`, `tactic` | a whirlpool, a kraken or a dragon turtle its enemies circle, and how it swims at them |
+| `ResistNonmagical`, `MagicWeapons` | "Bludgeoning, Piercing and Slashing from nonmagical attacks": halved unless the attack is a spell's, an enchanted weapon's, or made by something whose weapons all are |
+| `MirrorDamage` | a mind that takes no psychic damage and hands it to every creature within ten feet instead |
+| `SwapWhenHit` | a reaction that trades places with one of its own kind as the blow lands, which is hit in its stead |
+| `PhaseThrough`, `NeverProvokes` | something that walks through its enemies, hurting each one it passes through, and that nothing gets a swing at for leaving |
+| `Displace` | space folded around one creature: thrown somewhere else on a failed save, with a burst where it stood |
+| `Hide`, `Hidden`, `Lit` | a Stealth check against passive Perception, allowed only in dim light or darkness; unseen until the first attack roll |
+| `BonusDamageWithAdvantage`, `AllHit`, `EachInReach` | claws that hurt more on a roll with advantage, what a Multiattack adds when every blow lands on one target, one swing at each creature in reach |
+| `InitiativeAdvantage` | an ambusher's two dice for its place in the order |
+| `Chains` | a bolt that leaps from each creature that fails its save to the next one near it |
+| `RideLine` | a caster who becomes a line of lightning and steps out at the far end of it |
+| `Anchored`, `Hinders` | a whirlpool or a storm put down at a distance and left there: it drags at what starts a turn in it, and is difficult terrain |
+| `HalfOnMiss`, `SparesTarget`, `TakesBonusAction` | an enchanted arrow: half its damage on a miss, a burst around the target that leaves the target out, cast and loosed as one action and bonus action |
+| `AlsoCosts` | one cast paid out of two pools at once - an essence spell taken at its maximum for a charge |
+| `SaveAdvantage`, `Shocked` | reflexes quick enough for advantage on one kind of save; a jolt that stops opportunity attacks |
 
 A creature has one reaction a round, shared by every reaction it knows, and
 none while Incapacitated - unless its stat block grants more (`reactions N`),
@@ -203,9 +217,8 @@ scores the same as the move it is meant to beat.
 ### Trying it
 
 ```bash
-cargo run --release -p crucible-cli -- scenarios/gio-vs-adult-red-dragon.crucible
-cargo run --release -p crucible-cli -- scenarios/gio-vs-ogre.crucible
-cargo run --release -p crucible-cli -- scenarios/storm-cleric-vs-skeletons.crucible
+cargo run --release -p crucible-cli -- scenarios/cleric-vs-brute.crucible
+cargo run --release -p crucible-cli -- scenarios/two-clerics-vs-four-brutes.crucible
 ```
 
 Each prints what it read — including traits and resource pools, since
@@ -216,6 +229,138 @@ fights chosen by how the first side did: worst, median, best.
 The `solver` row runs a fight inside every fight, so it gets its own sample count
 (`--solver-n`, default 1000) and the table prints `n` per row rather than hiding
 the difference in confidence.
+
+### The grid
+
+A scenario is played on a grid of five-foot squares, never smaller than 40 by
+30 of them - 200 feet by 150 - and as big as `--map WxH` (or the web app's map
+setting) asks. The two sides line up 30 feet apart (`--apart`) in the middle of
+it. A creature covers `speed:` feet a turn (30 unless it says) and starts on
+`at: x, y` if the scenario names a square. A move reaches `range N` feet - 5 for
+a melee attack and 60 for anything else unless it says - and `area N` makes an
+area a radius around its target rather than everything in range.
+
+Everyone chooses its ground before it acts. Something that fights hand to hand
+walks up to its target, and Dashes when nothing it has reaches. Something that
+fights from range backs away instead: to the square furthest from its nearest
+enemy that still keeps as many of them in range as it can - though not once an
+enemy is already beside it. And whoever is holding up an emanation it cast - a
+ring of spirits - walks to where the most enemies are inside it. An emanation
+catches what it is carried over, and what walks into it, there and then, as
+well as whoever starts a turn inside.
+
+`pushed` and `pulled` move their victim ten feet on the grid, a rout runs it
+its speed away, and a teleport puts its user somewhere else.
+
+Walking out of an enemy's reach is an opening for it: one swing of its first
+melee attack, for its reaction. Being shoved, routed or teleported is not, nor
+is leaving with a Disengage. Both sides of that are decided by how a creature
+is played. Whoever would have to take the blow stays and fights what it can
+reach from where it stands - unless it is set on finishing one enemy
+(focus-fire) or spending everything as it comes (nova), which go regardless,
+or playing it safe and bloodied (defensive), which never goes. And whoever
+could deal it weighs it against the best other use it has for a reaction - a
+move of its own waiting on a trigger, at its damage and its `worth` - and
+takes whichever is worth more; except that nova and in-order always swing, and
+defensive, once bloodied, keeps its reaction for whatever it has that turns a
+blow aside.
+
+Something that walks through other creatures does so on purpose when it is closing to
+strike: through as many enemies as its speed allows, a square somebody stands on costing
+two, and out to a free one. What is thrown by folded space, or trades places with an ally,
+provokes nothing either.
+
+Light is where a creature stands, not a map of it: a trait on the creature, which a
+scenario can override. It gates the moves that need the dark and nothing else - nobody is
+blinded by darkness, and darkvision changes nothing.
+
+An area save is worth, to whatever ranks moves, what it does to everyone it would catch -
+not only to whoever it is aimed at.
+
+A heal reaches as far as it says - a touch when it says nothing - and whoever means to
+heal walks to its patient first. A heal that can go on the bonus action goes there, and
+the action is kept for something else. Whoever holds an emanation closes on its target
+until somebody is inside it, and raises it from where its target will be. Taking aim is
+standing still. And something with a blow that cannot reach yet runs at its target
+rather than casting a spell that would do nothing anybody here can count.
+
+Who a creature goes for is whoever is holding a spell up, then whoever is nearest, then
+whoever is nearest to falling - except for `focus-fire` (the most wounded), `scattered`
+(a different one each) and `in-order` (as they are listed). A ranged attack is at
+disadvantage with an enemy at its maker's elbow or at long range (`long N`), a prone
+target is easier to hit only from beside it, and somebody standing in the way is half
+cover. Something aiming from range stands clear of what its enemies are holding up and,
+where it can, out of a knot with its own side.
+
+Everything loaded from a file can Dodge, Disengage, Help, Shove and Grapple, each taken
+only when its moment has come: Dodge by something playing it safe once it is bloodied
+and beset, Disengage by something that fights from range and is held in a reach, Help
+when the advantage is worth more to an ally than its own action is, Shove for the same
+opening against a target that can be put on the ground, Grapple against something that
+fights from a distance and can still walk away. `in-order` never reaches for any of them.
+
+This is a first cut. Not on the grid yet: walls, objects and cover from them, flying,
+cones, lines other than one its caster rides, buff ranges, the Ready action, and Sneak
+Attack's "ally within 5 feet", which is still read off who is fighting what. A creature
+with a `mouth` keeps its zones. `--no-grid` runs the old model, where everyone
+reaches everyone, and the library runs that way whenever a creature has nowhere
+to stand - which is what the exact-agreement tests rely on.
+
+### Watching a fight
+
+```bash
+make            # builds the web app, starts the server; open http://127.0.0.1:8000
+```
+
+The library shows every scenario under `scenarios/` as a card: who, against
+whom. Opening one runs it and gives a prediction - how often the party wins
+under each playstyle, how long it takes and how many of them go down - with the
+worst, median and best fight of each to watch.
+
+A fight plays beat by beat. Initiative is rolled one creature at a time, each
+joining the turn order as it does; whoever's turn it is lights up; and every
+roll lands in a dice tray with what it had to beat - an attack against an armor
+class, a saving throw against a DC - stamped hit, miss, saved or failed. On the
+grid a spell is cast in a circle of light and a blade lunges, a miss is called
+out, damage bursts in the colour of its type, healing rises green, and a potion
+bubbles. Left and right step through it, space plays it, up and down move to the
+next fight, escape goes back. The address keeps up, so
+`/scenario?path=scenarios/cleric-vs-brute.crucible&fight=2&frame=5` reopens the same
+moment.
+
+The dice are the ones the fight actually rolled: a recorded fight reads them off
+the generator as they fall, so nothing about how a fight resolves changes when
+it is being watched.
+
+The same page is where a fight is set up. **Creatures** lists every character
+and monster on disk, by which of the two it is. A new one is made by pasting
+whatever there is of it - a stat block out of a book, a character sheet, a few
+lines - and a model writes its file, once: the loader checks what it wrote and
+sends back what it refuses, and the draft arrives marked unreviewed with a list
+of what the model left out or guessed. From there it is a sheet of fields with
+the stat block it loads as beside it, changed by typing or by saying what to
+change; the file itself is one tab away, for what the sheet has no field for.
+**New scenario** puts creatures from that roster on two sides, however many of
+each, and saves the result as a `.crucible` file - in a collection, which is a
+folder under `scenarios/`, so a campaign is `local/its-name`. Nothing that
+would not load or run is saved.
+
+The model is the Claude Code command line, run without tools: drafting needs
+`claude` installed and signed in (`CRUCIBLE_AGENT` names another program,
+`CRUCIBLE_AGENT_MODEL` another model). It is asked only when a creature is
+drafted or changed that way - never when a fight is run.
+
+What you make is yours and stays on your machine. The repo commits one example
+character, one example monster and two scenarios made of them, and nothing
+else: everything the app creates goes under `content/local/` and
+`scenarios/local/` unless you say otherwise, and both are gitignored. The app
+marks each creature *private* or *example* and warns before saving anything
+where it would be committed.
+
+It is two parts. `crates/crucible-server` is a local server that reads and
+writes those files, runs the simulations natively and serves the page; `web/` is the
+page, a Svelte app built to static files (`make web` needs Node). `crucible
+<scenario> --export replays.json` writes the same recorded fights to a file.
 
 Ingestion is designed so the agent is a **compile step, not a runtime one**: it
 checks each ability against the registry, writes only what is genuinely
@@ -261,6 +406,12 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt
 ```
 
+`make check` runs all of that and type-checks the web app. `make e2e` builds the
+web app and drives it in a real browser from a Rust test
+(`crates/crucible-server/tests/web.rs`): it needs Chrome or Edge, so it is not
+part of `cargo test`. `make dev-web` serves the page with hot reload against a
+server started with `make server`.
+
 On Windows with the GNU toolchain, `proptest` reaches `windows-sys` through
 `getrandom`, which needs mingw-w64 **binutils** on `PATH` — `rustup` ships a
 linker but not `dlltool`. `winget install BrechtSanders.WinLibs.POSIX.MSVCRT`
@@ -269,12 +420,14 @@ supplies it.
 ## Content and Configuration
 
 Creatures are formatted data configurations rather than hardcoded simulation logic:
-- `content/characters/`: Player Characters (e.g. `gio.toml`), defining class, level, stats, resources, and known feature plugins.
-- `content/monsters/`: Monster statblocks (e.g. `adult-red-dragon.toml`, `ogre.toml`).
-- `scenarios/`: Encounters referencing combatants via `source:` (e.g. `source: content/characters/gio.toml`).
+- `content/characters/`: one example Player Character (`cleric.toml`), defining class, level, stats, resources, and known feature plugins.
+- `content/monsters/`: one example Monster statblock (`brute.toml`).
+- `scenarios/`: Encounters referencing combatants via `source:` (e.g. `source: content/characters/cleric.toml`).
+- `content/local/characters/`, `content/local/monsters/`, `scenarios/local/`: your own, gitignored.
 
-SRD material is CC-BY-4.0 and ships with attribution. Non-SRD material is loaded from local
-data files and never committed — `scenarios/local/` is gitignored for that. The Monad Plugin
+SRD material is CC-BY-4.0 and ships with attribution. Characters, monsters and scenarios of
+your own - whatever they are drawn from - are loaded from local data files and never
+committed: `content/local/` and `scenarios/local/` are gitignored for that. The Monad Plugin
 Architecture ensures that new or missing mechanics are implemented as reusable plugins,
 while PCs and monsters are expressed purely as structured data. Each plugin lives in its own
 file under `crates/crucible-core/src/features/`, in the narrowest folder that covers every
@@ -293,4 +446,9 @@ failed save, and doubles it calls up and commands. `tests/storm_priest.rs` does 
 divine caster: a pool of charges spent on a burst, on a dying ally or on turning the Undead,
 a storm that answers whoever hits it in melee, a cast taken at its maximum for one of those
 charges, spirits raised in a ring, and lightning that shoves what it hits.
+`tests/warped_ambushers.rs` does it for creatures that are not quite where they seem: a hide
+only magic bites, a walk through its enemies, places traded as a blow lands, space folded
+around a victim, a mind that hands its hurt to whoever is near, and an ambush out of the dark.
+`tests/storm_thrown_by_hand.rs` does it for a caster's harder shapes: a bolt that chains, a
+line that is ridden, a whirlpool placed at a distance, and a thrown blade that bursts.
 `dsl::scenario`'s module docs list the move and trait syntax.
